@@ -1,0 +1,32 @@
+[workspace]
+members = ["crates/protocol", "crates/web"]
+default-members = ["."]
+resolver = "2"
+
+[package]
+name = "demodex"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = { version = "0.8", features = ["ws", "macros"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+demodex-protocol = { version = "0.1.0", path = "crates/protocol" }
+futures-util = "0.3.34"
+ractor = "0.15"
+ractor_wormhole = { git = "https://github.com/0x53A/ractor-wormhole", rev = "766f4ed4b7fe5e411ea2ad2ca7b7cefbd372d917", version = "0.1.0", features = ["serde"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-tungstenite = "0.30.0"
+tower = { version = "0.5.3", features = ["util"] }
+tower-http = { version = "0.7.1", features = ["fs", "trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.26.1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tower = { version = "0.5.3", features = ["util"] }

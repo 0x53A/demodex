@@ -1,0 +1,15 @@
+[package]
+name = "demodex-protocol"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ractor = "0.15"
+ractor_wormhole = { git = "https://github.com/0x53A/ractor-wormhole", rev = "766f4ed4b7fe5e411ea2ad2ca7b7cefbd372d917", version = "0.1.0", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[build-dependencies]
+quote = "1.0.47"
+sha2 = "0.11.0"
+syn = { version = "3.0.6", features = ["full"] }

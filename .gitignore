@@ -1,0 +1,17 @@
+/target
+/web/node_modules
+/web/dist
+/web/.pwa-dist
+/web/.rust-dist
+/.direnv
+/.demodex
+/.demodex-host
+/workspace
+/.host-build-env
+/.cargo-build
+/result
+/.releases
+__pycache__/
+*.pyc
+*.qcow2
+*.img

@@ -1,0 +1,45 @@
+:root{font-family:system-ui,sans-serif;color:#e8e5df;background:#141615;font-synthesis:none;color-scheme:dark}*{box-sizing:border-box}body{margin:0}header{height:64px;border-bottom:1px solid #3b403a;display:flex;align-items:center;justify-content:space-between;padding:0 24px}.brand{color:#ff792f;font:700 19px monospace;letter-spacing:2px;text-decoration:none}.brand span{color:#999f95;font-size:12px;letter-spacing:0}.indicator,.status,.item-kind{font:11px monospace;letter-spacing:1px;color:#91b88b}h1{font-size:32px;letter-spacing:-1px;font-weight:600}h2{font-size:14px;font-weight:600}p{line-height:1.6}button,input,textarea{font:inherit;border:1px solid #4c5248;border-radius:0}button{background:#242823;color:#e8e5df;padding:10px 14px;cursor:pointer;min-height:42px}button:hover{border-color:#ff792f}button:disabled{opacity:.45;cursor:default}button.primary{background:#ff792f;color:#171510;border-color:#ff792f;font-weight:600}input,textarea{width:100%;background:#101210;color:#f0eee8;padding:12px}textarea{min-height:90px;resize:vertical}label{display:grid;gap:8px;margin:18px 0;font-size:13px}label .muted{white-space:pre-wrap}fieldset{border:1px solid #3b403a;margin:16px 0}.layout{display:grid;grid-template-columns:260px minmax(0,1fr);min-height:calc(100dvh - 64px)}aside{border-right:1px solid #3b403a;padding:20px}.section-title{display:flex;align-items:center;justify-content:space-between;gap:12px}.session{width:100%;text-align:left;margin-top:12px;display:grid;gap:8px}.session span{font:12px monospace;color:#9aaa91}.chosen{border-left:3px solid #ff792f}main{min-width:0;padding:24px;max-width:1100px;width:100%}.login{max-width:500px;margin:8vh auto}.login h1,.empty h1{font-size:44px}.muted{color:#a3aa9e;font-size:13px}.error{border-left:3px solid #f2594e;background:#321d1b;padding:12px;overflow-wrap:anywhere}.error button{margin-left:12px}.session-heading{display:flex;align-items:center;gap:16px;flex-wrap:wrap}.session-heading h1{margin-right:auto}.conversation{margin:24px 0}article{padding:18px;border-top:1px solid #343a32}article.user{border-left:2px solid #ff792f;background:#1b201b}.item-kind{margin-bottom:12px}pre{font:13px/1.65 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0}code{font-size:13px;color:#ffb079}details{padding:10px 0}summary{cursor:pointer;color:#a3aa9e}.approval{border:1px solid #ff792f;padding:20px;margin:20px 0}.approval button,.setup>button{margin-right:8px;margin-top:8px}.composer{position:sticky;bottom:0;background:#141615;padding:14px 0}.composer>div{display:flex;gap:8px;margin-top:8px}.diagnostics{margin-top:20px}.back{display:none}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}.empty{padding-top:15vh}.setup{max-width:680px}@media(max-width:700px){header{padding:0 16px}.brand span{display:none}.layout{display:block}.layout.detail aside{display:none}.layout:not(.detail) aside{border-right:0;border-bottom:1px solid #3b403a}.layout:not(.detail) main:has(.empty){display:none}main{padding:16px}.back{display:block}.session-heading{gap:10px}.session-heading h1{width:100%;font-size:26px}.login h1,.empty h1{font-size:36px}.composer{padding-bottom:max(14px,env(safe-area-inset-bottom))}}
+:root .runtime-panel,.environment-card{border:1px solid #3b403a;padding:18px;margin:20px 0}.environment-nav{width:100%;margin-bottom:20px}.resource-fields{display:grid;grid-template-columns:1fr 1fr;gap:16px}.checkbox{display:flex;align-items:center}.checkbox input{width:20px;height:20px}.environment-actions{display:flex;gap:8px;flex-wrap:wrap}.runtime-panel a{color:#ff9b61}
+
+/* The application frame stays inside the viewport; each panel owns its scroll. */
+html,body,#app{height:100%;overflow:hidden}
+#app{height:100dvh;display:flex;flex-direction:column}
+header{flex:0 0 64px;background:#141615;z-index:1}
+.layout{flex:1;min-height:0;overflow:hidden}
+aside{min-height:0;overflow-y:auto;overscroll-behavior:contain}
+.layout>main{height:100%;min-height:0;overflow-y:auto;overscroll-behavior:contain}
+.login{overflow-y:auto;min-height:0}
+.layout>main.chat-main{display:flex;flex-direction:column;overflow:hidden;padding-bottom:0}
+.session-heading{flex:none;border-bottom:1px solid #3b403a;padding-bottom:12px}
+.session-heading h1{font-size:24px;margin:0 auto 0 0;overflow-wrap:anywhere}
+.transcript{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding:12px 12px 16px 0}
+.transcript:focus-visible{outline:1px solid #ff792f;outline-offset:-1px}
+.conversation{margin:16px 0}
+.composer{position:static;flex:none;border-top:1px solid #3b403a;padding:12px 0 max(12px,env(safe-area-inset-bottom))}
+.composer textarea{display:block;height:80px;min-height:52px;max-height:25dvh}
+.activity{display:flex;align-items:center;gap:10px;padding:20px 18px;color:#91b88b;font:13px monospace}
+.activity.waiting{color:#ff9b61}
+.app-notice{flex:none;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 16px;border-bottom:1px solid #ff792f;background:#292017;color:#ffbf93;font-size:13px;overflow-wrap:anywhere}
+.app-notice button{flex:none}
+.global-error{flex:0 1 auto;min-height:0;max-height:40dvh;overflow-y:auto}
+.activity-marker{width:8px;height:8px;background:currentColor;animation:working-pulse 1.4s ease-in-out infinite}
+@keyframes working-pulse{50%{opacity:.25}}
+@media(prefers-reduced-motion:reduce){.activity-marker{animation:none}}
+@media(max-width:700px){
+  .layout>aside{height:100%}
+  .session-heading h1{width:auto;font-size:20px}
+  .session-heading{gap:8px}
+  .transcript{padding-right:0}
+  .composer textarea{height:64px}
+}
+
+select{font:inherit;border:1px solid #4c5248;border-radius:0;padding:10px;background:#101210;color:#f0eee8;width:100%}.host-picker{overflow-wrap:anywhere}.session small{overflow-wrap:anywhere}
+.layout.connections-page{display:block}
+.layout.connections-page>aside{display:block;height:100%;max-width:720px;margin:auto;border:0}
+.layout.connections-page>main,.connections-page .environment-nav,.connections-page .section-title,.connections-page .session{display:none}
+.connections-page .host-picker>summary{display:none}
+.connection{padding:16px 0;display:grid;gap:8px}
+.connection-open{display:grid;text-align:left;gap:8px;width:100%;overflow-wrap:anywhere}
+.connection-open small{color:#a3aa9e}
+.connection>div{display:flex;gap:8px}
+header{gap:12px}
