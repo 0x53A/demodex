@@ -65,6 +65,10 @@ pub enum Operation {
         id: String,
         text: String,
     },
+    UploadImage {
+        id: String,
+        bytes: Vec<u8>,
+    },
     Interrupt {
         id: String,
     },

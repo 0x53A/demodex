@@ -1,3 +1,4 @@
+mod uploads;
 mod manager;
 mod orchestrator;
 mod rpc;
@@ -51,6 +52,10 @@ struct Cli {
     /// Run the persistent session API without serving any frontend assets.
     #[arg(long)]
     api_only: bool,
+    /// Accept these exact Tailscale login identities on a private proxy socket.
+    /// TCP endpoints always require tokens. Serve must strip client identity headers.
+    #[arg(long)]
+    tailscale_user: Vec<String>,
 }
 #[derive(Subcommand)]
 enum Command {
@@ -153,6 +158,22 @@ async fn main() -> Result<()> {
         orchestrator:orchestrator.clone(),
         commands: Arc::new(tokio::sync::Mutex::new(())),
     };
+    let proxy = if cli.tailscale_user.is_empty() {
+        None
+    } else {
+        anyhow::ensure!(!cli.allowed_origin.is_empty(), "Tailscale identity requires explicit allowed origins");
+        let path = cli.data_dir.join("tailscale.sock");
+        // The data directory is owner-only and its manager lock is held. Only
+        // replace a stale socket; never remove an unrelated file or symlink.
+        if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+            use std::os::unix::fs::FileTypeExt;
+            anyhow::ensure!(metadata.file_type().is_socket(), "proxy socket path is not a socket");
+            std::fs::remove_file(&path)?;
+        }
+        let listener = tokio::net::UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        Some((listener, wormhole::proxy_router(app.clone(), cli.allowed_origin.clone(), cli.tailscale_user)))
+    };
     let mut router = Router::new().nest("/api", api(app.clone())).merge(wormhole::router(app,cli.allowed_origin));
     if !cli.api_only { router = router.fallback_service(
         tower_http::services::ServeDir::new(&cli.web_dir).not_found_service(
@@ -170,16 +191,32 @@ async fn main() -> Result<()> {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         if let Err(error)=watcher.monitor().await {tracing::warn!("runtime monitor: {error:#}");}
     }});
-    let served=axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let mut terminate=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("register SIGTERM");
-            tokio::select! {_=tokio::signal::ctrl_c()=>{},_=terminate.recv()=>{}}
-        })
-        .await;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let shutdown = tokio::spawn(async move {
+        let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("register SIGTERM");
+        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+        let _ = shutdown_tx.send(true);
+    });
+    let proxy_shutdown = shutdown_rx.clone();
+    let proxy_task = tokio::spawn(async move {
+        if let Some((listener, router)) = proxy {
+            axum::serve(listener, router).with_graceful_shutdown(wait_shutdown(proxy_shutdown)).await
+        } else {
+            Ok(())
+        }
+    });
+    let served = axum::serve(listener, router)
+        .with_graceful_shutdown(wait_shutdown(shutdown_rx)).await;
+    shutdown.abort();
+    proxy_task.abort();
     monitor.abort();
     orchestrator.shutdown().await;
     served?;
     Ok(())
+}
+
+async fn wait_shutdown(mut receiver: tokio::sync::watch::Receiver<bool>) {
+    let _ = receiver.wait_for(|stopping| *stopping).await;
 }
 
 fn api(app: App) -> Router {

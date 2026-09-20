@@ -32,15 +32,45 @@ use tower::ServiceExt;
 struct Endpoint {
     app: App,
     origins: Arc<Vec<String>>,
+    tailscale_users: Arc<Vec<String>>,
 }
 
 pub fn router(app: App, origins: Vec<String>) -> Router {
-    Router::new()
-        .route("/wormhole", get(upgrade))
-        .with_state(Endpoint {
+    endpoint_router(app, origins, Vec::new())
+}
+
+// This router must only be attached to the private Tailscale proxy socket.
+pub fn proxy_router(app: App, origins: Vec<String>, users: Vec<String>) -> Router {
+    endpoint_router(app, origins, users)
+}
+
+fn endpoint_router(app: App, origins: Vec<String>, users: Vec<String>) -> Router {
+    let mut routes = Router::new().route("/wormhole", get(upgrade));
+    if !users.is_empty() {
+        // Serve's Unix proxy may strip the /wormhole mount prefix. Keep this
+        // alias off the TCP router, whose root can serve the embedded PWA.
+        routes = routes.route("/", get(upgrade));
+    }
+    routes.with_state(Endpoint {
             app,
             origins: Arc::new(origins),
+            tailscale_users: Arc::new(users),
         })
+}
+
+fn tailscale_authenticated(headers: &HeaderMap, users: &[String], origins: &[String]) -> bool {
+    let mut identities = headers.get_all("tailscale-user-login").iter();
+    let Some(login) = identities.next().and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    identities.next().is_none()
+        && users.iter().any(|allowed| allowed == login)
+        && headers.get("origin").and_then(|v| v.to_str().ok())
+            .is_some_and(|origin| origins.iter().any(|allowed| allowed == origin))
+}
+
+fn login_allowed(token: &str, expected: &str, identity: bool) -> bool {
+    token == expected || (token.is_empty() && identity)
 }
 
 fn origin_allowed(headers: &HeaderMap, origins: &[String]) -> bool {
@@ -67,9 +97,10 @@ async fn upgrade(
     if !origin_allowed(&headers, &endpoint.origins) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let identity = tailscale_authenticated(&headers, &endpoint.tailscale_users, &endpoint.origins);
     ws.max_message_size(8 * 1024 * 1024)
         .on_upgrade(move |socket| async move {
-            if let Err(error) = connection(socket, endpoint.app).await {
+            if let Err(error) = connection(socket, endpoint.app, identity).await {
                 tracing::debug!("browser connection ended: {error:#}");
             }
         })
@@ -86,7 +117,7 @@ impl Drop for Actors {
     }
 }
 
-async fn connection(mut socket: WebSocket, app: App) -> Result<()> {
+async fn connection(mut socket: WebSocket, app: App, identity: bool) -> Result<()> {
     // Negotiate in stable JSON before creating any actors or decoding the
     // transport's binary messages. No authentication token is needed yet.
     socket
@@ -176,8 +207,8 @@ async fn connection(mut socket: WebSocket, app: App) -> Result<()> {
         while let Some(Login::Authenticate { version, token, reply }) = ctx.rx.recv().await {
             let result = if version != VERSION {
                 Err(format!("Protocol mismatch: daemon {VERSION}, browser {version}. Update the browser or daemon."))
-            } else if token != *expected_token {
-                Err("Access token rejected".into())
+            } else if !login_allowed(&token, &expected_token, identity) {
+                Err(if token.is_empty() { "Access token required: this connection has no allowed Tailscale identity".into() } else { "Access token rejected".into() })
             } else {
                 authenticated_copy.store(true, Ordering::Release);
                 Ok(api.clone())
@@ -229,7 +260,12 @@ pub(crate) async fn execute(app: &App, request_id: &str, operation: Operation) -
         uuid::Uuid::parse_str(request_id).is_ok(),
         "a UUID request ID is required for commands"
     );
-    let encoded = serde_json::to_string(&operation)?;
+    // Receipts retain identity and a content digest, not a second copy of every image.
+    let encoded = if let Operation::UploadImage { id, bytes } = &operation {
+        use sha2::{Digest, Sha256};
+        crate::uploads::extension(bytes)?;
+        json!({"UploadImage":{"id":id,"sha256":Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect::<String>()}}).to_string()
+    } else { serde_json::to_string(&operation)? };
     let _lock = app.commands.lock().await;
     if let Some((previous, response)) = app.manager.store.receipt(request_id)? {
         ensure!(
@@ -271,6 +307,11 @@ async fn dispatch(app: &App, operation: Operation) -> Result<String> {
             .saved_threads(cursor, search)
             .await?
             .to_string());
+    }
+    if let UploadImage { id: session, bytes } = &operation {
+        id(session)?;
+        let path = app.orchestrator.upload_image(session, bytes).await?;
+        return Ok(json!({"path":path}).to_string());
     }
     let (path, body) = match operation {
         Sessions => ("/sessions".into(), None),
@@ -322,7 +363,7 @@ async fn dispatch(app: &App, operation: Operation) -> Result<String> {
             format!("/environments/{}/sessions", id(&value)?),
             Some(input),
         ),
-        SavedThreads { .. } | Receipt { .. } => unreachable!(),
+        SavedThreads { .. } | Receipt { .. } | UploadImage { .. } => unreachable!(),
     };
     // Share the existing validation/business handlers. This is an in-process
     // router call, not a second HTTP connection and not a REST browser client.
@@ -363,6 +404,15 @@ mod tests {
             commands: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
+    #[tokio::test]
+    async fn token_router_preserves_embedded_frontend_root() -> Result<()> {
+        let router = router(fixture()?, vec![]).fallback(|| async { "frontend" });
+        let response = router.oneshot(Request::builder().uri("/").body(Body::empty())?).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(to_bytes(response.into_body(), 32).await?.as_ref(), b"frontend");
+        Ok(())
+    }
+
     #[tokio::test]
     async fn repeated_commands_do_not_create_another_session() -> Result<()> {
         let app = fixture()?;
@@ -411,6 +461,57 @@ mod tests {
         assert!(receipt.contains("pending-or-interrupted"));
         Ok(())
     }
+    #[tokio::test]
+    async fn image_receipts_deduplicate_without_storing_image_contents() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut app = fixture()?;
+        app.orchestrator = crate::orchestrator::Orchestrator::new(
+            app.manager.clone(), directory.path().into(), None, Some(directory.path().into()), None,
+        );
+        let session = app.manager.store.create("upload", "ws://127.0.0.1:1", &[], None)?;
+        let bytes = b"\x89PNG\r\n\x1a\nfixture".to_vec();
+        let command = Operation::UploadImage { id: session.id.clone(), bytes: bytes.clone() };
+        assert!(execute(&app, &uuid::Uuid::new_v4().to_string(), command.clone()).await.unwrap_err().to_string().contains("managed host and VM"));
+        app.manager.store.bind_host(&session.id)?;
+        let request = uuid::Uuid::new_v4().to_string();
+        let first = execute(&app, &request, command.clone()).await?;
+        assert_eq!(execute(&app, &request, command).await?, first);
+        let result: serde_json::Value = serde_json::from_str(&first)?;
+        assert_eq!(std::fs::read(result["path"].as_str().unwrap())?, bytes);
+        assert_eq!(std::fs::read_dir(directory.path().join("uploads"))?.count(), 1);
+        assert!(app.manager.store.receipt(&request)?.unwrap().0.contains("sha256"));
+        let different = Operation::UploadImage { id: session.id.clone(), bytes: b"GIF89aother".to_vec() };
+        assert!(execute(&app, &request, different).await.is_err());
+        let invalid = Operation::UploadImage { id: session.id, bytes: b"not an image".to_vec() };
+        assert!(execute(&app, &uuid::Uuid::new_v4().to_string(), invalid).await.is_err());
+        assert_eq!(std::fs::read_dir(directory.path().join("uploads"))?.count(), 1);
+        Ok(())
+    }
+    #[test]
+    fn identity_requires_private_endpoint_exact_user_and_explicit_origin() {
+        let users = vec!["owner@example.com".into()];
+        let origins = vec!["https://app.example".into()];
+        let mut headers = HeaderMap::new();
+        headers.insert("tailscale-user-login", "owner@example.com".parse().unwrap());
+        assert!(!tailscale_authenticated(&headers, &users, &origins));
+        headers.insert("origin", "https://app.example".parse().unwrap());
+        assert!(tailscale_authenticated(&headers, &users, &origins));
+        // TCP's router has no trusted identity allowlist.
+        assert!(!tailscale_authenticated(&headers, &[], &origins));
+        headers.insert("origin", "https://evil.example".parse().unwrap());
+        assert!(!tailscale_authenticated(&headers, &users, &origins));
+        headers.insert("origin", "https://app.example".parse().unwrap());
+        headers.insert("tailscale-user-login", "other@example.com".parse().unwrap());
+        assert!(!tailscale_authenticated(&headers, &users, &origins));
+        headers.insert("tailscale-user-login", "owner@example.com".parse().unwrap());
+        headers.append("tailscale-user-login", "owner@example.com".parse().unwrap());
+        assert!(!tailscale_authenticated(&headers, &users, &origins));
+        assert!(login_allowed("", "secret", true));
+        assert!(!login_allowed("", "secret", false));
+        assert!(login_allowed("secret", "secret", false));
+        assert!(!login_allowed("wrong", "secret", true));
+    }
+
     #[test]
     fn browser_origins_are_explicit() {
         let mut headers = HeaderMap::new();

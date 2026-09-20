@@ -11,6 +11,11 @@ in {
     codex = lib.mkOption { type = lib.types.package; };
     binary = lib.mkOption { type = lib.types.str; default = "${cfg.directory}/target/debug/demodex"; };
     apiOnly = lib.mkOption { type = lib.types.bool; default = false; };
+    tailscaleUsers = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [];
+      description = "Exact Tailscale logins accepted on the private data-directory tailscale.sock proxy socket.";
+    };
     allowedOrigins = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [];
@@ -50,6 +55,7 @@ in {
           "--host-workspace" "${cfg.directory}/workspace"
         ] ++ lib.optionals (cfg.codexHome != null) [ "--codex-home" cfg.codexHome ]
           ++ lib.optionals cfg.apiOnly [ "--api-only" ]
+          ++ lib.concatMap (user: [ "--tailscale-user" user ]) cfg.tailscaleUsers
           ++ lib.concatMap (origin: [ "--allowed-origin" origin ]) cfg.allowedOrigins);
         Restart = "on-failure";
         RestartSec = 5;

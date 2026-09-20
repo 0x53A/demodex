@@ -575,6 +575,38 @@ impl Orchestrator {
         Ok(())
     }
 
+    pub async fn upload_image(&self, id: &str, bytes: &[u8]) -> Result<String> {
+        use tokio::io::AsyncWriteExt;
+        let extension = crate::uploads::extension(bytes)?;
+        let _lifecycle = self.jobs.lock().await;
+        self.manager.store.get(id)?;
+        if self.is_host_mode() && self.manager.store.host_sessions()?.iter().any(|s| s == id) {
+            return crate::uploads::save(&self.root, bytes, extension);
+        }
+        let environment = self.manager.store.session_environment(id)?
+            .context("Image upload is available for managed host and VM sessions only")?;
+        let machines = self.machines.lock().await;
+        let machine = machines.get(&environment).context("Start the session's VM before uploading")?;
+        ensure!(machine.target.is_some(), "VM executor is not ready");
+        // No user text enters the remote shell. Each upload has a new private directory.
+        let directory = format!("/workspace/.demodex-upload-{}", uuid::Uuid::new_v4());
+        let path = format!("{directory}/image.{extension}");
+        let script = format!("umask 077; mkdir '{directory}' && cat > '{directory}/pending' && mv '{directory}/pending' '{path}'");
+        let mut child = self.ssh(&environment, machine.ssh_port).arg(script)
+            .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped())
+            .kill_on_drop(true).spawn()?;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let mut stdin = child.stdin.take().context("upload stdin unavailable")?;
+            stdin.write_all(bytes).await?;
+            stdin.shutdown().await?;
+            drop(stdin);
+            let output = child.wait_with_output().await?;
+            ensure!(output.status.success(), "VM image upload failed: {}", String::from_utf8_lossy(&output.stderr));
+            Ok::<(), anyhow::Error>(())
+        }).await.context("VM image upload timed out; inspect its command receipt before retrying")??;
+        Ok(path)
+    }
+
     pub async fn connect_session(&self, id: &str) -> Result<()> {
         let _lifecycle = self.jobs.lock().await;
         if self.manager.store.host_sessions()?.iter().any(|s| s == id) {

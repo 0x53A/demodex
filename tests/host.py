@@ -5,6 +5,7 @@
 import base64
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import subprocess
@@ -141,6 +142,37 @@ with tempfile.TemporaryDirectory(prefix='demodex-host-') as temporary:
             page.get_by_label('Access token').fill(token)
             page.get_by_role('button',name='Connect host',exact=True).click()
             expect(page.locator('header .indicator')).to_have_text('CONNECTED',timeout=20000)
+            # Upload through the real browser transport, without submitting a prompt.
+            page.get_by_role('button', name='Host persistence test', exact=False).click()
+            prompt = page.get_by_label('Message', exact=True)
+            prompt.fill('🙂 replace end')
+            prompt.evaluate('(el) => el.setSelectionRange(3, 10)')
+            png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
+            with page.expect_file_chooser() as chooser:
+                page.get_by_role('button', name='Attach image', exact=True).click()
+            chooser.value.set_files({'name': '../../screenshot.png', 'mimeType': 'image/png', 'buffer': png})
+            expect(prompt).to_have_value(re.compile(r'🙂 \"/.*/uploads/[^/]+\.png\" end'), timeout=20000)
+            image_path = Path(prompt.input_value().split('"')[1])
+            assert image_path.read_bytes() == png
+            assert image_path.parent == data / 'uploads'
+            assert image_path.stat().st_mode & 0o777 == 0o600
+            draft = prompt.input_value()
+            page.reload()
+            expect(prompt).to_have_value(draft, timeout=20000)
+            # Clipboard uploads append at the current selection and remain unsent.
+            prompt.evaluate('(el) => el.setSelectionRange(el.value.length, el.value.length)')
+            prompt.evaluate("""(el, data) => {
+                const clipboardData = new DataTransfer();
+                clipboardData.items.add(new File([new Uint8Array(data)], 'paste.png', {type:'image/png'}));
+                el.dispatchEvent(new ClipboardEvent('paste', {clipboardData, bubbles:true, cancelable:true}));
+            }""", list(png))
+            expect(page.get_by_role('button', name='Attach image', exact=True)).to_be_enabled(timeout=20000)
+            expect(prompt).to_have_value(re.compile(r' end \"/.*/uploads/[^/]+\.png\"$'), timeout=20000)
+            assert len(list((data/'uploads').iterdir())) == 2
+            page.get_by_label('Upload image', exact=True).set_input_files({'name':'bad.png','mimeType':'image/png','buffer':b'not an image'})
+            expect(page.get_by_role('alert')).to_contain_text('Choose a PNG', timeout=20000)
+            assert len(list((data/'uploads').iterdir())) == 2
+            assert not any(e['message'].get('method') == 'demodex/promptAccepted' for e in api('/sessions/'+session['id']+'/events'))
             page.get_by_role('button',name='Environments',exact=True).click()
             page.get_by_role('button',name='Find saved sessions').click()
             try:
@@ -156,6 +188,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-host-') as temporary:
             expect(page.get_by_label('Existing Codex thread ID (optional)')).to_have_value(session['thread_id'])
             expect(page.get_by_label('Working directory (optional)')).to_have_value('')
             browser.close()
+        print('PASS: image picker and clipboard uploads, private persistent files, draft recovery, invalid-image rejection and no prompt submission')
         print('PASS: saved-thread discovery through Wormhole; native host runtime, empty dedicated login, real host executor, durable thread resume, fresh target and cleanup')
         manager.terminate()
         manager.wait(timeout=30)

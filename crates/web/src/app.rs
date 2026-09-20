@@ -76,6 +76,9 @@ pub struct App {
     cursor: Option<String>,
     login: Value,
     transcript_ref: NodeRef,
+    prompt_ref: NodeRef,
+    image_ref: NodeRef,
+    upload_anchor: Option<(String, String, u32, u32)>,
     follow: bool,
     update_available: bool,
     updating: bool,
@@ -102,6 +105,9 @@ pub enum Msg {
     Page(String),
     Field(String, String),
     Draft(String),
+    ChooseImage,
+    UploadImage(web_sys::File),
+    ImageRead(u64, String, Result<Vec<u8>, String>),
     AnswerDraft(String, String),
     Run(Operation),
     Completed(u64, Operation, String, Result<Value, String>),
@@ -300,6 +306,9 @@ impl Component for App {
             cursor: None,
             login: Value::Null,
             transcript_ref: NodeRef::default(),
+            prompt_ref: NodeRef::default(),
+            image_ref: NodeRef::default(),
+            upload_anchor: None,
             follow: true,
             update_available: false,
             updating: false,
@@ -320,7 +329,7 @@ impl Component for App {
             app.receipt = id.clone();
             app.error="A previous command may have been accepted. Check its receipt before sending it again.".into();
         }
-        if !app.token.is_empty() && restored.as_ref().is_none_or(|route| !route.connections) {
+        if !app.saved.host.is_empty() && restored.as_ref().is_none_or(|route| !route.connections) {
             ctx.link().send_message(Msg::Connect);
         }
         app
@@ -439,6 +448,7 @@ impl Component for App {
                 self.refreshing = false;
                 self.refresh_again = false;
                 self.busy = false;
+                self.upload_anchor = None;
                 self.retry = None;
                 let generation = self.generation;
                 let token = self.token.clone();
@@ -529,7 +539,7 @@ impl Component for App {
                 if self.host_input.trim_end_matches('/') != self.saved.host {
                     return false;
                 }
-                if !self.connected && !self.connecting && !self.token.is_empty() {
+                if !self.connected && !self.connecting {
                     ctx.link().send_message(Msg::Connect)
                 } else if self.connected {
                     ctx.link().send_message(Msg::Refresh)
@@ -630,6 +640,44 @@ impl Component for App {
             Msg::Field(name, value) => {
                 self.saved.fields.insert(name, value);
             }
+            Msg::ChooseImage => {
+                if let Some(input) = self.image_ref.cast::<HtmlInputElement>() { input.click(); }
+            }
+            Msg::UploadImage(file) => {
+                if self.busy || !self.connected {
+                    self.error = if self.busy { "Wait for the current request before attaching an image" }
+                        else { "Connect to the host before attaching an image" }.into();
+                    return true;
+                }
+                if file.size() == 0.0 || file.size() > 4.0 * 1024.0 * 1024.0 {
+                    self.error = "Images must be between 1 byte and 4 MiB".into();
+                } else {
+                    let draft = self.saved.draft();
+                    let end = draft.encode_utf16().count() as u32;
+                    let (start, end) = self.prompt_ref.cast::<HtmlTextAreaElement>()
+                        .map(|el| (el.selection_start().ok().flatten().unwrap_or(end), el.selection_end().ok().flatten().unwrap_or(end)))
+                        .unwrap_or((end, end));
+                    let id = self.saved.selected.clone();
+                    self.upload_anchor = Some((id.clone(), draft, start, end));
+                    self.busy = true;
+                    self.error.clear();
+                    let generation = self.generation;
+                    ctx.link().send_future(async move {
+                        let result = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await
+                            .map(|buffer| js_sys::Uint8Array::new(&buffer).to_vec())
+                            .map_err(|_| "Could not read the image".to_owned());
+                        Msg::ImageRead(generation, id, result)
+                    });
+                }
+            }
+            Msg::ImageRead(generation, id, result) => {
+                if generation != self.generation { return false; }
+                self.busy = false;
+                match result {
+                    Ok(bytes) => self.request(ctx, Operation::UploadImage { id, bytes }),
+                    Err(error) => { self.error = error; self.upload_anchor = None; }
+                }
+            }
             Msg::Draft(value) => {
                 self.saved.drafts.insert(self.saved.key(), value);
             }
@@ -664,6 +712,17 @@ impl Component for App {
                                     self.saved.drafts.remove(&key);
                                 }
                             }
+                            Operation::UploadImage { id, .. } => {
+                                let key = format!("{}:{id}", self.saved.host);
+                                let current = self.saved.drafts.get(&key).cloned().unwrap_or_default();
+                                let path = text(&value, "path");
+                                let draft = match self.upload_anchor.take() {
+                                    Some((session, original, start, end)) if session == id && original == current =>
+                                        insert_image_path(&current, path, start, end),
+                                    _ => insert_image_path(&current, path, u32::MAX, u32::MAX),
+                                };
+                                self.saved.drafts.insert(key, draft);
+                            }
                             Operation::Login => self.login = value,
                             Operation::Receipt { .. } => {
                                 if value["state"] == "completed" {
@@ -677,6 +736,7 @@ impl Component for App {
                         }
                     }
                     Err(error) => {
+                        if matches!(operation, Operation::UploadImage { .. }) { self.upload_anchor = None; }
                         self.error = error;
                         if operation.is_mutation() {
                             self.receipt = id;
@@ -819,7 +879,7 @@ impl Component for App {
                         html!{<article class="connection"><button class="connection-open" disabled={self.connecting||self.busy} onclick={ctx.link().callback(move |_|Msg::UseConnection(url.clone(),true))}><strong>{if connection.name.is_empty(){connection.url.clone()}else{connection.name.clone()}}</strong><small>{connection.url.clone()}</small></button><div><button disabled={self.connecting||self.busy} onclick={ctx.link().callback(move |_|Msg::UseConnection(edit.clone(),false))}>{"Edit"}</button><button disabled={self.connecting||self.busy} onclick={ctx.link().callback(move |_|Msg::ForgetConnection(remove.clone()))}>{"Forget"}</button></div></article>}
                     })}<h2>{"Add or edit connection"}</h2></section>}}else{Html::default()}}
                     <label>{"Connection name (optional)"}<input disabled={self.connecting||self.busy} value={self.connection_name.clone()} oninput={ctx.link().callback(|e|Msg::ConnectionName(input(e)))}/></label>
-                    <details class="host-picker" open={self.connections_page||self.client.is_none()}><summary>{"Target host"}</summary><label>{"Host URL"}<input disabled={self.connecting||self.busy} list="hosts" value={self.host_input.clone()} oninput={ctx.link().callback(|e|Msg::HostInput(input(e)))}/></label><datalist id="hosts">{for self.hosts.iter().map(|host|html!{<option value={host.clone()}/>})}</datalist><label>{"Access token"}<input disabled={self.connecting||self.busy} type="password" value={self.token.clone()} oninput={ctx.link().callback(|e|Msg::Token(input(e)))}/></label><button disabled={self.connecting||self.busy} onclick={ctx.link().callback(|_|Msg::Connect)}>{"Connect host"}</button></details>
+                    <details class="host-picker" open={self.connections_page||self.client.is_none()}><summary>{"Target host"}</summary><label>{"Host URL"}<input disabled={self.connecting||self.busy} list="hosts" value={self.host_input.clone()} oninput={ctx.link().callback(|e|Msg::HostInput(input(e)))}/></label><datalist id="hosts">{for self.hosts.iter().map(|host|html!{<option value={host.clone()}/>})}</datalist><label>{"Access token (optional with Tailscale)"}<input disabled={self.connecting||self.busy} type="password" value={self.token.clone()} oninput={ctx.link().callback(|e|Msg::Token(input(e)))}/></label><p class="muted">{"Leave blank to use your Tailscale identity, or enter this host's access token."}</p><button disabled={self.connecting||self.busy} onclick={ctx.link().callback(|_|Msg::Connect)}>{"Connect host"}</button></details>
                     <button class="environment-nav" onclick={ctx.link().callback(|_|Msg::Page("environments".into()))}>{"Environments"}</button>
                     <div class="section-title"><h2>{"Sessions"}</h2><button onclick={ctx.link().callback(|_|Msg::Page("external".into()))}>{"+ External"}</button></div>
                     {for self.sessions.iter().map(|session|{let id=text(session,"id").to_owned();html!{<button class={classes!("session",(id==self.saved.selected).then_some("chosen"))} onclick={ctx.link().callback(move |_|Msg::Select(id.clone()))}><strong>{text(session,"name")}</strong><span>{text(session,"status")}</span><small>{text(&session["targets"][0],"cwd")}</small></button>}})}
@@ -865,7 +925,15 @@ impl App {
                 {for self.pending.iter().map(|pending|self.approval(ctx,pending))}
                 <details class="diagnostics"><summary>{format!("Protocol events ({})",self.events.len())}</summary><pre>{serde_json::to_string_pretty(&self.events).unwrap_or_default()}</pre></details>
             </div>
-            <form class="composer" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();Msg::Run(send.clone())})}><label class="sr-only" for="prompt">{"Message"}</label><textarea id="prompt" value={self.saved.draft()} placeholder="Give the agent a task…" oninput={ctx.link().callback(|e|Msg::Draft(input(e)))}/><div><button class="primary" disabled={self.busy||!self.connected||working||waiting||status=="disconnected"||status=="connecting"||self.saved.draft().trim().is_empty()}>{"Send"}</button>{if working||waiting{self.button(ctx,"Interrupt",Operation::Interrupt{id})}else{html!{<button type="button" disabled=true>{"Interrupt"}</button>}}}</div></form>
+            <form class="composer" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();Msg::Run(send.clone())})}><label class="sr-only" for="prompt">{"Message"}</label><textarea id="prompt" ref={self.prompt_ref.clone()} value={self.saved.draft()} placeholder="Give the agent a task…" oninput={ctx.link().callback(|e|Msg::Draft(input(e)))} onpaste={ctx.link().batch_callback(|e:Event| {
+                let e = e.unchecked_into::<web_sys::ClipboardEvent>();
+                let file = e.clipboard_data().and_then(|data|data.files()).and_then(|files|files.get(0));
+                if file.is_some() { e.prevent_default(); }
+                file.map(Msg::UploadImage)
+            })}/><input type="file" hidden=true ref={self.image_ref.clone()} accept="image/png,image/jpeg,image/gif,image/webp" aria-label="Upload image" onchange={ctx.link().batch_callback(|e:Event| {
+                let input=e.target_unchecked_into::<HtmlInputElement>();
+                let file=input.files().and_then(|files|files.get(0)); input.set_value(""); file.map(Msg::UploadImage)
+            })}/><div><button type="button" disabled={self.busy||!self.connected} onclick={ctx.link().callback(|_|Msg::ChooseImage)}>{if self.busy && self.upload_anchor.is_some(){"Uploading…"}else{"Attach image"}}</button><button class="primary" disabled={self.busy||!self.connected||working||waiting||status=="disconnected"||status=="connecting"||self.saved.draft().trim().is_empty()}>{"Send"}</button>{if working||waiting{self.button(ctx,"Interrupt",Operation::Interrupt{id})}else{html!{<button type="button" disabled=true>{"Interrupt"}</button>}}}</div></form>
         </>}
     }
     fn approval(&self, ctx: &Context<Self>, pending: &Value) -> Html {

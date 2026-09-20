@@ -208,3 +208,33 @@ mod tests {
         assert_eq!(items[0]["text"], "hello");
     }
 }
+
+// DOM selection offsets count UTF-16 code units, not Rust bytes.
+pub fn insert_image_path(draft: &str, path: &str, start: u32, end: u32) -> String {
+    fn offset(text: &str, units: u32) -> usize {
+        let mut count = 0;
+        for (index, ch) in text.char_indices() {
+            if count >= units { return index; }
+            count += ch.len_utf16() as u32;
+        }
+        text.len()
+    }
+    let start = offset(draft, start);
+    let end = offset(draft, end).max(start);
+    let before = &draft[..start];
+    let after = &draft[end..];
+    format!("{}{}\"{}\"{}{}", before,
+        if before.is_empty() || before.ends_with(char::is_whitespace) { "" } else { " " },
+        path,
+        if after.is_empty() || after.starts_with(char::is_whitespace) { "" } else { " " }, after)
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    #[test]
+    fn path_insertion_uses_browser_offsets_and_preserves_surrounding_text() {
+        assert_eq!(insert_image_path("🙂 replace end", "/a b.png", 3, 10), "🙂 \"/a b.png\" end");
+        assert_eq!(insert_image_path("later edits", "/image.png", u32::MAX, u32::MAX), "later edits \"/image.png\"");
+    }
+}
