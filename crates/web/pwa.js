@@ -40,7 +40,7 @@ async function preparePwa() {
     hadController = true;
   });
   const setup = (async () => {
-    registration = await navigator.serviceWorker.register('/service-worker.js', { updateViaCache: 'none' });
+    registration = await navigator.serviceWorker.register(new URL('./service-worker.js', document.baseURI), { updateViaCache: 'none' });
     const ready = () => {
       if (!registration?.waiting || !navigator.serviceWorker.controller) return;
       pwa.update(state => ({ ...state, available: true }));

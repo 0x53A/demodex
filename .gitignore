@@ -3,6 +3,7 @@
 /web/dist
 /web/.pwa-dist
 /web/.rust-dist
+/web/.pages-dist
 /.direnv
 /.demodex
 /.demodex-host

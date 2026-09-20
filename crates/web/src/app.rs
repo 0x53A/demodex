@@ -13,6 +13,13 @@ use yew::prelude::*;
 fn window() -> web_sys::Window {
     web_sys::window().unwrap()
 }
+fn default_host() -> String {
+    if option_env!("DEMODEX_STANDALONE") == Some("1") {
+        String::new()
+    } else {
+        window().location().origin().unwrap_or_default()
+    }
+}
 fn storage_get(key: &str) -> Option<String> {
     window()
         .session_storage()
@@ -216,11 +223,11 @@ impl Component for App {
                     storage_get("demodex-view")
                         .and_then(|s| serde_json::from_str(&s).ok())
                         .unwrap_or_default(),
-                    window().location().origin().unwrap_or_default(),
+                    default_host(),
                 )
             });
         if saved.host.is_empty() {
-            saved.host = window().location().origin().unwrap_or_default();
+            saved.host = default_host();
         }
         // Retain the existing token when migrating a same-origin Svelte installation.
         let token = storage_get(&format!("demodex-token:{}", saved.host))
@@ -799,7 +806,7 @@ impl Component for App {
     fn view(&self, ctx: &Context<Self>) -> Html {
         let detail = !self.saved.selected.is_empty() || !self.saved.page.is_empty();
         html! {<>
-            <header><a href="/" class="brand">{"DEMODEX"}<span>{" / operator console"}</span></a><button onclick={ctx.link().callback(|_|Msg::Connections)}>{"Connections"}</button><span class="indicator">{if self.connected{"CONNECTED"}else if self.connecting{"CONNECTING"}else{"DISCONNECTED"}}</span></header>
+            <header><a href="./" class="brand">{"DEMODEX"}<span>{" / operator console"}</span></a><button onclick={ctx.link().callback(|_|Msg::Connections)}>{"Connections"}</button><span class="indicator">{if self.connected{"CONNECTED"}else if self.connecting{"CONNECTING"}else{"DISCONNECTED"}}</span></header>
             {if !self.connection_storage_error.is_empty(){html!{<div class="app-notice" role="alert">{self.connection_storage_error.clone()}</div>}}else{Html::default()}}
             {if self.update_available{html!{<div class="app-notice" role="status"><span>{"New version available. Your agent keeps running."}</span><button disabled={self.busy||self.updating} onclick={ctx.link().callback(|_|Msg::ApplyUpdate)}>{if self.updating{"Updating…"}else{"Update now"}}</button></div>}}else{Html::default()}}
             {if !self.storage_error.is_empty()||!self.update_error.is_empty(){html!{<div class="app-notice" role="status">{format!("{} {}",self.storage_error,self.update_error)}</div>}}else{Html::default()}}
