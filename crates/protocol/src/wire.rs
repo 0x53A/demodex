@@ -53,7 +53,9 @@ pub enum Operation {
         cursor: Option<String>,
         search: String,
     },
-    CreateSession { input: String },
+    CreateSession {
+        input: String,
+    },
     HostSession {
         input: String,
     },
@@ -111,12 +113,25 @@ pub enum Operation {
     },
     Environments,
     Targets,
-    RegisterTarget { input: String },
-    RegisterSshTarget { input: String },
-    CheckSshTarget { id: String },
-    ReconnectSshTarget { id: String },
-    ForgetTarget { id: String },
-    SelectTargets { id: String, input: String },
+    RegisterTarget {
+        input: String,
+    },
+    RegisterSshTarget {
+        input: String,
+    },
+    CheckSshTarget {
+        id: String,
+    },
+    ReconnectSshTarget {
+        id: String,
+    },
+    ForgetTarget {
+        id: String,
+    },
+    SelectTargets {
+        id: String,
+        input: String,
+    },
     CreateEnvironment {
         input: String,
     },

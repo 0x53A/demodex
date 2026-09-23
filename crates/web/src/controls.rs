@@ -184,7 +184,7 @@ impl Component for SessionControls {
                 </div>
                 <p class="muted">{"Save stores the goal paused. Start / resume allows Codex to keep working and use tokens. Pause prevents further goal turns; use Interrupt to stop the current turn. Replacing the objective resets its usage accounting."}</p>
             </form>
-            
+
         </section>}
     }
 }

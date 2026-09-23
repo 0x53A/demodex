@@ -1,14 +1,14 @@
-mod ssh;
-mod uploads;
-mod usage;
-mod targets;
+mod background;
+mod controls;
 mod manager;
 mod orchestrator;
 mod rpc;
-mod store;
 mod session_context;
-mod controls;
-mod background;
+mod ssh;
+mod store;
+mod targets;
+mod uploads;
+mod usage;
 mod vm;
 mod wormhole;
 
@@ -107,14 +107,18 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Command::Vm(args)) => return vm::execute(args).await,
         Some(Command::Web { bind, directory }) => {
-            anyhow::ensure!(directory.join("index.html").is_file(), "build the PWA first");
-            let router = Router::new().fallback_service(tower_http::services::ServeDir::new(directory));
+            anyhow::ensure!(
+                directory.join("index.html").is_file(),
+                "build the PWA first"
+            );
+            let router =
+                Router::new().fallback_service(tower_http::services::ServeDir::new(directory));
             let listener = tokio::net::TcpListener::bind(bind).await?;
             eprintln!("Demodex PWA: http://{}", listener.local_addr()?);
             axum::serve(listener, router).await?;
             return Ok(());
         }
-        None => {},
+        None => {}
     }
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -154,65 +158,95 @@ async fn main() -> Result<()> {
         "access-token must contain at least 32 characters"
     );
     let manager = Manager::new(store::Store::open(&cli.data_dir.join("state.sqlite"))?);
-    let host_workspace=cli.host_workspace.map(|p|p.canonicalize()).transpose()?;
-    let codex_home=cli.codex_home.map(|p|p.canonicalize()).transpose()?;
-    let orchestrator=orchestrator::Orchestrator::new(manager.clone(),cli.data_dir.canonicalize()?,cli.vm_image,host_workspace,codex_home);
-    if orchestrator.is_host_mode() {orchestrator.start_runtime().await?;}
+    let host_workspace = cli.host_workspace.map(|p| p.canonicalize()).transpose()?;
+    let codex_home = cli.codex_home.map(|p| p.canonicalize()).transpose()?;
+    let orchestrator = orchestrator::Orchestrator::new(
+        manager.clone(),
+        cli.data_dir.canonicalize()?,
+        cli.vm_image,
+        host_workspace,
+        codex_home,
+    );
+    if orchestrator.is_host_mode() {
+        orchestrator.start_runtime().await?;
+    }
     let app = App {
         manager,
         token: Arc::new(token),
-        orchestrator:orchestrator.clone(),
+        orchestrator: orchestrator.clone(),
         commands: Arc::new(tokio::sync::Mutex::new(())),
     };
     let proxy = if cli.tailscale_user.is_empty() {
         None
     } else {
-        anyhow::ensure!(!cli.allowed_origin.is_empty(), "Tailscale identity requires explicit allowed origins");
+        anyhow::ensure!(
+            !cli.allowed_origin.is_empty(),
+            "Tailscale identity requires explicit allowed origins"
+        );
         let path = cli.data_dir.join("tailscale.sock");
         // The data directory is owner-only and its manager lock is held. Only
         // replace a stale socket; never remove an unrelated file or symlink.
         if let Ok(metadata) = std::fs::symlink_metadata(&path) {
             use std::os::unix::fs::FileTypeExt;
-            anyhow::ensure!(metadata.file_type().is_socket(), "proxy socket path is not a socket");
+            anyhow::ensure!(
+                metadata.file_type().is_socket(),
+                "proxy socket path is not a socket"
+            );
             std::fs::remove_file(&path)?;
         }
         let listener = tokio::net::UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        Some((listener, wormhole::proxy_router(app.clone(), cli.allowed_origin.clone(), cli.tailscale_user)))
+        Some((
+            listener,
+            wormhole::proxy_router(app.clone(), cli.allowed_origin.clone(), cli.tailscale_user),
+        ))
     };
-    let mut router = Router::new().nest("/api", api(app.clone())).merge(wormhole::router(app,cli.allowed_origin));
-    if !cli.api_only { router = router.fallback_service(
-        tower_http::services::ServeDir::new(&cli.web_dir).not_found_service(
-            tower_http::services::ServeFile::new(cli.web_dir.join("index.html")),
-        ),
-    ); }
+    let mut router = Router::new()
+        .nest("/api", api(app.clone()))
+        .merge(wormhole::router(app, cli.allowed_origin));
+    if !cli.api_only {
+        router = router.fallback_service(
+            tower_http::services::ServeDir::new(&cli.web_dir).not_found_service(
+                tower_http::services::ServeFile::new(cli.web_dir.join("index.html")),
+            ),
+        );
+    }
     let listener = tokio::net::TcpListener::bind(cli.bind).await?;
     eprintln!(
         "Demodex: http://{}\nAccess token: {}",
         listener.local_addr()?,
         token_path.display()
     );
-    let watcher=orchestrator.clone();
-    let monitor=tokio::spawn(async move {loop {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        if let Err(error)=watcher.monitor().await {tracing::warn!("runtime monitor: {error:#}");}
-    }});
+    let watcher = orchestrator.clone();
+    let monitor = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if let Err(error) = watcher.monitor().await {
+                tracing::warn!("runtime monitor: {error:#}");
+            }
+        }
+    });
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let shutdown = tokio::spawn(async move {
-        let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("register SIGTERM");
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("register SIGTERM");
         tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
         let _ = shutdown_tx.send(true);
     });
     let proxy_shutdown = shutdown_rx.clone();
     let proxy_task = tokio::spawn(async move {
         if let Some((listener, router)) = proxy {
-            axum::serve(listener, router).with_graceful_shutdown(wait_shutdown(proxy_shutdown)).await
+            axum::serve(listener, router)
+                .with_graceful_shutdown(wait_shutdown(proxy_shutdown))
+                .await
         } else {
             Ok(())
         }
     });
     let served = axum::serve(listener, router)
-        .with_graceful_shutdown(wait_shutdown(shutdown_rx)).await;
+        .with_graceful_shutdown(wait_shutdown(shutdown_rx))
+        .await;
     shutdown.abort();
     proxy_task.abort();
     monitor.abort();
@@ -246,15 +280,15 @@ fn api(app: App) -> Router {
         .route("/sessions/{id}/interrupt", post(interrupt))
         .route("/sessions/{id}/answer", post(answer))
         .route("/sessions/{id}/events", get(events))
-        .route("/runtime",get(runtime_status))
-        .route("/runtime/start",post(runtime_start))
-        .route("/runtime/login",post(runtime_login))
-        .route("/host/sessions",post(host_session))
-        .route("/runtime/sessions",post(selected_session))
-        .route("/environments",get(environments).post(environment_create))
-        .route("/environments/{id}/start",post(environment_start))
-        .route("/environments/{id}/stop",post(environment_stop))
-        .route("/environments/{id}/sessions",post(environment_session))
+        .route("/runtime", get(runtime_status))
+        .route("/runtime/start", post(runtime_start))
+        .route("/runtime/login", post(runtime_login))
+        .route("/host/sessions", post(host_session))
+        .route("/runtime/sessions", post(selected_session))
+        .route("/environments", get(environments).post(environment_create))
+        .route("/environments/{id}/start", post(environment_start))
+        .route("/environments/{id}/stop", post(environment_stop))
+        .route("/environments/{id}/sessions", post(environment_session))
         .route_layer(middleware::from_fn_with_state(app.clone(), authenticate))
         .with_state(app)
 }
@@ -315,7 +349,7 @@ async fn create(State(app): State<App>, Json(input): Json<NewSession>) -> Api<st
     )?;
     app.manager.store.ensure_target_selection(&session.id)?;
     app.manager.changed();
-    app.manager.store.sandbox(&session.id,input.sandbox)?;
+    app.manager.store.sandbox(&session.id, input.sandbox)?;
     Ok(Json(app.manager.store.get(&session.id)?))
 }
 async fn detail(State(app): State<App>, Path(id): Path<String>) -> Api<Value> {
@@ -327,7 +361,9 @@ async fn detail(State(app): State<App>, Path(id): Path<String>) -> Api<Value> {
     };
     let controls = app.manager.control_snapshot(&id).await?;
     let background = app.manager.background_snapshot(&id).await;
-    Ok(Json(json!({"session":session,"pending":app.manager.store.pending(&id)?,"queued":queued,"queue_error":queue_error,"controls":controls,"background":background,"target_selection":app.manager.store.target_selection(&id)?,"targets_pending":app.manager.store.targets_pending(&id)?})))
+    Ok(Json(
+        json!({"session":session,"pending":app.manager.store.pending(&id)?,"queued":queued,"queue_error":queue_error,"controls":controls,"background":background,"target_selection":app.manager.store.target_selection(&id)?,"targets_pending":app.manager.store.targets_pending(&id)?}),
+    ))
 }
 
 async fn targets(State(app): State<App>) -> Api<Value> {
@@ -335,9 +371,16 @@ async fn targets(State(app): State<App>) -> Api<Value> {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RegisterTarget { name: String, url: String, cwd: String }
+struct RegisterTarget {
+    name: String,
+    url: String,
+    cwd: String,
+}
 async fn register_target(State(app): State<App>, Json(input): Json<RegisterTarget>) -> Api<Value> {
-    let result = app.manager.store.register_target(&input.name, &input.url, &input.cwd)?;
+    let result = app
+        .manager
+        .store
+        .register_target(&input.name, &input.url, &input.cwd)?;
     app.manager.changed();
     Ok(Json(json!(result)))
 }
@@ -358,14 +401,26 @@ async fn forget_target(State(app): State<App>, Path(id): Path<String>) -> Api<Va
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SelectTargets { targets: Vec<targets::Selection> }
-async fn select_targets(State(app): State<App>, Path(id): Path<String>, Json(input): Json<SelectTargets>) -> Api<Value> {
+struct SelectTargets {
+    targets: Vec<targets::Selection>,
+}
+async fn select_targets(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<SelectTargets>,
+) -> Api<Value> {
     app.orchestrator.select_targets(&id, &input.targets).await?;
     Ok(Json(json!({"ok":true,"applies_on_next_message":true})))
 }
 #[derive(Deserialize)]
-struct ArchiveChoice { archived: bool }
-async fn archive(State(app): State<App>, Path(id): Path<String>, Json(input): Json<ArchiveChoice>) -> Api<Value> {
+struct ArchiveChoice {
+    archived: bool,
+}
+async fn archive(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<ArchiveChoice>,
+) -> Api<Value> {
     app.manager.archive(&id, input.archived).await?;
     Ok(Json(json!({"archived":input.archived})))
 }
@@ -373,53 +428,143 @@ async fn connect(State(app): State<App>, Path(id): Path<String>) -> Api<Value> {
     app.orchestrator.connect_session(&id).await?;
     Ok(Json(json!({"ok":true})))
 }
-#[derive(Deserialize)] struct SandboxChoice {sandbox:Option<store::Sandbox>}
-async fn change_sandbox(State(app):State<App>,Path(id):Path<String>,Json(input):Json<SandboxChoice>)->Api<Value> {
-    app.manager.change_sandbox(&id,input.sandbox).await?;
+#[derive(Deserialize)]
+struct SandboxChoice {
+    sandbox: Option<store::Sandbox>,
+}
+async fn change_sandbox(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<SandboxChoice>,
+) -> Api<Value> {
+    app.manager.change_sandbox(&id, input.sandbox).await?;
     app.orchestrator.connect_session(&id).await?;
     Ok(Json(json!({"ok":true})))
 }
-async fn models(State(app):State<App>,Path(id):Path<String>)->Api<Value> {
+async fn models(State(app): State<App>, Path(id): Path<String>) -> Api<Value> {
     Ok(Json(app.manager.model_catalog(&id).await?))
 }
-async fn change_model(State(app):State<App>,Path(id):Path<String>,Json(input):Json<controls::ModelChoice>)->Api<Value> {
-    Ok(Json(app.manager.change_model(&id,input).await?))
+async fn change_model(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<controls::ModelChoice>,
+) -> Api<Value> {
+    Ok(Json(app.manager.change_model(&id, input).await?))
 }
-async fn change_goal(State(app):State<App>,Path(id):Path<String>,Json(input):Json<controls::GoalAction>)->Api<Value> {
-    Ok(Json(app.manager.change_goal(&id,input).await?))
+async fn change_goal(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<controls::GoalAction>,
+) -> Api<Value> {
+    Ok(Json(app.manager.change_goal(&id, input).await?))
 }
 
-async fn runtime_status(State(app):State<App>)->Api<Value> {Ok(Json(app.orchestrator.runtime_status().await?))}
-async fn runtime_start(State(app):State<App>)->Api<Value> {Ok(Json(app.orchestrator.start_runtime().await?))}
-async fn runtime_login(State(app):State<App>)->Api<Value> {Ok(Json(app.orchestrator.login().await?))}
+async fn runtime_status(State(app): State<App>) -> Api<Value> {
+    Ok(Json(app.orchestrator.runtime_status().await?))
+}
+async fn runtime_start(State(app): State<App>) -> Api<Value> {
+    Ok(Json(app.orchestrator.start_runtime().await?))
+}
+async fn runtime_login(State(app): State<App>) -> Api<Value> {
+    Ok(Json(app.orchestrator.login().await?))
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SelectedSession { name: String, targets: Vec<targets::Selection>, sandbox: Option<store::Sandbox> }
-async fn selected_session(State(app): State<App>, Json(input): Json<SelectedSession>) -> Api<store::Session> {
-    Ok(Json(app.orchestrator.selected_session(&input.name, &input.targets, input.sandbox).await?))
+struct SelectedSession {
+    name: String,
+    targets: Vec<targets::Selection>,
+    sandbox: Option<store::Sandbox>,
 }
-#[derive(Deserialize)] struct HostSession {name:String,thread_id:Option<String>,sandbox:Option<store::Sandbox>,cwd:Option<String>}
-async fn host_session(State(app):State<App>,Json(input):Json<HostSession>)->Api<store::Session> {
-    Ok(Json(app.orchestrator.host_session(&input.name,input.thread_id.as_deref().filter(|s|!s.is_empty()),input.sandbox,input.cwd.as_deref().map(str::trim).filter(|s|!s.is_empty())).await?))
+async fn selected_session(
+    State(app): State<App>,
+    Json(input): Json<SelectedSession>,
+) -> Api<store::Session> {
+    Ok(Json(
+        app.orchestrator
+            .selected_session(&input.name, &input.targets, input.sandbox)
+            .await?,
+    ))
 }
-async fn environments(State(app):State<App>)->Api<Vec<store::Environment>> {Ok(Json(app.manager.store.environments()?))}
-#[derive(Deserialize)] struct NewEnvironment {name:String,memory_mib:u32,cpus:u16,#[serde(default)] internet:bool}
-async fn environment_create(State(app):State<App>,Json(input):Json<NewEnvironment>)->Api<store::Environment> {
-    let environment=app.orchestrator.create(&input.name,input.memory_mib,input.cpus,input.internet)?;
+#[derive(Deserialize)]
+struct HostSession {
+    name: String,
+    thread_id: Option<String>,
+    sandbox: Option<store::Sandbox>,
+    cwd: Option<String>,
+}
+async fn host_session(
+    State(app): State<App>,
+    Json(input): Json<HostSession>,
+) -> Api<store::Session> {
+    Ok(Json(
+        app.orchestrator
+            .host_session(
+                &input.name,
+                input.thread_id.as_deref().filter(|s| !s.is_empty()),
+                input.sandbox,
+                input
+                    .cwd
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty()),
+            )
+            .await?,
+    ))
+}
+async fn environments(State(app): State<App>) -> Api<Vec<store::Environment>> {
+    Ok(Json(app.manager.store.environments()?))
+}
+#[derive(Deserialize)]
+struct NewEnvironment {
+    name: String,
+    memory_mib: u32,
+    cpus: u16,
+    #[serde(default)]
+    internet: bool,
+}
+async fn environment_create(
+    State(app): State<App>,
+    Json(input): Json<NewEnvironment>,
+) -> Api<store::Environment> {
+    let environment =
+        app.orchestrator
+            .create(&input.name, input.memory_mib, input.cpus, input.internet)?;
     app.orchestrator.start(&environment.id).await?;
     Ok(Json(app.manager.store.environment(&environment.id)?))
 }
-async fn environment_start(State(app):State<App>,Path(id):Path<String>)->Api<Value> {app.orchestrator.start(&id).await?;Ok(Json(json!({"ok":true})))}
-async fn environment_stop(State(app):State<App>,Path(id):Path<String>)->Api<Value> {app.orchestrator.stop(&id).await?;Ok(Json(json!({"ok":true})))}
-#[derive(Deserialize)] struct SessionName {name:String,sandbox:Option<store::Sandbox>}
-async fn environment_session(State(app):State<App>,Path(id):Path<String>,Json(input):Json<SessionName>)->Api<store::Session> {
-    Ok(Json(app.orchestrator.session(&id,&input.name,input.sandbox).await?))
+async fn environment_start(State(app): State<App>, Path(id): Path<String>) -> Api<Value> {
+    app.orchestrator.start(&id).await?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn environment_stop(State(app): State<App>, Path(id): Path<String>) -> Api<Value> {
+    app.orchestrator.stop(&id).await?;
+    Ok(Json(json!({"ok":true})))
+}
+#[derive(Deserialize)]
+struct SessionName {
+    name: String,
+    sandbox: Option<store::Sandbox>,
+}
+async fn environment_session(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<SessionName>,
+) -> Api<store::Session> {
+    Ok(Json(
+        app.orchestrator
+            .session(&id, &input.name, input.sandbox)
+            .await?,
+    ))
 }
 #[derive(Deserialize)]
 struct Prompt {
     text: String,
 }
-async fn queue_prompt(State(app): State<App>, Path(id): Path<String>, Json(input): Json<Prompt>) -> Api<Value> {
+async fn queue_prompt(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<Prompt>,
+) -> Api<Value> {
     Ok(Json(app.manager.queue_prompt(&id, &input.text).await?))
 }
 async fn prompt(
@@ -464,9 +609,15 @@ mod tests {
     use tower::ServiceExt;
     #[tokio::test]
     async fn api_requires_token_even_for_reads() -> Result<()> {
-        let manager=Manager::new(store::Store::open(std::path::Path::new(":memory:"))?);
+        let manager = Manager::new(store::Store::open(std::path::Path::new(":memory:"))?);
         let app = api(App {
-            orchestrator:orchestrator::Orchestrator::new(manager.clone(),PathBuf::from("/unused"),None,None,None),
+            orchestrator: orchestrator::Orchestrator::new(
+                manager.clone(),
+                PathBuf::from("/unused"),
+                None,
+                None,
+                None,
+            ),
             manager,
             token: Arc::new("secret".into()),
             commands: Arc::new(tokio::sync::Mutex::new(())),

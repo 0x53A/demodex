@@ -47,7 +47,9 @@ pub struct Orchestrator {
 
 impl Orchestrator {
     pub async fn targets(&self) -> Result<Value> {
-        for session in self.manager.store.list()? { self.manager.store.ensure_target_selection(&session.id)?; }
+        for session in self.manager.store.list()? {
+            self.manager.store.ensure_target_selection(&session.id)?;
+        }
         let mut targets = Vec::new();
         if let Some(cwd) = &self.host_workspace {
             let ready = self.runtime_rpc().await.is_ok();
@@ -55,43 +57,78 @@ impl Orchestrator {
         }
         let machines = self.machines.lock().await;
         for vm in self.manager.store.environments()? {
-            let id = format!("vm-{}",vm.id);
+            let id = format!("vm-{}", vm.id);
             targets.push(json!({"id":id,"name":vm.name,"kind":"vm","cwd":"/workspace","available":vm.status=="running" && machines.get(&vm.id).is_some_and(|m|m.target.is_some()),"environment_id":vm.id,"users":self.manager.store.target_users(&id)?}));
         }
         for target in self.manager.store.registered_targets()? {
             targets.push(json!({"id":target.id,"name":target.name,"kind":"external","cwd":target.cwd,"url":target.url,"available":true,"users":self.manager.store.target_users(&target.id)?}));
         }
-        for (id,config) in self.manager.store.ssh_targets()? {
+        for (id, config) in self.manager.store.ssh_targets()? {
             targets.push(json!({"id":id,"name":config.name,"kind":"ssh","cwd":config.cwd,"destination":config.destination,"port":config.port,"identity_file":config.identity_file,"available":true,"users":self.manager.store.target_users(&id)?}));
         }
         Ok(json!(targets))
     }
 
-    async fn resolve_targets(&self, selection: &[crate::targets::Selection]) -> Result<Vec<Target>> {
+    async fn resolve_targets(
+        &self,
+        selection: &[crate::targets::Selection],
+    ) -> Result<Vec<Target>> {
         crate::targets::validate_selection(selection)?;
         let registered = self.manager.store.registered_targets()?;
         let mut targets = Vec::new();
         for chosen in selection {
             let mut target = if chosen.id == "host" {
-                self.runtime_rpc().await.context("Start the host runtime before attaching this target")?;
-                ensure!(Path::new(&chosen.cwd).is_dir(), "Host working directory does not exist");
-                self.runtime.lock().await.as_ref().and_then(|r|r.host_target.clone()).context("Start the host runtime before attaching this target")?
+                self.runtime_rpc()
+                    .await
+                    .context("Start the host runtime before attaching this target")?;
+                ensure!(
+                    Path::new(&chosen.cwd).is_dir(),
+                    "Host working directory does not exist"
+                );
+                self.runtime
+                    .lock()
+                    .await
+                    .as_ref()
+                    .and_then(|r| r.host_target.clone())
+                    .context("Start the host runtime before attaching this target")?
             } else if let Some(vm) = chosen.id.strip_prefix("vm-") {
-                ensure!(self.manager.store.environment(vm)?.status == "running", "Start the selected VM before attaching it");
-                self.machines.lock().await.get(vm).and_then(|m|m.target.clone()).context("VM executor is unavailable")?
+                ensure!(
+                    self.manager.store.environment(vm)?.status == "running",
+                    "Start the selected VM before attaching it"
+                );
+                self.machines
+                    .lock()
+                    .await
+                    .get(vm)
+                    .and_then(|m| m.target.clone())
+                    .context("VM executor is unavailable")?
             } else if chosen.id.starts_with("ssh-") {
-                let config=self.manager.store.ssh_targets()?.into_iter().find(|(id,_)|id==&chosen.id).context("Unknown SSH target")?.1;
-                let mut ssh=self.ssh.lock().await;
+                let config = self
+                    .manager
+                    .store
+                    .ssh_targets()?
+                    .into_iter()
+                    .find(|(id, _)| id == &chosen.id)
+                    .context("Unknown SSH target")?
+                    .1;
+                let mut ssh = self.ssh.lock().await;
                 if !ssh.contains_key(&chosen.id) {
-                    let engine=crate::ssh::Engine::start(&chosen.id,config).await?;
-                    ssh.insert(chosen.id.clone(),engine);
+                    let engine = crate::ssh::Engine::start(&chosen.id, config).await?;
+                    ssh.insert(chosen.id.clone(), engine);
                 }
                 ssh[&chosen.id].check_directory(&chosen.cwd).await?;
                 ssh[&chosen.id].target.clone()
             } else {
-                let external = registered.iter().find(|t|t.id==chosen.id).context("Unknown target")?;
+                let external = registered
+                    .iter()
+                    .find(|t| t.id == chosen.id)
+                    .context("Unknown target")?;
                 // A registry entry is immutable. A changed endpoint gets a new identity.
-                Target { id: format!("{}-{}",external.id,uuid::Uuid::new_v4().simple()), url: external.url.clone(), cwd: external.cwd.clone() }
+                Target {
+                    id: format!("{}-{}", external.id, uuid::Uuid::new_v4().simple()),
+                    url: external.url.clone(),
+                    cwd: external.cwd.clone(),
+                }
             };
             target.cwd = chosen.cwd.clone();
             targets.push(target);
@@ -99,63 +136,150 @@ impl Orchestrator {
         Ok(targets)
     }
 
-    pub async fn select_targets(&self, id: &str, selection: &[crate::targets::Selection]) -> Result<()> {
+    pub async fn select_targets(
+        &self,
+        id: &str,
+        selection: &[crate::targets::Selection],
+    ) -> Result<()> {
         let _lifecycle = self.jobs.lock().await;
         let _settings = self.manager.connecting.lock().await;
         self.manager.store.ensure_target_selection(id)?;
         let session = self.manager.store.get(id)?;
-        ensure!(!session.archived, "Restore the session before changing its targets");
-        let live = self.manager.runtime(id).await.context("Connect the session to verify it is paused before changing targets")?;
+        ensure!(
+            !session.archived,
+            "Restore the session before changing its targets"
+        );
+        let live = self
+            .manager
+            .runtime(id)
+            .await
+            .context("Connect the session to verify it is paused before changing targets")?;
         Manager::require_idle(&live).await?;
-        ensure!(!self.manager.store.pending(id)?.iter().any(|p|matches!(p.state.as_str(),"pending"|"responding"|"delivered")), "Resolve pending decisions before changing targets");
-        ensure!(self.manager.queued(id).await?.as_array().is_some_and(|q|q.is_empty()), "Remove queued messages before changing targets");
-        let goal = live.rpc.call("thread/goal/get",json!({"threadId":live.thread})).await?;
-        ensure!(goal.get("goal").is_some() && goal["goal"]["status"] != "active", "Pause the goal before changing targets");
+        ensure!(
+            !self
+                .manager
+                .store
+                .pending(id)?
+                .iter()
+                .any(|p| matches!(p.state.as_str(), "pending" | "responding" | "delivered")),
+            "Resolve pending decisions before changing targets"
+        );
+        ensure!(
+            self.manager
+                .queued(id)
+                .await?
+                .as_array()
+                .is_some_and(|q| q.is_empty()),
+            "Remove queued messages before changing targets"
+        );
+        let goal = live
+            .rpc
+            .call("thread/goal/get", json!({"threadId":live.thread}))
+            .await?;
+        ensure!(
+            goal.get("goal").is_some() && goal["goal"]["status"] != "active",
+            "Pause the goal before changing targets"
+        );
         crate::ssh::require_local_app_server(&session.endpoint, selection)?;
         let targets = self.resolve_targets(selection).await?;
         for target in &targets {
-            live.rpc.call("environment/add",json!({"environmentId":target.id,"execServerUrl":target.url})).await?;
+            live.rpc
+                .call(
+                    "environment/add",
+                    json!({"environmentId":target.id,"execServerUrl":target.url}),
+                )
+                .await?;
         }
         // Check again after executor connection work. Nothing has changed on the thread yet.
         Manager::require_idle(&live).await?;
-        self.manager.store.save_target_selection(id, selection, &targets)?;
+        self.manager
+            .store
+            .save_target_selection(id, selection, &targets)?;
         self.manager.store.event(id,&json!({"method":"demodex/targetsSelected","params":{"selection":selection,"appliesOnNextMessage":true}}))?;
         self.manager.changed();
         Ok(())
     }
 
-    pub async fn register_ssh_target(&self, config:crate::ssh::Config)->Result<Value> {
+    pub async fn register_ssh_target(&self, config: crate::ssh::Config) -> Result<Value> {
         // Verify credentials, host key, required remote utilities and cwd before saving.
         config.probe().await?;
-        let id=self.manager.store.register_ssh_target(&config)?;
+        let id = self.manager.store.register_ssh_target(&config)?;
         self.manager.changed();
         Ok(json!({"id":id,"name":config.name,"kind":"ssh","cwd":config.cwd}))
     }
-    pub async fn check_ssh_target(&self,id:&str)->Result<()> {
-        let config=self.manager.store.ssh_targets()?.into_iter().find(|(key,_)|key==id).context("Unknown SSH target")?.1;
-        if let Some(engine)=self.ssh.lock().await.get(id) { engine.check_directory(&config.cwd).await?; } else { config.probe().await?; }
+    pub async fn check_ssh_target(&self, id: &str) -> Result<()> {
+        let config = self
+            .manager
+            .store
+            .ssh_targets()?
+            .into_iter()
+            .find(|(key, _)| key == id)
+            .context("Unknown SSH target")?
+            .1;
+        if let Some(engine) = self.ssh.lock().await.get(id) {
+            engine.check_directory(&config.cwd).await?;
+        } else {
+            config.probe().await?;
+        }
         Ok(())
     }
-    pub async fn reconnect_ssh_target(&self,id:&str)->Result<()> {
-        let _lifecycle=self.jobs.lock().await;
-        let _settings=self.manager.connecting.lock().await;
-        let config=self.manager.store.ssh_targets()?.into_iter().find(|(key,_)|key==id).context("Unknown SSH target")?.1;
-        let users=self.manager.store.target_users(id)?;
+    pub async fn reconnect_ssh_target(&self, id: &str) -> Result<()> {
+        let _lifecycle = self.jobs.lock().await;
+        let _settings = self.manager.connecting.lock().await;
+        let config = self
+            .manager
+            .store
+            .ssh_targets()?
+            .into_iter()
+            .find(|(key, _)| key == id)
+            .context("Unknown SSH target")?
+            .1;
+        let users = self.manager.store.target_users(id)?;
         for session in &users {
-            ensure!(!self.manager.store.pending(session)?.iter().any(|p|matches!(p.state.as_str(),"pending"|"responding"|"delivered")),"Resolve pending decisions in every attached session before replacing the executor");
-            if let Ok(live)=self.manager.runtime(session).await {
+            ensure!(
+                !self
+                    .manager
+                    .store
+                    .pending(session)?
+                    .iter()
+                    .any(|p| matches!(p.state.as_str(), "pending" | "responding" | "delivered")),
+                "Resolve pending decisions in every attached session before replacing the executor"
+            );
+            if let Ok(live) = self.manager.runtime(session).await {
                 Manager::require_idle(&live).await?;
-                ensure!(self.manager.queued(session).await?.as_array().is_some_and(|q|q.is_empty()),"Clear queued messages in every attached session first");
-                let goal=live.rpc.call("thread/goal/get",json!({"threadId":live.thread})).await?;
-                ensure!(goal.get("goal").is_some() && goal["goal"]["status"]!="active","Pause every attached session's goal first");
+                ensure!(
+                    self.manager
+                        .queued(session)
+                        .await?
+                        .as_array()
+                        .is_some_and(|q| q.is_empty()),
+                    "Clear queued messages in every attached session first"
+                );
+                let goal = live
+                    .rpc
+                    .call("thread/goal/get", json!({"threadId":live.thread}))
+                    .await?;
+                ensure!(
+                    goal.get("goal").is_some() && goal["goal"]["status"] != "active",
+                    "Pause every attached session's goal first"
+                );
             }
         }
-        let replacement=crate::ssh::Engine::start(id,config).await?;
+        let replacement = crate::ssh::Engine::start(id, config).await?;
         for session in &users {
-            if let Ok(live)=self.manager.runtime(session).await {Manager::require_idle(&live).await?;}
+            if let Ok(live) = self.manager.runtime(session).await {
+                Manager::require_idle(&live).await?;
+            }
         }
-        for session in users {self.manager.disconnect(&session,"SSH executor replaced; reconnect explicitly to obtain fresh handles").await?;}
-        self.ssh.lock().await.insert(id.into(),replacement);
+        for session in users {
+            self.manager
+                .disconnect(
+                    &session,
+                    "SSH executor replaced; reconnect explicitly to obtain fresh handles",
+                )
+                .await?;
+        }
+        self.ssh.lock().await.insert(id.into(), replacement);
         self.manager.changed();
         Ok(())
     }
@@ -192,8 +316,15 @@ impl Orchestrator {
         let host_users = self.manager.store.target_users("host")?;
         let mut sessions = Vec::new();
         for session in self.manager.store.list()? {
-            if self.manager.store.uses_runtime(&session.id)? || hosts.contains(&session.id) || host_users.contains(&session.id)
-                || self.manager.store.session_environment(&session.id)?.is_some() {
+            if self.manager.store.uses_runtime(&session.id)?
+                || hosts.contains(&session.id)
+                || host_users.contains(&session.id)
+                || self
+                    .manager
+                    .store
+                    .session_environment(&session.id)?
+                    .is_some()
+            {
                 sessions.push(session.id);
             }
         }
@@ -374,7 +505,7 @@ impl Orchestrator {
                 Ok(account) => {
                     let usage = self.usage.read(rpc.clone(), &account["account"]).await;
                     json!({"running":true,"account":account["account"],"weekly_usage":usage})
-                },
+                }
                 Err(error) => json!({"running":false,"error":error.to_string()}),
             },
             Err(error) => json!({"running":false,"error":error.to_string()}),
@@ -396,7 +527,10 @@ impl Orchestrator {
     }
 
     pub async fn saved_threads(&self, cursor: Option<String>, search: String) -> Result<Value> {
-        ensure!(self.is_host_mode(), "saved-thread discovery is available in host mode");
+        ensure!(
+            self.is_host_mode(),
+            "saved-thread discovery is available in host mode"
+        );
         let (rpc, _) = self.runtime_rpc().await?;
         let search = (!search.trim().is_empty()).then(|| search.trim().to_owned());
         rpc.call("thread/list", json!({"cursor":cursor,"limit":50,"sortKey":"updated_at","searchTerm":search,"modelProviders":[]})).await
@@ -718,64 +852,106 @@ impl Orchestrator {
         self.manager.store.get(id)?;
         self.manager.store.ensure_target_selection(id)?;
         let selection = self.manager.store.target_selection(id)?.unwrap_or_default();
-        let primary = selection.first().context("Select an execution target before uploading")?;
+        let primary = selection
+            .first()
+            .context("Select an execution target before uploading")?;
         if primary.id == "host" {
             ensure!(self.is_host_mode(), "Host execution is not configured");
             return crate::uploads::save(&self.root, bytes, extension);
         }
         if primary.id.starts_with("ssh-") {
-            let ssh=self.ssh.lock().await;
-            let engine=ssh.get(&primary.id).context("Reconnect the session before uploading to SSH")?;
-            return engine.upload(&primary.cwd,bytes,extension).await;
+            let ssh = self.ssh.lock().await;
+            let engine = ssh
+                .get(&primary.id)
+                .context("Reconnect the session before uploading to SSH")?;
+            return engine.upload(&primary.cwd, bytes, extension).await;
         }
-        let environment = primary.id.strip_prefix("vm-")
-            .context("Image upload requires a host or VM as the first selected target")?.to_owned();
+        let environment = primary
+            .id
+            .strip_prefix("vm-")
+            .context("Image upload requires a host or VM as the first selected target")?
+            .to_owned();
         let machines = self.machines.lock().await;
-        let machine = machines.get(&environment).context("Start the session's VM before uploading")?;
+        let machine = machines
+            .get(&environment)
+            .context("Start the session's VM before uploading")?;
         ensure!(machine.target.is_some(), "VM executor is not ready");
         // No user text enters the remote shell. Each upload has a new private directory.
         let directory = format!("/workspace/.demodex-upload-{}", uuid::Uuid::new_v4());
         let path = format!("{directory}/image.{extension}");
-        let script = format!("umask 077; mkdir '{directory}' && cat > '{directory}/pending' && mv '{directory}/pending' '{path}'");
-        let mut child = self.ssh(&environment, machine.ssh_port).arg(script)
-            .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped())
-            .kill_on_drop(true).spawn()?;
+        let script = format!(
+            "umask 077; mkdir '{directory}' && cat > '{directory}/pending' && mv '{directory}/pending' '{path}'"
+        );
+        let mut child = self
+            .ssh(&environment, machine.ssh_port)
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
         tokio::time::timeout(Duration::from_secs(30), async {
             let mut stdin = child.stdin.take().context("upload stdin unavailable")?;
             stdin.write_all(bytes).await?;
             stdin.shutdown().await?;
             drop(stdin);
             let output = child.wait_with_output().await?;
-            ensure!(output.status.success(), "VM image upload failed: {}", String::from_utf8_lossy(&output.stderr));
+            ensure!(
+                output.status.success(),
+                "VM image upload failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             Ok::<(), anyhow::Error>(())
-        }).await.context("VM image upload timed out; inspect its command receipt before retrying")??;
+        })
+        .await
+        .context("VM image upload timed out; inspect its command receipt before retrying")??;
         Ok(path)
     }
 
     pub async fn connect_session(&self, id: &str) -> Result<()> {
         let _lifecycle = self.jobs.lock().await;
-        if self.manager.live.lock().await.contains_key(id) { return Ok(()); }
+        if self.manager.live.lock().await.contains_key(id) {
+            return Ok(());
+        }
         self.manager.store.ensure_target_selection(id)?;
         let selection = self.manager.store.target_selection(id)?.unwrap_or_default();
         let session = self.manager.store.get(id)?;
-        let managed = self.manager.store.uses_runtime(id)? || self.manager.store.host_sessions()?.iter().any(|s|s==id)
+        let managed = self.manager.store.uses_runtime(id)?
+            || self.manager.store.host_sessions()?.iter().any(|s| s == id)
             || self.manager.store.session_environment(id)?.is_some();
-        let endpoint = if managed { self.runtime_rpc().await?.1 } else { session.endpoint };
+        let endpoint = if managed {
+            self.runtime_rpc().await?.1
+        } else {
+            session.endpoint
+        };
         crate::ssh::require_local_app_server(&endpoint, &selection)?;
         let targets = self.resolve_targets(&selection).await?;
         self.manager.store.retarget(id, &endpoint, &targets)?;
         // Resuming does not update Codex's selected environments until turn/start.
         if session.thread_id.is_some() {
-            self.manager.store.save_target_selection(id, &selection, &targets)?;
+            self.manager
+                .store
+                .save_target_selection(id, &selection, &targets)?;
         }
         self.manager.connect(id).await
     }
 
-    pub async fn selected_session(&self, name: &str, selection: &[crate::targets::Selection], sandbox: Option<crate::store::Sandbox>) -> Result<Session> {
-        ensure!(!name.trim().is_empty() && name.len() <= 120, "session name must be 1–120 characters");
+    pub async fn selected_session(
+        &self,
+        name: &str,
+        selection: &[crate::targets::Selection],
+        sandbox: Option<crate::store::Sandbox>,
+    ) -> Result<Session> {
+        ensure!(
+            !name.trim().is_empty() && name.len() <= 120,
+            "session name must be 1–120 characters"
+        );
         crate::targets::validate_selection(selection)?;
         if selection.iter().any(|target| target.id.starts_with("ssh-")) {
-            ensure!(matches!(sandbox, Some(crate::store::Sandbox::DangerFullAccess)), "SSH targets require danger-full-access");
+            ensure!(
+                matches!(sandbox, Some(crate::store::Sandbox::DangerFullAccess)),
+                "SSH targets require danger-full-access"
+            );
         }
         let session = {
             let _lifecycle = self.jobs.lock().await;
@@ -783,29 +959,55 @@ impl Orchestrator {
             crate::ssh::require_local_app_server(&endpoint, selection)?;
             let targets = self.resolve_targets(selection).await?;
             for target in &targets {
-                rpc.call("environment/add", json!({"environmentId":target.id,"execServerUrl":target.url})).await?;
+                rpc.call(
+                    "environment/add",
+                    json!({"environmentId":target.id,"execServerUrl":target.url}),
+                )
+                .await?;
             }
-            self.manager.store.create_selected(name.trim(), &endpoint, &targets, selection, sandbox)?
+            self.manager.store.create_selected(
+                name.trim(),
+                &endpoint,
+                &targets,
+                selection,
+                sandbox,
+            )?
         };
         // Preserve the created session on an uncertain thread/start outcome; never retry it here.
         if let Err(error) = self.connect_session(&session.id).await {
-            self.manager.store.status(&session.id, "disconnected", Some(&error.to_string()))?;
+            self.manager
+                .store
+                .status(&session.id, "disconnected", Some(&error.to_string()))?;
         }
         self.manager.changed();
         self.manager.store.get(&session.id)
     }
 
-    pub async fn host_session(&self, name: &str, thread_id: Option<&str>, sandbox: Option<crate::store::Sandbox>, cwd: Option<&str>) -> Result<Session> {
+    pub async fn host_session(
+        &self,
+        name: &str,
+        thread_id: Option<&str>,
+        sandbox: Option<crate::store::Sandbox>,
+        cwd: Option<&str>,
+    ) -> Result<Session> {
         ensure!(self.is_host_mode(), "host execution is not configured");
         ensure!(
             !name.trim().is_empty() && name.len() <= 120,
             "session name must be 1–120 characters"
         );
         let (rpc, endpoint) = self.runtime_rpc().await?;
-        let requested_cwd = cwd.map(|path| -> Result<String> {
-            ensure!(Path::new(path).is_absolute() && Path::new(path).is_dir(), "working directory must be an existing absolute directory on this host");
-            Ok(Path::new(path).canonicalize()?.to_string_lossy().into_owned())
-        }).transpose()?;
+        let requested_cwd = cwd
+            .map(|path| -> Result<String> {
+                ensure!(
+                    Path::new(path).is_absolute() && Path::new(path).is_dir(),
+                    "working directory must be an existing absolute directory on this host"
+                );
+                Ok(Path::new(path)
+                    .canonicalize()?
+                    .to_string_lossy()
+                    .into_owned())
+            })
+            .transpose()?;
         if let Some(thread) = thread_id
             && let Some(existing) = self
                 .manager
@@ -819,10 +1021,16 @@ impl Orchestrator {
                 "thread is already attached through another environment"
             );
             if let Some(cwd) = &requested_cwd {
-                ensure!(existing.targets.first().is_some_and(|t|Path::new(&t.cwd).canonicalize().ok().as_deref()==Some(Path::new(cwd))),
-                    "this thread is already attached with a different working directory; select its existing session or start a new thread");
+                ensure!(
+                    existing.targets.first().is_some_and(|t| Path::new(&t.cwd)
+                        .canonicalize()
+                        .ok()
+                        .as_deref()
+                        == Some(Path::new(cwd))),
+                    "this thread is already attached with a different working directory; select its existing session or start a new thread"
+                );
             }
-            self.manager.change_sandbox(&existing.id,sandbox).await?;
+            self.manager.change_sandbox(&existing.id, sandbox).await?;
             self.connect_session(&existing.id).await?;
             return self.manager.store.get(&existing.id);
         }
@@ -851,9 +1059,18 @@ impl Orchestrator {
             );
             target.cwd = cwd.into();
         }
-        let attachment = crate::targets::Selection { id: "host".into(), cwd: target.cwd.clone() };
-        let session = self.manager.store.create_attached(name.trim(), &endpoint, &[target], thread_id, Some(&attachment))?;
-        self.manager.store.sandbox(&session.id,sandbox)?;
+        let attachment = crate::targets::Selection {
+            id: "host".into(),
+            cwd: target.cwd.clone(),
+        };
+        let session = self.manager.store.create_attached(
+            name.trim(),
+            &endpoint,
+            &[target],
+            thread_id,
+            Some(&attachment),
+        )?;
+        self.manager.store.sandbox(&session.id, sandbox)?;
         if let Err(error) = self.connect_session(&session.id).await {
             self.manager
                 .store
@@ -862,13 +1079,24 @@ impl Orchestrator {
         self.manager.store.get(&session.id)
     }
 
-    pub async fn session(&self, id: &str, name: &str, sandbox: Option<crate::store::Sandbox>) -> Result<Session> {
+    pub async fn session(
+        &self,
+        id: &str,
+        name: &str,
+        sandbox: Option<crate::store::Sandbox>,
+    ) -> Result<Session> {
         self.manager.store.environment(id)?;
         ensure!(!name.trim().is_empty(), "session name is required");
         let (_, endpoint) = self.runtime_rpc().await?;
-        let attachment = crate::targets::Selection { id: format!("vm-{id}"), cwd: "/workspace".into() };
-        let session = self.manager.store.create_attached(name, &endpoint, &[], None, Some(&attachment))?;
-        self.manager.store.sandbox(&session.id,sandbox)?;
+        let attachment = crate::targets::Selection {
+            id: format!("vm-{id}"),
+            cwd: "/workspace".into(),
+        };
+        let session =
+            self.manager
+                .store
+                .create_attached(name, &endpoint, &[], None, Some(&attachment))?;
+        self.manager.store.sandbox(&session.id, sandbox)?;
         // Leave the session reviewable and reconnectable even if connection setup fails.
         if let Err(error) = self.connect_session(&session.id).await {
             self.manager

@@ -132,7 +132,10 @@ impl Client {
                     Some(ractor_wormhole::conduit::ConduitMessage::Handshake(text)),
                     _,
                 )) => text,
-                futures_util::future::Either::Left((None | Some(ractor_wormhole::conduit::ConduitMessage::Close(_)), _)) => anyhow::bail!("WebSocket closed before the host replied"),
+                futures_util::future::Either::Left((
+                    None | Some(ractor_wormhole::conduit::ConduitMessage::Close(_)),
+                    _,
+                )) => anyhow::bail!("WebSocket closed before the host replied"),
                 _ => anyhow::bail!(
                     "Protocol mismatch: host did not send a Demodex compatibility hello"
                 ),

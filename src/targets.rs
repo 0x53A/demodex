@@ -193,16 +193,25 @@ impl Store {
         Ok(target)
     }
 
-    pub fn ssh_targets(&self) -> Result<Vec<(String,crate::ssh::Config)>> {
-        let db=self.lock()?;
-        let mut query=db.prepare("SELECT id,config FROM ssh_targets ORDER BY rowid")?;
-        let rows=query.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        rows.into_iter().map(|(id,config)|Ok((id,serde_json::from_str(&config)?))).collect()
+    pub fn ssh_targets(&self) -> Result<Vec<(String, crate::ssh::Config)>> {
+        let db = self.lock()?;
+        let mut query = db.prepare("SELECT id,config FROM ssh_targets ORDER BY rowid")?;
+        let rows = query
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(id, config)| Ok((id, serde_json::from_str(&config)?)))
+            .collect()
     }
-    pub fn register_ssh_target(&self, config:&crate::ssh::Config) -> Result<String> {
+    pub fn register_ssh_target(&self, config: &crate::ssh::Config) -> Result<String> {
         config.validate()?;
-        let id=format!("ssh-{}",uuid::Uuid::new_v4());
-        self.lock()?.execute("INSERT INTO ssh_targets VALUES(?1,?2)",params![id,serde_json::to_string(config)?])?;
+        let id = format!("ssh-{}", uuid::Uuid::new_v4());
+        self.lock()?.execute(
+            "INSERT INTO ssh_targets VALUES(?1,?2)",
+            params![id, serde_json::to_string(config)?],
+        )?;
         Ok(id)
     }
 
@@ -228,10 +237,13 @@ impl Store {
             self.target_users(id)?.is_empty(),
             "Detach this target from every session before forgetting it"
         );
-        let db=self.lock()?;
-        let removed=db.execute("DELETE FROM execution_targets WHERE id=?1", [id])?
+        let db = self.lock()?;
+        let removed = db.execute("DELETE FROM execution_targets WHERE id=?1", [id])?
             + db.execute("DELETE FROM ssh_targets WHERE id=?1", [id])?;
-        ensure!(removed==1,"Only registered external or SSH targets can be forgotten");
+        ensure!(
+            removed == 1,
+            "Only registered external or SSH targets can be forgotten"
+        );
         Ok(())
     }
 }
@@ -253,8 +265,17 @@ mod tests {
         let root = tempfile::tempdir()?;
         let path = root.path().join("db");
         let store = Store::open(&path)?;
-        let selection = vec![Selection { id:"ssh-build".into(), cwd:"/project".into() }];
-        let session = store.create_selected("SSH only", "unix:///runtime/app.sock", &[], &selection, Some(crate::store::Sandbox::DangerFullAccess))?;
+        let selection = vec![Selection {
+            id: "ssh-build".into(),
+            cwd: "/project".into(),
+        }];
+        let session = store.create_selected(
+            "SSH only",
+            "unix:///runtime/app.sock",
+            &[],
+            &selection,
+            Some(crate::store::Sandbox::DangerFullAccess),
+        )?;
         assert!(store.uses_runtime(&session.id)?);
         assert!(store.host_sessions()?.is_empty());
         assert!(store.session_environment(&session.id)?.is_none());
@@ -264,7 +285,10 @@ mod tests {
         store.ensure_target_selection(&session.id)?;
         assert_eq!(store.target_selection(&session.id)?, Some(selection));
         assert!(store.uses_runtime(&session.id)?);
-        assert!(matches!(store.get(&session.id)?.sandbox, Some(crate::store::Sandbox::DangerFullAccess)));
+        assert!(matches!(
+            store.get(&session.id)?.sandbox,
+            Some(crate::store::Sandbox::DangerFullAccess)
+        ));
         Ok(())
     }
 

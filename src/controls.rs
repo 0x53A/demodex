@@ -225,11 +225,17 @@ impl Manager {
 
     pub async fn change_goal(&self, id: &str, action: GoalAction) -> Result<Value> {
         let _settings = self.connecting.lock().await;
-        ensure!(!self.store.get(id)?.archived, "Restore the session before changing its goal");
+        ensure!(
+            !self.store.get(id)?.archived,
+            "Restore the session before changing its goal"
+        );
         let live = self.runtime(id).await?;
         let (method, params) = goal_params(&live.thread, &action)?;
         if action.action == "resume" {
-            ensure!(!self.store.targets_pending(id)?, "Send a message to apply the selected targets before resuming the goal");
+            ensure!(
+                !self.store.targets_pending(id)?,
+                "Send a message to apply the selected targets before resuming the goal"
+            );
         }
         // Pausing prevents further autonomous turns, and remains available while
         // the current turn is running. It does not implicitly interrupt that turn.

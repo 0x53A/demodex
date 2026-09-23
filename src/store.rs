@@ -40,7 +40,11 @@ pub struct Session {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Sandbox { ReadOnly, WorkspaceWrite, DangerFullAccess }
+pub enum Sandbox {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
 
 #[derive(Debug, Serialize)]
 pub struct Event {
@@ -112,11 +116,21 @@ impl Store {
         let ids = connection.prepare("SELECT id FROM sessions WHERE id NOT IN (SELECT session_id FROM session_presentation)")?
             .query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         for id in ids {
-            connection.execute("INSERT INTO session_presentation VALUES(?1,?2)", params![id, serde_json::to_string(&crate::session_context::Presentation::generate())?])?;
+            connection.execute(
+                "INSERT INTO session_presentation VALUES(?1,?2)",
+                params![
+                    id,
+                    serde_json::to_string(&crate::session_context::Presentation::generate())?
+                ],
+            )?;
         }
         // Recover the last report already in persisted history on first upgrade.
-        let usage_ids = connection.prepare("SELECT id FROM sessions WHERE id NOT IN (SELECT session_id FROM session_usage)")?
-            .query_map([], |r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let usage_ids = connection
+            .prepare(
+                "SELECT id FROM sessions WHERE id NOT IN (SELECT session_id FROM session_usage)",
+            )?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         for id in usage_ids {
             let report: Option<(String,Option<i64>)> = connection.query_row(
                 "SELECT message,unixepoch(at) FROM events WHERE session_id=?1 AND json_extract(message,'$.method')='thread/tokenUsage/updated' ORDER BY seq DESC LIMIT 1",
@@ -125,11 +139,16 @@ impl Store {
                 let message: Value = serde_json::from_str(&message)?;
                 let mut usage = crate::usage::context(&message["params"]["tokenUsage"]);
                 usage["reported_at"] = serde_json::json!(at);
-                connection.execute("INSERT INTO session_usage VALUES(?1,?2)",params![id,usage.to_string()])?;
+                connection.execute(
+                    "INSERT INTO session_usage VALUES(?1,?2)",
+                    params![id, usage.to_string()],
+                )?;
             }
         }
         let store = Self(Mutex::new(connection));
-        for session in store.list()? { store.ensure_target_selection(&session.id)?; }
+        for session in store.list()? {
+            store.ensure_target_selection(&session.id)?;
+        }
         Ok(store)
     }
 
@@ -140,54 +159,115 @@ impl Store {
     }
 
     pub fn receipt(&self, id: &str) -> Result<Option<(String, Option<String>)>> {
-        Ok(self.lock()?.query_row("SELECT operation,response FROM command_receipts WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT operation,response FROM command_receipts WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
     }
 
     pub fn begin_command(&self, id: &str, operation: &str) -> Result<()> {
-        self.lock()?.execute("INSERT INTO command_receipts(id,operation) VALUES(?1,?2)", params![id, operation])?;
+        self.lock()?.execute(
+            "INSERT INTO command_receipts(id,operation) VALUES(?1,?2)",
+            params![id, operation],
+        )?;
         Ok(())
     }
 
     pub fn finish_command(&self, id: &str, response: &str) -> Result<()> {
-        self.lock()?.execute("UPDATE command_receipts SET response=?2 WHERE id=?1", params![id, response])?;
+        self.lock()?.execute(
+            "UPDATE command_receipts SET response=?2 WHERE id=?1",
+            params![id, response],
+        )?;
         Ok(())
     }
 
-    pub fn environment_create(&self,name:&str,memory_mib:u32,cpus:u16,internet:bool)->Result<Environment> {
-        let id=uuid::Uuid::new_v4().to_string();
-        self.lock()?.execute("INSERT INTO environments VALUES(?1,?2,?3,?4,?5,'stopped',NULL)",params![id,name,memory_mib,cpus,internet])?;
+    pub fn environment_create(
+        &self,
+        name: &str,
+        memory_mib: u32,
+        cpus: u16,
+        internet: bool,
+    ) -> Result<Environment> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.lock()?.execute(
+            "INSERT INTO environments VALUES(?1,?2,?3,?4,?5,'stopped',NULL)",
+            params![id, name, memory_mib, cpus, internet],
+        )?;
         self.environment(&id)
     }
-    pub fn environments(&self)->Result<Vec<Environment>> {
-        let db=self.lock()?;
-        let mut query=db.prepare("SELECT id,name,memory_mib,cpus,internet,status,error FROM environments ORDER BY rowid")?;
-        Ok(query.query_map([],|r|Ok(Environment{id:r.get(0)?,name:r.get(1)?,memory_mib:r.get(2)?,cpus:r.get(3)?,internet:r.get(4)?,status:r.get(5)?,error:r.get(6)?}))?.collect::<rusqlite::Result<Vec<_>>>()?)
+    pub fn environments(&self) -> Result<Vec<Environment>> {
+        let db = self.lock()?;
+        let mut query = db.prepare(
+            "SELECT id,name,memory_mib,cpus,internet,status,error FROM environments ORDER BY rowid",
+        )?;
+        Ok(query
+            .query_map([], |r| {
+                Ok(Environment {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    memory_mib: r.get(2)?,
+                    cpus: r.get(3)?,
+                    internet: r.get(4)?,
+                    status: r.get(5)?,
+                    error: r.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
-    pub fn environment(&self,id:&str)->Result<Environment> {
-        self.environments()?.into_iter().find(|e|e.id==id).context("environment not found")
+    pub fn environment(&self, id: &str) -> Result<Environment> {
+        self.environments()?
+            .into_iter()
+            .find(|e| e.id == id)
+            .context("environment not found")
     }
-    pub fn environment_status(&self,id:&str,status:&str,error:Option<&str>)->Result<()> {
-        self.lock()?.execute("UPDATE environments SET status=?2,error=?3 WHERE id=?1",params![id,status,error])?;Ok(())
+    pub fn environment_status(&self, id: &str, status: &str, error: Option<&str>) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE environments SET status=?2,error=?3 WHERE id=?1",
+            params![id, status, error],
+        )?;
+        Ok(())
     }
     #[cfg(test)]
-    pub fn bind_environment(&self,session:&str,environment:&str)->Result<()> {
-        self.lock()?.execute("INSERT INTO session_environment VALUES(?1,?2)",params![session,environment])?;Ok(())
+    pub fn bind_environment(&self, session: &str, environment: &str) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO session_environment VALUES(?1,?2)",
+            params![session, environment],
+        )?;
+        Ok(())
     }
-    pub fn session_environment(&self,session:&str)->Result<Option<String>> {
-        Ok(self.lock()?.query_row("SELECT environment_id FROM session_environment WHERE session_id=?1",[session],|r|r.get(0)).optional()?)
+    pub fn session_environment(&self, session: &str) -> Result<Option<String>> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT environment_id FROM session_environment WHERE session_id=?1",
+                [session],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
-    pub fn retarget(&self,session:&str,endpoint:&str,targets:&[Target])->Result<()> {
-        self.lock()?.execute("UPDATE sessions SET endpoint=?2,targets=?3 WHERE id=?1",params![session,endpoint,serde_json::to_string(targets)?])?;Ok(())
+    pub fn retarget(&self, session: &str, endpoint: &str, targets: &[Target]) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE sessions SET endpoint=?2,targets=?3 WHERE id=?1",
+            params![session, endpoint, serde_json::to_string(targets)?],
+        )?;
+        Ok(())
     }
     #[cfg(test)]
     pub fn bind_host(&self, session: &str) -> Result<()> {
-        self.lock()?.execute("INSERT INTO host_sessions VALUES(?1)", [session])?;
+        self.lock()?
+            .execute("INSERT INTO host_sessions VALUES(?1)", [session])?;
         Ok(())
     }
     pub fn host_sessions(&self) -> Result<Vec<String>> {
         let db = self.lock()?;
         let mut query = db.prepare("SELECT session_id FROM host_sessions")?;
-        Ok(query.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
+        Ok(query
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn create(
@@ -197,7 +277,7 @@ impl Store {
         targets: &[Target],
         thread_id: Option<&str>,
     ) -> Result<Session> {
-        self.create_attached(name,endpoint,targets,thread_id,None)
+        self.create_attached(name, endpoint, targets, thread_id, None)
     }
 
     pub fn create_attached(
@@ -211,37 +291,84 @@ impl Store {
         self.create_initial(name, endpoint, targets, thread_id, attachment, None)
     }
 
-    pub fn create_selected(&self, name: &str, endpoint: &str, targets: &[Target], selection: &[crate::targets::Selection], sandbox: Option<Sandbox>) -> Result<Session> {
-        self.create_initial(name, endpoint, targets, None, None, Some((selection, sandbox)))
+    pub fn create_selected(
+        &self,
+        name: &str,
+        endpoint: &str,
+        targets: &[Target],
+        selection: &[crate::targets::Selection],
+        sandbox: Option<Sandbox>,
+    ) -> Result<Session> {
+        self.create_initial(
+            name,
+            endpoint,
+            targets,
+            None,
+            None,
+            Some((selection, sandbox)),
+        )
     }
 
     pub fn uses_runtime(&self, id: &str) -> Result<bool> {
-        Ok(self.lock()?.query_row("SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?1)", [id], |r| r.get(0))?)
+        Ok(self.lock()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?1)",
+            [id],
+            |r| r.get(0),
+        )?)
     }
 
-    fn create_initial(&self, name: &str, endpoint: &str, targets: &[Target], thread_id: Option<&str>, attachment: Option<&crate::targets::Selection>, selected: Option<(&[crate::targets::Selection], Option<Sandbox>)>) -> Result<Session> {
+    fn create_initial(
+        &self,
+        name: &str,
+        endpoint: &str,
+        targets: &[Target],
+        thread_id: Option<&str>,
+        attachment: Option<&crate::targets::Selection>,
+        selected: Option<(&[crate::targets::Selection], Option<Sandbox>)>,
+    ) -> Result<Session> {
         let id = uuid::Uuid::new_v4().to_string();
         let mut db = self.lock()?;
         let tx = db.transaction()?;
         tx.execute("INSERT INTO sessions(id,name,endpoint,targets,thread_id,status) VALUES(?1,?2,?3,?4,?5,'disconnected')",
             params![id, name, endpoint, serde_json::to_string(targets)?, thread_id])?;
-        tx.execute("INSERT INTO session_presentation VALUES(?1,?2)", params![id, serde_json::to_string(&crate::session_context::Presentation::generate())?])?;
+        tx.execute(
+            "INSERT INTO session_presentation VALUES(?1,?2)",
+            params![
+                id,
+                serde_json::to_string(&crate::session_context::Presentation::generate())?
+            ],
+        )?;
         if let Some(attachment) = attachment {
             // Publish the session and its initial managed selection atomically.
             // Concurrent snapshots must never migrate a half-created host/VM
             // session as an external executor or an empty selection.
             if attachment.id == "host" {
-                tx.execute("INSERT INTO host_sessions VALUES(?1)",[&id])?;
+                tx.execute("INSERT INTO host_sessions VALUES(?1)", [&id])?;
             } else {
-                let vm=attachment.id.strip_prefix("vm-").context("Invalid managed attachment")?;
-                tx.execute("INSERT INTO session_environment VALUES(?1,?2)",params![id,vm])?;
+                let vm = attachment
+                    .id
+                    .strip_prefix("vm-")
+                    .context("Invalid managed attachment")?;
+                tx.execute(
+                    "INSERT INTO session_environment VALUES(?1,?2)",
+                    params![id, vm],
+                )?;
             }
-            tx.execute("INSERT INTO session_targets VALUES(?1,?2,0)",params![id,serde_json::to_string(&[attachment])?])?;
+            tx.execute(
+                "INSERT INTO session_targets VALUES(?1,?2,0)",
+                params![id, serde_json::to_string(&[attachment])?],
+            )?;
         }
         if let Some((selection, sandbox)) = selected {
             tx.execute("INSERT INTO runtime_sessions VALUES(?1)", [&id])?;
-            tx.execute("INSERT INTO session_targets VALUES(?1,?2,0)", params![id, serde_json::to_string(selection)?])?;
-            tx.execute("INSERT INTO session_settings(session_id,sandbox) VALUES(?1,?2)", params![id, sandbox.map(|v| serde_json::to_string(&v)).transpose()?])?;
+            tx.execute(
+                "INSERT INTO session_targets VALUES(?1,?2,0)",
+                params![id, serde_json::to_string(selection)?],
+            )?;
+            tx.execute(
+                "INSERT INTO session_settings(session_id,sandbox) VALUES(?1,?2)",
+                params![id, sandbox.map(|v| serde_json::to_string(&v)).transpose()?],
+            )?;
         }
         tx.commit()?;
         drop(db);
@@ -279,10 +406,27 @@ impl Store {
             ))
         })?;
         rows.map(|row| {
-            let (id, name, endpoint, thread_id, targets, status, error, sandbox, effective_sandbox, presentation, archived, context_usage) = row?;
+            let (
+                id,
+                name,
+                endpoint,
+                thread_id,
+                targets,
+                status,
+                error,
+                sandbox,
+                effective_sandbox,
+                presentation,
+                archived,
+                context_usage,
+            ) = row?;
             Ok(Session {
                 archived,
-                context_usage: context_usage.as_deref().map(serde_json::from_str).transpose()?.unwrap_or(Value::Null),
+                context_usage: context_usage
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()?
+                    .unwrap_or(Value::Null),
                 id,
                 name,
                 endpoint,
@@ -291,7 +435,10 @@ impl Store {
                 status,
                 error,
                 sandbox: sandbox.as_deref().map(serde_json::from_str).transpose()?,
-                effective_sandbox: effective_sandbox.as_deref().map(serde_json::from_str).transpose()?,
+                effective_sandbox: effective_sandbox
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()?,
                 presentation: serde_json::from_str(&presentation)?,
             })
         })
@@ -308,7 +455,10 @@ impl Store {
         self.get(id)?;
         let db = self.lock()?;
         if archived {
-            db.execute("INSERT OR IGNORE INTO session_archive(session_id) VALUES(?1)", [id])?;
+            db.execute(
+                "INSERT OR IGNORE INTO session_archive(session_id) VALUES(?1)",
+                [id],
+            )?;
         } else {
             db.execute("DELETE FROM session_archive WHERE session_id=?1", [id])?;
         }
@@ -325,14 +475,26 @@ impl Store {
     pub fn enable_context_reporting(&self, id: &str) -> Result<()> {
         let mut presentation = self.get(id)?.presentation;
         presentation.context_reporting = true;
-        self.lock()?.execute("UPDATE session_presentation SET value=?2 WHERE session_id=?1", params![id, serde_json::to_string(&presentation)?])?;
+        self.lock()?.execute(
+            "UPDATE session_presentation SET value=?2 WHERE session_id=?1",
+            params![id, serde_json::to_string(&presentation)?],
+        )?;
         Ok(())
     }
 
     pub fn model_settings(&self, id: &str) -> Result<Value> {
-        let values: Option<(Option<String>,Option<String>)> = self.lock()?.query_row("SELECT selection,effective FROM session_model WHERE session_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-        let (selection,effective) = values.unwrap_or_default();
-        Ok(serde_json::json!({"selection":selection.map(|v|serde_json::from_str::<Value>(&v)).transpose()?,"effective":effective.map(|v|serde_json::from_str::<Value>(&v)).transpose()?}))
+        let values: Option<(Option<String>, Option<String>)> = self
+            .lock()?
+            .query_row(
+                "SELECT selection,effective FROM session_model WHERE session_id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (selection, effective) = values.unwrap_or_default();
+        Ok(
+            serde_json::json!({"selection":selection.map(|v|serde_json::from_str::<Value>(&v)).transpose()?,"effective":effective.map(|v|serde_json::from_str::<Value>(&v)).transpose()?}),
+        )
     }
     pub fn model_selection(&self, id: &str, value: &Value) -> Result<()> {
         self.lock()?.execute("INSERT INTO session_model(session_id,selection) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET selection=excluded.selection",params![id,value.to_string()])?;
@@ -348,37 +510,73 @@ impl Store {
     pub fn context_tool(&self, id: &str, thread: &str, request: &Value) -> Result<Value> {
         use crate::session_context::{self, UserVisibleContext};
         let mut session = self.get(id)?;
-        anyhow::ensure!(request["threadId"] == thread && session.thread_id.as_deref() == Some(thread), "tool call does not belong to this session");
-        let call_id = request["callId"].as_str().filter(|s| !s.is_empty()).context("missing tool call ID")?;
+        anyhow::ensure!(
+            request["threadId"] == thread && session.thread_id.as_deref() == Some(thread),
+            "tool call does not belong to this session"
+        );
+        let call_id = request["callId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .context("missing tool call ID")?;
         let request_text = request.to_string();
         let mut db = self.lock()?;
         let tx = db.transaction()?;
         let previous: Option<(String, String)> = tx.query_row("SELECT request,response FROM context_tool_receipts WHERE session_id=?1 AND thread_id=?2 AND call_id=?3", params![id,thread,call_id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
         if let Some((original, response)) = previous {
-            anyhow::ensure!(original == request_text, "tool call ID reused with different arguments");
+            anyhow::ensure!(
+                original == request_text,
+                "tool call ID reused with different arguments"
+            );
             return Ok(serde_json::from_str(&response)?);
         }
         let result = (|| -> Result<Value> {
-            anyhow::ensure!(session.presentation.context_reporting, "Demodex context tools were not registered for this thread");
-            anyhow::ensure!(request["namespace"] == "demodex", "unsupported tool namespace");
+            anyhow::ensure!(
+                session.presentation.context_reporting,
+                "Demodex context tools were not registered for this thread"
+            );
+            anyhow::ensure!(
+                request["namespace"] == "demodex",
+                "unsupported tool namespace"
+            );
             match request["tool"].as_str().unwrap_or("") {
                 "set_user_visible_session_context" => {
-                    let mut context: UserVisibleContext = serde_json::from_value(request["arguments"].clone())?;
+                    let mut context: UserVisibleContext =
+                        serde_json::from_value(request["arguments"].clone())?;
                     session_context::validate(&mut context, &session.targets)?;
                     session.presentation.context = Some(context);
                     Ok(serde_json::to_value(&session.presentation)?)
                 }
                 "get_session_context" => {
-                    anyhow::ensure!(request["arguments"].as_object().is_some_and(|v| v.is_empty()), "get_session_context takes no arguments");
-                    Ok(serde_json::json!({"session_id":session.id,"thread_id":session.thread_id,"presentation":session.presentation,"environments":session.targets.iter().map(|t| serde_json::json!({"environment_id":t.id,"execution_directory":t.cwd,"executor_guidance":if t.id.starts_with("ssh-"){Some(crate::ssh::AGENT_INSTRUCTIONS)}else{None}})).collect::<Vec<_>>()}))
+                    anyhow::ensure!(
+                        request["arguments"]
+                            .as_object()
+                            .is_some_and(|v| v.is_empty()),
+                        "get_session_context takes no arguments"
+                    );
+                    Ok(
+                        serde_json::json!({"session_id":session.id,"thread_id":session.thread_id,"presentation":session.presentation,"environments":session.targets.iter().map(|t| serde_json::json!({"environment_id":t.id,"execution_directory":t.cwd,"executor_guidance":if t.id.starts_with("ssh-"){Some(crate::ssh::AGENT_INSTRUCTIONS)}else{None}})).collect::<Vec<_>>()}),
+                    )
                 }
                 _ => anyhow::bail!("unsupported Demodex tool"),
             }
         })();
         let response = session_context::response(result);
-        tx.execute("INSERT INTO context_tool_receipts VALUES(?1,?2,?3,?4,?5,?6)", params![uuid::Uuid::new_v4().to_string(),id,thread,call_id,request_text,response.to_string()])?;
+        tx.execute(
+            "INSERT INTO context_tool_receipts VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                id,
+                thread,
+                call_id,
+                request_text,
+                response.to_string()
+            ],
+        )?;
         if response["success"] == true && request["tool"] == "set_user_visible_session_context" {
-            tx.execute("UPDATE session_presentation SET value=?2 WHERE session_id=?1", params![id,serde_json::to_string(&session.presentation)?])?;
+            tx.execute(
+                "UPDATE session_presentation SET value=?2 WHERE session_id=?1",
+                params![id, serde_json::to_string(&session.presentation)?],
+            )?;
         }
         tx.commit()?;
         Ok(response)
@@ -486,24 +684,48 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[tokio::test]
-    async fn archive_requires_stopped_state_and_survives_restart_without_losing_history() -> Result<()> {
+    async fn archive_requires_stopped_state_and_survives_restart_without_losing_history()
+    -> Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("archive.db");
         let id;
         {
             let manager = crate::manager::Manager::new(Store::open(&path)?);
-            let session = manager.store.create("keep", "ws://localhost:1", &[], Some("thread"))?;
+            let session = manager
+                .store
+                .create("keep", "ws://localhost:1", &[], Some("thread"))?;
             id = session.id;
             manager.store.event(&id, &json!({"history":"preserved"}))?;
-            for state in ["working", "active", "waiting", "connecting", "running", "error"] {
+            for state in [
+                "working",
+                "active",
+                "waiting",
+                "connecting",
+                "running",
+                "error",
+            ] {
                 manager.store.status(&id, state, None)?;
                 assert!(manager.archive(&id, true).await.is_err());
                 assert!(!manager.store.get(&id)?.archived);
             }
             manager.store.status(&id, "disconnected", None)?;
             manager.archive(&id, true).await?;
-            assert!(manager.prompt(&id, "must not run").await.unwrap_err().to_string().contains("Restore"));
-            assert!(manager.connect(&id).await.unwrap_err().to_string().contains("Restore"));
+            assert!(
+                manager
+                    .prompt(&id, "must not run")
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Restore")
+            );
+            assert!(
+                manager
+                    .connect(&id)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Restore")
+            );
         }
         let manager = crate::manager::Manager::new(Store::open(&path)?);
         assert!(manager.store.get(&id)?.archived);
@@ -533,7 +755,11 @@ mod tests {
     fn late_send_acknowledgement_cannot_revive_a_lost_approval() -> Result<()> {
         let store = Store::open(Path::new(":memory:"))?;
         let session = store.create("test", "ws://localhost:1", &[], None)?;
-        store.request(&session.id, "old", &json!({"id":7,"method":"approval","params":{}}))?;
+        store.request(
+            &session.id,
+            "old",
+            &json!({"id":7,"method":"approval","params":{}}),
+        )?;
         store.claim(&session.id, "old:7", "old")?;
         store.disconnected(&session.id, "old")?;
         store.request_state("old:7", "delivered")?;

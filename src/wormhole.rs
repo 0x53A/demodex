@@ -52,10 +52,10 @@ fn endpoint_router(app: App, origins: Vec<String>, users: Vec<String>) -> Router
         routes = routes.route("/", get(upgrade));
     }
     routes.with_state(Endpoint {
-            app,
-            origins: Arc::new(origins),
-            tailscale_users: Arc::new(users),
-        })
+        app,
+        origins: Arc::new(origins),
+        tailscale_users: Arc::new(users),
+    })
 }
 
 fn tailscale_authenticated(headers: &HeaderMap, users: &[String], origins: &[String]) -> bool {
@@ -65,7 +65,9 @@ fn tailscale_authenticated(headers: &HeaderMap, users: &[String], origins: &[Str
     };
     identities.next().is_none()
         && users.iter().any(|allowed| allowed == login)
-        && headers.get("origin").and_then(|v| v.to_str().ok())
+        && headers
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
             .is_some_and(|origin| origins.iter().any(|allowed| allowed == origin))
 }
 
@@ -265,7 +267,9 @@ pub(crate) async fn execute(app: &App, request_id: &str, operation: Operation) -
         use sha2::{Digest, Sha256};
         crate::uploads::extension(bytes)?;
         json!({"UploadImage":{"id":id,"sha256":Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect::<String>()}}).to_string()
-    } else { serde_json::to_string(&operation)? };
+    } else {
+        serde_json::to_string(&operation)?
+    };
     let _lock = app.commands.lock().await;
     if let Some((previous, response)) = app.manager.store.receipt(request_id)? {
         ensure!(
@@ -314,13 +318,28 @@ async fn dispatch(app: &App, operation: Operation) -> Result<String> {
         return Ok(json!({"path":path}).to_string());
     }
     match &operation {
-        StopBackground { id: session, generation, processes } => {
+        StopBackground {
+            id: session,
+            generation,
+            processes,
+        } => {
             id(session)?;
-            return Ok(app.manager.stop_background(session, generation, processes).await?.to_string());
+            return Ok(app
+                .manager
+                .stop_background(session, generation, processes)
+                .await?
+                .to_string());
         }
-        CancelQueued { id: session, queued_id } => {
+        CancelQueued {
+            id: session,
+            queued_id,
+        } => {
             id(session)?;
-            return Ok(app.manager.cancel_queued(session, queued_id).await?.to_string());
+            return Ok(app
+                .manager
+                .cancel_queued(session, queued_id)
+                .await?
+                .to_string());
         }
         ResumeQueue { id: session } => {
             id(session)?;
@@ -345,12 +364,21 @@ async fn dispatch(app: &App, operation: Operation) -> Result<String> {
             format!("/sessions/{}/connect", id(&value)?),
             Some("{}".into()),
         ),
-        Archive { id: value, archived } => (format!("/sessions/{}/archive", id(&value)?), Some(json!({"archived":archived}).to_string())),
+        Archive {
+            id: value,
+            archived,
+        } => (
+            format!("/sessions/{}/archive", id(&value)?),
+            Some(json!({"archived":archived}).to_string()),
+        ),
         Sandbox { id: value, input } => (format!("/sessions/{}/sandbox", id(&value)?), Some(input)),
         Models { id: value } => (format!("/sessions/{}/models", id(&value)?), None),
         Model { id: value, input } => (format!("/sessions/{}/model", id(&value)?), Some(input)),
         Goal { id: value, input } => (format!("/sessions/{}/goal", id(&value)?), Some(input)),
-        QueuePrompt { id: value, text } => (format!("/sessions/{}/queue", id(&value)?), Some(json!({"text":text}).to_string())),
+        QueuePrompt { id: value, text } => (
+            format!("/sessions/{}/queue", id(&value)?),
+            Some(json!({"text":text}).to_string()),
+        ),
         Prompt { id: value, text } => (
             format!("/sessions/{}/messages", id(&value)?),
             Some(json!({"text":text}).to_string()),
@@ -376,8 +404,13 @@ async fn dispatch(app: &App, operation: Operation) -> Result<String> {
         ReconnectSshTarget { id } => (format!("/targets/{id}/reconnect"), Some("{}".into())),
         CheckSshTarget { id } => (format!("/targets/{id}/check"), Some("{}".into())),
         RegisterTarget { input } => ("/targets".into(), Some(input)),
-        ForgetTarget { id: value } => (format!("/targets/{}/forget", id(&value)?), Some("{}".into())),
-        SelectTargets { id: value, input } => (format!("/sessions/{}/targets", id(&value)?), Some(input)),
+        ForgetTarget { id: value } => (
+            format!("/targets/{}/forget", id(&value)?),
+            Some("{}".into()),
+        ),
+        SelectTargets { id: value, input } => {
+            (format!("/sessions/{}/targets", id(&value)?), Some(input))
+        }
         CreateEnvironment { input } => ("/environments".into(), Some(input)),
         StartEnvironment { id: value } => (
             format!("/environments/{}/start", id(&value)?),
@@ -391,7 +424,12 @@ async fn dispatch(app: &App, operation: Operation) -> Result<String> {
             format!("/environments/{}/sessions", id(&value)?),
             Some(input),
         ),
-        StopBackground { .. } | SavedThreads { .. } | Receipt { .. } | UploadImage { .. } | CancelQueued { .. } | ResumeQueue { .. } => unreachable!(),
+        StopBackground { .. }
+        | SavedThreads { .. }
+        | Receipt { .. }
+        | UploadImage { .. }
+        | CancelQueued { .. }
+        | ResumeQueue { .. } => unreachable!(),
     };
     // Share the existing validation/business handlers. This is an in-process
     // router call, not a second HTTP connection and not a REST browser client.
@@ -407,9 +445,7 @@ async fn dispatch(app: &App, operation: Operation) -> Result<String> {
         // This response is produced by our own handlers from already-loaded
         // state, not an untrusted HTTP request. Imported thread snapshots can
         // exceed 8 MiB in a single event; retain the complete persisted history.
-        to_bytes(response.into_body(), usize::MAX)
-            .await?
-            .to_vec(),
+        to_bytes(response.into_body(), usize::MAX).await?.to_vec(),
     )?;
     ensure!(status.is_success(), "{body}");
     Ok(body)
@@ -438,19 +474,36 @@ mod tests {
     #[tokio::test]
     async fn imported_history_larger_than_eight_mib_is_not_truncated() -> Result<()> {
         let app = fixture()?;
-        let session = app.manager.store.create("large history", "ws://127.0.0.1:1", &[], None)?;
+        let session = app
+            .manager
+            .store
+            .create("large history", "ws://127.0.0.1:1", &[], None)?;
         let message = json!({"method":"demodex/threadSnapshot", "params":{
             "thread":{"turns":[{"id":"old-turn", "items":[{
                 "type":"agentMessage", "text":"x".repeat(16 * 1024 * 1024)
             }]}]}
         }});
         let seq = app.manager.store.event(&session.id, &message)?;
-        let response = dispatch(&app, Operation::Events { id:session.id.clone(), after:0 }).await?;
+        let response = dispatch(
+            &app,
+            Operation::Events {
+                id: session.id.clone(),
+                after: 0,
+            },
+        )
+        .await?;
         let events: serde_json::Value = serde_json::from_str(&response)?;
         assert_eq!(events.as_array().unwrap().len(), 1);
         assert_eq!(events[0]["seq"], seq);
         assert_eq!(events[0]["message"], message);
-        let next = dispatch(&app, Operation::Events { id:session.id, after:seq }).await?;
+        let next = dispatch(
+            &app,
+            Operation::Events {
+                id: session.id,
+                after: seq,
+            },
+        )
+        .await?;
         assert_eq!(next, "[]");
         Ok(())
     }
@@ -458,21 +511,40 @@ mod tests {
     #[tokio::test]
     async fn token_router_preserves_embedded_frontend_root() -> Result<()> {
         let router = router(fixture()?, vec![]).fallback(|| async { "frontend" });
-        let response = router.oneshot(Request::builder().uri("/").body(Body::empty())?).await?;
+        let response = router
+            .oneshot(Request::builder().uri("/").body(Body::empty())?)
+            .await?;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(to_bytes(response.into_body(), 32).await?.as_ref(), b"frontend");
+        assert_eq!(
+            to_bytes(response.into_body(), 32).await?.as_ref(),
+            b"frontend"
+        );
         Ok(())
     }
 
     #[tokio::test]
     async fn archive_receipt_does_not_rearchive_a_restored_session() -> Result<()> {
         let app = fixture()?;
-        let session = app.manager.store.create("archive", "ws://127.0.0.1:1", &[], None)?;
+        let session = app
+            .manager
+            .store
+            .create("archive", "ws://127.0.0.1:1", &[], None)?;
         let request = uuid::Uuid::new_v4().to_string();
-        let command = Operation::Archive { id: session.id.clone(), archived: true };
+        let command = Operation::Archive {
+            id: session.id.clone(),
+            archived: true,
+        };
         execute(&app, &request, command.clone()).await?;
         assert!(app.manager.store.get(&session.id)?.archived);
-        execute(&app, &uuid::Uuid::new_v4().to_string(), Operation::Archive { id:session.id.clone(), archived:false }).await?;
+        execute(
+            &app,
+            &uuid::Uuid::new_v4().to_string(),
+            Operation::Archive {
+                id: session.id.clone(),
+                archived: false,
+            },
+        )
+        .await?;
         execute(&app, &request, command).await?;
         assert!(!app.manager.store.get(&session.id)?.archived);
         Ok(())
@@ -531,26 +603,72 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let mut app = fixture()?;
         app.orchestrator = crate::orchestrator::Orchestrator::new(
-            app.manager.clone(), directory.path().into(), None, Some(directory.path().into()), None,
+            app.manager.clone(),
+            directory.path().into(),
+            None,
+            Some(directory.path().into()),
+            None,
         );
-        let session = app.manager.store.create("upload", "ws://127.0.0.1:1", &[], None)?;
+        let session = app
+            .manager
+            .store
+            .create("upload", "ws://127.0.0.1:1", &[], None)?;
         let bytes = b"\x89PNG\r\n\x1a\nfixture".to_vec();
-        let command = Operation::UploadImage { id: session.id.clone(), bytes: bytes.clone() };
-        assert!(execute(&app, &uuid::Uuid::new_v4().to_string(), command.clone()).await.unwrap_err().to_string().contains("Select an execution target"));
+        let command = Operation::UploadImage {
+            id: session.id.clone(),
+            bytes: bytes.clone(),
+        };
+        assert!(
+            execute(&app, &uuid::Uuid::new_v4().to_string(), command.clone())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Select an execution target")
+        );
         app.manager.store.bind_host(&session.id)?;
-        app.manager.store.save_target_selection(&session.id, &[crate::targets::Selection{id:"host".into(),cwd:directory.path().to_string_lossy().into_owned()}], &[])?;
+        app.manager.store.save_target_selection(
+            &session.id,
+            &[crate::targets::Selection {
+                id: "host".into(),
+                cwd: directory.path().to_string_lossy().into_owned(),
+            }],
+            &[],
+        )?;
         let request = uuid::Uuid::new_v4().to_string();
         let first = execute(&app, &request, command.clone()).await?;
         assert_eq!(execute(&app, &request, command).await?, first);
         let result: serde_json::Value = serde_json::from_str(&first)?;
         assert_eq!(std::fs::read(result["path"].as_str().unwrap())?, bytes);
-        assert_eq!(std::fs::read_dir(directory.path().join("uploads"))?.count(), 1);
-        assert!(app.manager.store.receipt(&request)?.unwrap().0.contains("sha256"));
-        let different = Operation::UploadImage { id: session.id.clone(), bytes: b"GIF89aother".to_vec() };
+        assert_eq!(
+            std::fs::read_dir(directory.path().join("uploads"))?.count(),
+            1
+        );
+        assert!(
+            app.manager
+                .store
+                .receipt(&request)?
+                .unwrap()
+                .0
+                .contains("sha256")
+        );
+        let different = Operation::UploadImage {
+            id: session.id.clone(),
+            bytes: b"GIF89aother".to_vec(),
+        };
         assert!(execute(&app, &request, different).await.is_err());
-        let invalid = Operation::UploadImage { id: session.id, bytes: b"not an image".to_vec() };
-        assert!(execute(&app, &uuid::Uuid::new_v4().to_string(), invalid).await.is_err());
-        assert_eq!(std::fs::read_dir(directory.path().join("uploads"))?.count(), 1);
+        let invalid = Operation::UploadImage {
+            id: session.id,
+            bytes: b"not an image".to_vec(),
+        };
+        assert!(
+            execute(&app, &uuid::Uuid::new_v4().to_string(), invalid)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_dir(directory.path().join("uploads"))?.count(),
+            1
+        );
         Ok(())
     }
     #[test]
@@ -601,41 +719,89 @@ mod tests {
                             assert_eq!(request["params"]["cursor"], "next");
                             json!({"data":[{"processId":"102","itemId":"two","command":"watch build","cwd":"/elsewhere"}],"nextCursor":null})
                         }
-                    },
+                    }
                     "thread/backgroundTerminals/terminate" => {
                         assert_eq!(request["params"]["threadId"], "thread");
                         assert_eq!(request["params"]["processId"], "102");
                         stops += 1;
                         json!({"terminated":true})
-                    },
+                    }
                     method => panic!("unexpected RPC: {method}"),
                 };
-                ws.send(Message::Text(json!({"id":request["id"],"result":result}).to_string().into())).await.unwrap();
+                ws.send(Message::Text(
+                    json!({"id":request["id"],"result":result})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
             }
             assert_eq!(stops, 1);
         });
         let app = fixture()?;
-        let session = app.manager.store.create("background", &url, &[], Some("thread"))?;
+        let session = app
+            .manager
+            .store
+            .create("background", &url, &[], Some("thread"))?;
         let (rpc, _events) = crate::rpc::Rpc::connect(&url).await?;
-        app.manager.live.lock().await.insert(session.id.clone(), Arc::new(crate::manager::Live {
-            rpc, generation:"original".into(), thread:"thread".into(), turn:tokio::sync::Mutex::new(None),
-        }));
+        app.manager.live.lock().await.insert(
+            session.id.clone(),
+            Arc::new(crate::manager::Live {
+                rpc,
+                generation: "original".into(),
+                thread: "thread".into(),
+                turn: tokio::sync::Mutex::new(None),
+            }),
+        );
         let snapshot = app.manager.background_snapshot(&session.id).await;
         assert_eq!(snapshot["generation"], "original");
         assert_eq!(snapshot["data"].as_array().unwrap().len(), 2);
         // No target may be invented from the selected environments or cwd.
         assert!(snapshot["data"][0].get("environmentId").is_none());
-        assert!(app.manager.stop_background(&session.id, "old", &[("102".into(),"two".into())]).await.unwrap_err().to_string().contains("old Codex"));
+        assert!(
+            app.manager
+                .stop_background(&session.id, "old", &[("102".into(), "two".into())])
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("old Codex")
+        );
         // Entire batch is validated before its first stop.
-        assert!(app.manager.stop_background(&session.id, "original", &[("102".into(),"two".into()),("101".into(),"reused".into())]).await.unwrap_err().to_string().contains("identity changed"));
-        let command = Operation::StopBackground {id:session.id.clone(),generation:"original".into(),processes:vec![("102".into(),"two".into()),("gone".into(),"finished".into())]};
+        assert!(
+            app.manager
+                .stop_background(
+                    &session.id,
+                    "original",
+                    &[
+                        ("102".into(), "two".into()),
+                        ("101".into(), "reused".into())
+                    ]
+                )
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("identity changed")
+        );
+        let command = Operation::StopBackground {
+            id: session.id.clone(),
+            generation: "original".into(),
+            processes: vec![
+                ("102".into(), "two".into()),
+                ("gone".into(), "finished".into()),
+            ],
+        };
         let receipt = uuid::Uuid::new_v4().to_string();
         let first = execute(&app, &receipt, command.clone()).await?;
         assert_eq!(execute(&app, &receipt, command).await?, first);
         let result: serde_json::Value = serde_json::from_str(&first)?;
         assert_eq!(result["results"][1]["terminated"], false);
         app.manager.disconnect(&session.id, "done").await?;
-        assert!(app.manager.background_snapshot(&session.id).await["error"].as_str().unwrap().contains("disconnected"));
+        assert!(
+            app.manager.background_snapshot(&session.id).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("disconnected")
+        );
         fake.await?;
         Ok(())
     }
@@ -658,23 +824,46 @@ mod tests {
                     "thread/queue/add" => {
                         queued += 1;
                         assert_eq!(request["params"]["input"][0]["text"], "follow up");
-                        assert!(uuid::Uuid::parse_str(request["params"]["clientUserMessageId"].as_str().unwrap()).is_ok());
+                        assert!(
+                            uuid::Uuid::parse_str(
+                                request["params"]["clientUserMessageId"].as_str().unwrap()
+                            )
+                            .is_ok()
+                        );
                         json!({"queuedSubmission":{"id":"queued-one","input":request["params"]["input"]}})
-                    },
+                    }
                     method => panic!("unexpected RPC: {method}"),
                 };
-                ws.send(Message::Text(json!({"id":request["id"],"result":result}).to_string().into())).await.unwrap();
+                ws.send(Message::Text(
+                    json!({"id":request["id"],"result":result})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
             }
             assert_eq!(queued, 1);
         });
         let app = fixture()?;
-        let session = app.manager.store.create("busy", &url, &[], Some("thread"))?;
+        let session = app
+            .manager
+            .store
+            .create("busy", &url, &[], Some("thread"))?;
         let (rpc, _events) = crate::rpc::Rpc::connect(&url).await?;
-        app.manager.live.lock().await.insert(session.id.clone(), Arc::new(crate::manager::Live {
-            rpc, generation:"fixture".into(), thread:"thread".into(), turn:tokio::sync::Mutex::new(Some("active".into())),
-        }));
+        app.manager.live.lock().await.insert(
+            session.id.clone(),
+            Arc::new(crate::manager::Live {
+                rpc,
+                generation: "fixture".into(),
+                thread: "thread".into(),
+                turn: tokio::sync::Mutex::new(Some("active".into())),
+            }),
+        );
         let request = uuid::Uuid::new_v4().to_string();
-        let command = Operation::QueuePrompt { id:session.id.clone(), text:"follow up".into() };
+        let command = Operation::QueuePrompt {
+            id: session.id.clone(),
+            text: "follow up".into(),
+        };
         let first = execute(&app, &request, command.clone()).await?;
         assert!(first.contains("queued-one"));
         assert_eq!(execute(&app, &request, command).await?, first);
@@ -683,7 +872,8 @@ mod tests {
         Ok(())
     }
     #[tokio::test]
-    async fn busy_send_steers_once_and_rejected_steering_never_starts_or_queues_a_turn() -> Result<()> {
+    async fn busy_send_steers_once_and_rejected_steering_never_starts_or_queues_a_turn()
+    -> Result<()> {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -699,31 +889,55 @@ mod tests {
                     "initialized" => continue,
                     "turn/steer" => {
                         steers += 1;
-                        assert_eq!(request["params"]["expectedTurnId"],"active");
-                        assert!(uuid::Uuid::parse_str(request["params"]["clientUserMessageId"].as_str().unwrap()).is_ok());
-                        if request["params"]["input"][0]["text"]=="race" {
+                        assert_eq!(request["params"]["expectedTurnId"], "active");
+                        assert!(
+                            uuid::Uuid::parse_str(
+                                request["params"]["clientUserMessageId"].as_str().unwrap()
+                            )
+                            .is_ok()
+                        );
+                        if request["params"]["input"][0]["text"] == "race" {
                             json!({"id":request["id"],"error":{"code":-32600,"message":"active turn ended"}})
-                        } else {json!({"id":request["id"],"result":{"turnId":"active"}})}
-                    },
+                        } else {
+                            json!({"id":request["id"],"result":{"turnId":"active"}})
+                        }
+                    }
                     method => panic!("unexpected fallback or approval response: {method}"),
                 };
-                ws.send(Message::Text(reply.to_string().into())).await.unwrap();
+                ws.send(Message::Text(reply.to_string().into()))
+                    .await
+                    .unwrap();
             }
             assert_eq!(steers, 2);
         });
         let app = fixture()?;
-        let session = app.manager.store.create("busy", &url, &[], Some("thread"))?;
+        let session = app
+            .manager
+            .store
+            .create("busy", &url, &[], Some("thread"))?;
         let (rpc, _events) = crate::rpc::Rpc::connect(&url).await?;
-        app.manager.live.lock().await.insert(session.id.clone(), Arc::new(crate::manager::Live {
-            rpc, generation:"fixture".into(), thread:"thread".into(), turn:tokio::sync::Mutex::new(Some("active".into())),
-        }));
+        app.manager.live.lock().await.insert(
+            session.id.clone(),
+            Arc::new(crate::manager::Live {
+                rpc,
+                generation: "fixture".into(),
+                thread: "thread".into(),
+                turn: tokio::sync::Mutex::new(Some("active".into())),
+            }),
+        );
         let request = uuid::Uuid::new_v4().to_string();
-        let command = Operation::Prompt { id:session.id.clone(), text:"steer".into() };
+        let command = Operation::Prompt {
+            id: session.id.clone(),
+            text: "steer".into(),
+        };
         let first = execute(&app, &request, command.clone()).await?;
         assert!(first.contains("active"));
         assert_eq!(execute(&app, &request, command).await?, first);
         let request = uuid::Uuid::new_v4().to_string();
-        let rejected = Operation::Prompt { id:session.id.clone(), text:"race".into() };
+        let rejected = Operation::Prompt {
+            id: session.id.clone(),
+            text: "race".into(),
+        };
         assert!(execute(&app, &request, rejected.clone()).await.is_err());
         assert!(execute(&app, &request, rejected).await.is_err());
         app.manager.disconnect(&session.id, "done").await?;
@@ -733,54 +947,80 @@ mod tests {
 
     #[tokio::test]
     async fn ended_turn_falls_back_once_under_the_same_receipt() -> Result<()> {
-        use serde_json::Value;
         use futures_util::{SinkExt, StreamExt};
+        use serde_json::Value;
         use tokio_tungstenite::tungstenite::Message;
-        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let url=format!("ws://{}",listener.local_addr()?);
-        let fake=tokio::spawn(async move {
-            let (stream,_)=listener.accept().await.unwrap();
-            let mut ws=tokio_tungstenite::accept_async(stream).await.unwrap();
-            let mut calls=Vec::new();
-            let mut client_id=Value::Null;
-            while let Some(Ok(Message::Text(raw)))=ws.next().await {
-                let request:Value=serde_json::from_str(&raw).unwrap();
-                let method=request["method"].as_str().unwrap();
-                let reply=match method {
-                    "initialize"=>json!({"id":request["id"],"result":{}}),
-                    "initialized"=>continue,
-                    "turn/steer"=>{
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("ws://{}", listener.local_addr()?);
+        let fake = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut calls = Vec::new();
+            let mut client_id = Value::Null;
+            while let Some(Ok(Message::Text(raw))) = ws.next().await {
+                let request: Value = serde_json::from_str(&raw).unwrap();
+                let method = request["method"].as_str().unwrap();
+                let reply = match method {
+                    "initialize" => json!({"id":request["id"],"result":{}}),
+                    "initialized" => continue,
+                    "turn/steer" => {
                         calls.push(method.to_string());
-                        assert_eq!(request["params"]["expectedTurnId"],"old");
-                        client_id=request["params"]["clientUserMessageId"].clone();
+                        assert_eq!(request["params"]["expectedTurnId"], "old");
+                        client_id = request["params"]["clientUserMessageId"].clone();
                         json!({"id":request["id"],"error":{"code":-32600,"message":"no active turn to steer"}})
-                    },
-                    "thread/read"=>{calls.push(method.to_string());json!({"id":request["id"],"result":{"thread":{"status":{"type":"idle"}}}})},
-                    "turn/start"=>{
+                    }
+                    "thread/read" => {
                         calls.push(method.to_string());
-                        assert_eq!(request["params"]["clientUserMessageId"],client_id);
-                        assert_eq!(request["params"]["input"][0]["text"],"deliver soon");
+                        json!({"id":request["id"],"result":{"thread":{"status":{"type":"idle"}}}})
+                    }
+                    "turn/start" => {
+                        calls.push(method.to_string());
+                        assert_eq!(request["params"]["clientUserMessageId"], client_id);
+                        assert_eq!(request["params"]["input"][0]["text"], "deliver soon");
                         json!({"id":request["id"],"result":{"turn":{"id":"new"}}})
-                    },
-                    other=>panic!("unexpected request {other}"),
+                    }
+                    other => panic!("unexpected request {other}"),
                 };
-                ws.send(Message::Text(reply.to_string().into())).await.unwrap();
+                ws.send(Message::Text(reply.to_string().into()))
+                    .await
+                    .unwrap();
             }
-            assert_eq!(calls,vec!["turn/steer","thread/read","turn/start"]);
+            assert_eq!(calls, vec!["turn/steer", "thread/read", "turn/start"]);
         });
-        let app=fixture()?;
-        let session=app.manager.store.create("race",&url,&[],Some("thread"))?;
-        let (rpc,_events)=crate::rpc::Rpc::connect(&url).await?;
-        app.manager.live.lock().await.insert(session.id.clone(),Arc::new(crate::manager::Live {
-            rpc,generation:"fixture".into(),thread:"thread".into(),turn:tokio::sync::Mutex::new(Some("old".into())),
-        }));
-        let receipt=uuid::Uuid::new_v4().to_string();
-        let command=Operation::Prompt{id:session.id.clone(),text:"deliver soon".into()};
-        let first=execute(&app,&receipt,command.clone()).await?;
+        let app = fixture()?;
+        let session = app
+            .manager
+            .store
+            .create("race", &url, &[], Some("thread"))?;
+        let (rpc, _events) = crate::rpc::Rpc::connect(&url).await?;
+        app.manager.live.lock().await.insert(
+            session.id.clone(),
+            Arc::new(crate::manager::Live {
+                rpc,
+                generation: "fixture".into(),
+                thread: "thread".into(),
+                turn: tokio::sync::Mutex::new(Some("old".into())),
+            }),
+        );
+        let receipt = uuid::Uuid::new_v4().to_string();
+        let command = Operation::Prompt {
+            id: session.id.clone(),
+            text: "deliver soon".into(),
+        };
+        let first = execute(&app, &receipt, command.clone()).await?;
         assert!(first.contains("new"));
-        assert_eq!(execute(&app,&receipt,command).await?,first);
-        assert_eq!(app.manager.runtime(&session.id).await?.turn.lock().await.as_deref(),Some("new"));
-        app.manager.disconnect(&session.id,"done").await?;
+        assert_eq!(execute(&app, &receipt, command).await?, first);
+        assert_eq!(
+            app.manager
+                .runtime(&session.id)
+                .await?
+                .turn
+                .lock()
+                .await
+                .as_deref(),
+            Some("new")
+        );
+        app.manager.disconnect(&session.id, "done").await?;
         fake.await?;
         Ok(())
     }

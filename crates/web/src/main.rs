@@ -1,12 +1,12 @@
 mod app;
 mod client;
+mod controls;
+mod conversation;
+mod modal;
 mod model;
 mod overview;
-mod controls;
-mod modal;
-mod usage;
-mod conversation;
 mod transcript;
+mod usage;
 
 fn main() {
     console_error_panic_hook::set_once();

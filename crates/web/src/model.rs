@@ -37,8 +37,11 @@ impl Saved {
     /// Keep the current host's legacy fields in place and stash other hosts'
     /// drafts separately. Old saved views deserialize without losing their fields.
     pub fn switch_host(&mut self, host: String) {
-        if self.host == host { return; }
-        self.host_fields.insert(self.host.clone(), std::mem::take(&mut self.fields));
+        if self.host == host {
+            return;
+        }
+        self.host_fields
+            .insert(self.host.clone(), std::mem::take(&mut self.fields));
         self.fields = self.host_fields.remove(&host).unwrap_or_default();
         self.host = host;
         self.separate_creation_fields();
@@ -48,10 +51,12 @@ impl Saved {
         // The old create/resume widget shared these fields. Copy them once so
         // either interpretation of an existing draft remains recoverable.
         if !self.fields.contains_key("new_session_name") {
-            self.fields.insert("new_session_name".into(), self.field("session_name"));
+            self.fields
+                .insert("new_session_name".into(), self.field("session_name"));
         }
         if !self.fields.contains_key("new_sandbox") {
-            self.fields.insert("new_sandbox".into(), self.field("sandbox"));
+            self.fields
+                .insert("new_sandbox".into(), self.field("sandbox"));
         }
     }
 
@@ -184,12 +189,17 @@ mod tests {
             "fields":{"session_name":"Existing draft","sandbox":"read-only","control:s:objective":"First goal"}
         })).unwrap();
         saved.separate_creation_fields();
-        saved.fields.insert("new_session_name".into(), "New draft".into());
+        saved
+            .fields
+            .insert("new_session_name".into(), "New draft".into());
         saved.switch_host("https://two".into());
         assert_eq!(saved.field("control:s:objective"), "");
-        saved.fields.insert("control:s:objective".into(), "Second goal".into());
+        saved
+            .fields
+            .insert("control:s:objective".into(), "Second goal".into());
         // Exercise persistence while the other host's fields are stashed.
-        let mut saved: Saved = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        let mut saved: Saved =
+            serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
         saved.switch_host("https://one".into());
         assert_eq!(saved.field("new_session_name"), "New draft");
         assert_eq!(saved.field("session_name"), "Existing draft");
@@ -217,7 +227,9 @@ pub fn insert_image_path(draft: &str, path: &str, start: u32, end: u32) -> Strin
     fn offset(text: &str, units: u32) -> usize {
         let mut count = 0;
         for (index, ch) in text.char_indices() {
-            if count >= units { return index; }
+            if count >= units {
+                return index;
+            }
             count += ch.len_utf16() as u32;
         }
         text.len()
@@ -226,10 +238,22 @@ pub fn insert_image_path(draft: &str, path: &str, start: u32, end: u32) -> Strin
     let end = offset(draft, end).max(start);
     let before = &draft[..start];
     let after = &draft[end..];
-    format!("{}{}\"{}\"{}{}", before,
-        if before.is_empty() || before.ends_with(char::is_whitespace) { "" } else { " " },
+    format!(
+        "{}{}\"{}\"{}{}",
+        before,
+        if before.is_empty() || before.ends_with(char::is_whitespace) {
+            ""
+        } else {
+            " "
+        },
         path,
-        if after.is_empty() || after.starts_with(char::is_whitespace) { "" } else { " " }, after)
+        if after.is_empty() || after.starts_with(char::is_whitespace) {
+            ""
+        } else {
+            " "
+        },
+        after
+    )
 }
 
 #[cfg(test)]
@@ -237,7 +261,13 @@ mod image_tests {
     use super::*;
     #[test]
     fn path_insertion_uses_browser_offsets_and_preserves_surrounding_text() {
-        assert_eq!(insert_image_path("🙂 replace end", "/a b.png", 3, 10), "🙂 \"/a b.png\" end");
-        assert_eq!(insert_image_path("later edits", "/image.png", u32::MAX, u32::MAX), "later edits \"/image.png\"");
+        assert_eq!(
+            insert_image_path("🙂 replace end", "/a b.png", 3, 10),
+            "🙂 \"/a b.png\" end"
+        );
+        assert_eq!(
+            insert_image_path("later edits", "/image.png", u32::MAX, u32::MAX),
+            "later edits \"/image.png\""
+        );
     }
 }

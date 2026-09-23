@@ -27,8 +27,8 @@ impl Drop for PendingCall<'_> {
     }
 }
 type WsError = tokio_tungstenite::tungstenite::Error;
-type WsSink = Pin<Box<dyn Sink<Message,Error=WsError>+Send>>;
-type WsStream = Pin<Box<dyn Stream<Item=std::result::Result<Message,WsError>>+Send>>;
+type WsSink = Pin<Box<dyn Sink<Message, Error = WsError> + Send>>;
+type WsStream = Pin<Box<dyn Stream<Item = std::result::Result<Message, WsError>> + Send>>;
 struct Outgoing {
     message: Value,
     sent: oneshot::Sender<Result<()>>,
@@ -38,13 +38,16 @@ struct Outgoing {
 #[derive(Debug)]
 pub struct RemoteError(pub Value);
 impl std::fmt::Display for RemoteError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "Codex: {}", self.0) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Codex: {}", self.0)
+    }
 }
 impl std::error::Error for RemoteError {}
 
 pub fn no_active_turn(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<RemoteError>().is_some_and(|reply|
-        reply.0["code"] == -32600 && reply.0["message"] == "no active turn to steer")
+    error.downcast_ref::<RemoteError>().is_some_and(|reply| {
+        reply.0["code"] == -32600 && reply.0["message"] == "no active turn to steer"
+    })
 }
 
 pub struct Rpc {
@@ -63,25 +66,32 @@ impl Drop for Rpc {
 impl Rpc {
     pub fn close(&self) {
         self.task.abort();
-        for (_,sender) in self.pending.lock().unwrap().drain() {
-            let _=sender.send(Err(anyhow!("connection closed by manager")));
+        for (_, sender) in self.pending.lock().unwrap().drain() {
+            let _ = sender.send(Err(anyhow!("connection closed by manager")));
         }
     }
     pub async fn connect(url: &str) -> Result<(Self, mpsc::Receiver<Result<Value>>)> {
         // Endpoints are host-admin configuration, never supplied by an agent tool.
-        let (mut sink,mut stream): (WsSink,WsStream)=tokio::time::timeout(Duration::from_secs(10),async {
-            if let Some(path)=url.strip_prefix("unix://") {
-                let stream=tokio::net::UnixStream::connect(path).await?;
-                let (socket,_)=tokio_tungstenite::client_async("ws://localhost/",stream).await?;
-                let (sink,stream)=socket.split();
-                Ok::<(WsSink,WsStream),anyhow::Error>((Box::pin(sink),Box::pin(stream)))
-            } else {
-                anyhow::ensure!(url.starts_with("ws://"),"use a private ws:// or unix:// app-server endpoint");
-                let (socket,_)=tokio_tungstenite::connect_async(url).await?;
-                let (sink,stream)=socket.split();
-                Ok::<(WsSink,WsStream),anyhow::Error>((Box::pin(sink),Box::pin(stream)))
-            }
-        }).await.context("app-server connection timed out")??;
+        let (mut sink, mut stream): (WsSink, WsStream) =
+            tokio::time::timeout(Duration::from_secs(10), async {
+                if let Some(path) = url.strip_prefix("unix://") {
+                    let stream = tokio::net::UnixStream::connect(path).await?;
+                    let (socket, _) =
+                        tokio_tungstenite::client_async("ws://localhost/", stream).await?;
+                    let (sink, stream) = socket.split();
+                    Ok::<(WsSink, WsStream), anyhow::Error>((Box::pin(sink), Box::pin(stream)))
+                } else {
+                    anyhow::ensure!(
+                        url.starts_with("ws://"),
+                        "use a private ws:// or unix:// app-server endpoint"
+                    );
+                    let (socket, _) = tokio_tungstenite::connect_async(url).await?;
+                    let (sink, stream) = socket.split();
+                    Ok::<(WsSink, WsStream), anyhow::Error>((Box::pin(sink), Box::pin(stream)))
+                }
+            })
+            .await
+            .context("app-server connection timed out")??;
         let (out, mut commands) = mpsc::channel::<Outgoing>(64);
         let (events, receiver) = mpsc::channel(256);
         let pending: Waiters = Arc::new(Mutex::new(HashMap::new()));
@@ -163,8 +173,12 @@ impl Rpc {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, sender);
-        let _pending = PendingCall { waiters: &self.pending, id };
-        self.send(json!({"id":id,"method":method,"params":params})).await?;
+        let _pending = PendingCall {
+            waiters: &self.pending,
+            id,
+        };
+        self.send(json!({"id":id,"method":method,"params":params}))
+            .await?;
         tokio::time::timeout(Duration::from_secs(45),receiver).await
             .context("Codex response timed out; operation may have executed, inspect state before retrying")?
             .context("connection lost before response")?
@@ -176,10 +190,14 @@ mod tests {
     use super::*;
     #[test]
     fn fallback_requires_the_explicit_no_active_turn_error() {
-        let reply=|code,message|anyhow::Error::new(RemoteError(json!({"code":code,"message":message})));
-        assert!(no_active_turn(&reply(-32600,"no active turn to steer")));
-        assert!(!no_active_turn(&reply(-32600,"cannot steer a review turn")));
-        assert!(!no_active_turn(&reply(-32603,"no active turn to steer")));
+        let reply =
+            |code, message| anyhow::Error::new(RemoteError(json!({"code":code,"message":message})));
+        assert!(no_active_turn(&reply(-32600, "no active turn to steer")));
+        assert!(!no_active_turn(&reply(
+            -32600,
+            "cannot steer a review turn"
+        )));
+        assert!(!no_active_turn(&reply(-32603, "no active turn to steer")));
         assert!(!no_active_turn(&anyhow!("no active turn to steer")));
         assert!(!no_active_turn(&anyhow!("connection lost before response")));
     }
@@ -195,12 +213,18 @@ mod tests {
             let mut seen = Some(seen);
             while let Some(Ok(Message::Text(raw))) = ws.next().await {
                 let request: Value = serde_json::from_str(&raw).unwrap();
-                if request["method"] == "initialized" { continue; }
+                if request["method"] == "initialized" {
+                    continue;
+                }
                 if request["method"] == "hang" {
                     seen.take().unwrap().send(()).unwrap();
                     continue;
                 }
-                ws.send(Message::Text(json!({"id":request["id"],"result":{}}).to_string().into())).await.unwrap();
+                ws.send(Message::Text(
+                    json!({"id":request["id"],"result":{}}).to_string().into(),
+                ))
+                .await
+                .unwrap();
             }
         });
         let (rpc, _events) = Rpc::connect(&url).await?;

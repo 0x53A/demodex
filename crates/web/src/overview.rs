@@ -68,8 +68,13 @@ pub fn environment_label(id: &str, environments: &[Value]) -> String {
         return "Host".into();
     }
     for environment in environments {
-        if id == text(environment,"id") || id.starts_with(&format!("{}-",text(environment,"id"))) {
-            return format!("{} · {}",text(environment,"kind"),text(environment,"name"));
+        if id == text(environment, "id") || id.starts_with(&format!("{}-", text(environment, "id")))
+        {
+            return format!(
+                "{} · {}",
+                text(environment, "kind"),
+                text(environment, "name")
+            );
         }
         if id.starts_with(&format!("vm-{}-", text(environment, "id"))) {
             return format!("VM · {}", text(environment, "name"));
@@ -78,7 +83,12 @@ pub fn environment_label(id: &str, environments: &[Value]) -> String {
     id.into()
 }
 
-fn session_view(session: &Value, environments: &[Value], selected: &str, select: &Callback<String>) -> Html {
+fn session_view(
+    session: &Value,
+    environments: &[Value],
+    selected: &str,
+    select: &Callback<String>,
+) -> Html {
     let id = text(session, "id").to_owned();
     let chosen = id == selected;
     let select = select.clone();
