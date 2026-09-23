@@ -4,7 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ractor = "0.15"
+async-trait = "0.1.92"
+bincode = "=2.0.1"
+bincode_derive = "=2.0.1"
+# Wire dependencies are exact so a native consumer's separate lockfile cannot
+# silently choose a different transport than the hashed daemon workspace.
+ractor = "=0.15.13"
 ractor_wormhole = { git = "https://github.com/0x53A/ractor-wormhole", rev = "766f4ed4b7fe5e411ea2ad2ca7b7cefbd372d917", version = "0.1.0", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

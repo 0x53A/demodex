@@ -28,8 +28,8 @@ with tempfile.TemporaryDirectory(prefix='demodex-large-history-') as temporary:
                 except OSError: time.sleep(.05)
             else: raise AssertionError('daemon did not start')
             token = (data/'access-token').read_text().strip()
-            request = urllib.request.Request(origin+'/api/sessions', data=json.dumps({'name':'Large imported history','endpoint':'ws://127.0.0.1:1','targets':[]}).encode(), headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
-            with urllib.request.urlopen(request) as response: session = json.load(response)
+            from wormhole_client import api
+            session = api(origin, token, '/sessions', {'name':'Large imported history','endpoint':'ws://127.0.0.1:1','targets':[]})
             items = [{'id':'old-answer','type':'agentMessage','text':'Large history successfully restored'},
                      {'id':'old-tool','type':'commandExecution','command':'pwd','aggregatedOutput':'/workspace'}]
             for index in range(3000):

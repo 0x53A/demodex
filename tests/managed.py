@@ -36,7 +36,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-managed-') as temporary:
         sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
     log=(directory/'manager.log').open('w+')
     def launch():
-        process=subprocess.Popen([str(ROOT/'target/debug/demodex'),'--bind',f'127.0.0.1:{port}',
+        process=subprocess.Popen([str(ROOT/'target/rust-pwa/debug/demodex'),'--bind',f'127.0.0.1:{port}',
             '--data-dir',str(directory),'--vm-image',str(Path(sys.argv[1]).resolve()),'--web-dir',str(ROOT/'web/dist')],stdout=log,stderr=log)
         for _ in range(100):
             try:
@@ -46,12 +46,8 @@ with tempfile.TemporaryDirectory(prefix='demodex-managed-') as temporary:
     manager=launch()
     token=(directory/'access-token').read_text().strip()
     def api(path,body=None):
-        request=urllib.request.Request(f'http://127.0.0.1:{port}/api'+path,
-            data=None if body is None else json.dumps(body).encode(),
-            headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
-        try:
-            with urllib.request.urlopen(request,timeout=90) as response:return json.load(response)
-        except urllib.error.HTTPError as error:raise AssertionError(error.read().decode()) from error
+        from wormhole_client import api as actor_api
+        return actor_api(f'http://127.0.0.1:{port}', token, path, body, None)
     def running(ident):
         deadline=time.monotonic()+300
         while time.monotonic()<deadline:

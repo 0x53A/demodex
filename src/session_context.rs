@@ -1,77 +1,59 @@
 //! Agent-reported presentation metadata. This never changes execution settings.
 use anyhow::{Result, ensure};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const INSTRUCTIONS: &str = "You are running inside Demodex, a UI for managing agent sessions across machines. Demodex shows your session in a sparse project folder tree. Use demodex.get_session_context to see your identity and execution environments. Use demodex.set_user_visible_session_context when you establish or change the project you are working on, including after creating a project. Supply its execution environment ID, absolute project-root path, and optionally a short description of your work. Keep the project root during incidental commands in other directories. These tools only update display metadata; they do not change execution directories, sandbox permissions, or session identity.";
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct UserVisibleContext {
-    pub environment_id: String,
-    pub path: String,
-    #[serde(default)]
-    pub description: String,
-}
+pub use demodex_protocol::{Presentation, UserVisibleContext};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Presentation {
-    pub name: String,
-    pub icon: String,
-    pub context_reporting: bool,
-    pub context: Option<UserVisibleContext>,
-}
-
-impl Presentation {
-    pub fn generate() -> Self {
-        let attributes = [
-            "Stinky",
-            "Sleepy",
-            "Suspicious",
-            "Curious",
-            "Mossy",
-            "Cosmic",
-            "Quiet",
-            "Brisk",
-            "Wobbly",
-            "Velvet",
-            "Rusty",
-            "Dapper",
-            "Sunny",
-            "Feral",
-            "Tiny",
-            "Grumpy",
-        ];
-        let subjects = [
-            ("Werecat", "🐈"),
-            ("Owl", "🦉"),
-            ("Badger", "🦡"),
-            ("Fox", "🦊"),
-            ("Otter", "🦦"),
-            ("Raven", "🐦‍⬛"),
-            ("Moth", "🦋"),
-            ("Frog", "🐸"),
-            ("Octopus", "🐙"),
-            ("Turtle", "🐢"),
-            ("Hedgehog", "🦔"),
-            ("Raccoon", "🦝"),
-            ("Bat", "🦇"),
-            ("Crab", "🦀"),
-            ("Dragon", "🐉"),
-            ("Snail", "🐌"),
-        ];
-        let random = uuid::Uuid::new_v4();
-        let bytes = random.as_bytes();
-        let (subject, icon) = subjects[bytes[1] as usize % subjects.len()];
-        Self {
-            name: format!(
-                "{} {subject}",
-                attributes[bytes[0] as usize % attributes.len()]
-            ),
-            icon: icon.into(),
-            context_reporting: false,
-            context: None,
-        }
+pub fn generate_presentation() -> Presentation {
+    let attributes = [
+        "Stinky",
+        "Sleepy",
+        "Suspicious",
+        "Curious",
+        "Mossy",
+        "Cosmic",
+        "Quiet",
+        "Brisk",
+        "Wobbly",
+        "Velvet",
+        "Rusty",
+        "Dapper",
+        "Sunny",
+        "Feral",
+        "Tiny",
+        "Grumpy",
+    ];
+    let subjects = [
+        ("Werecat", "🐈"),
+        ("Owl", "🦉"),
+        ("Badger", "🦡"),
+        ("Fox", "🦊"),
+        ("Otter", "🦦"),
+        ("Raven", "🐦‍⬛"),
+        ("Moth", "🦋"),
+        ("Frog", "🐸"),
+        ("Octopus", "🐙"),
+        ("Turtle", "🐢"),
+        ("Hedgehog", "🦔"),
+        ("Raccoon", "🦝"),
+        ("Bat", "🦇"),
+        ("Crab", "🦀"),
+        ("Dragon", "🐉"),
+        ("Snail", "🐌"),
+    ];
+    let random = uuid::Uuid::new_v4();
+    let bytes = random.as_bytes();
+    let (subject, icon) = subjects[bytes[1] as usize % subjects.len()];
+    Presentation {
+        name: format!(
+            "{} {subject}",
+            attributes[bytes[0] as usize % attributes.len()]
+        ),
+        icon: icon.into(),
+        context_reporting: false,
+        context: None,
     }
 }
 

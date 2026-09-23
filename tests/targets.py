@@ -72,8 +72,8 @@ with tempfile.TemporaryDirectory(prefix='demodex-targets-') as temporary:
             token = (root/'state/access-token').read_text().strip()
 
             def api(path, body=None):
-                request = urllib.request.Request(origin+'/api'+path, data=None if body is None else json.dumps(body).encode(), headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
-                return json.load(urllib.request.urlopen(request))
+                from wormhole_client import api as actor_api
+                return actor_api(origin, token, path, body, None)
 
             session = api('/sessions', {'name':'Target fixture','endpoint':f'ws://127.0.0.1:{codex_port}','targets':[{'id':'First','url':'ws://127.0.0.1:5011','cwd':'/first'}]})
             api('/sessions/'+session['id']+'/connect', {})

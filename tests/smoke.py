@@ -56,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-smoke-') as temporary:
         start('codex', 'app-server', '--listen', f'ws://127.0.0.1:{app_port}')
         wait_port(app_port)
         def start_manager():
-            process = start(str(ROOT / 'target/debug/demodex'), '--bind', f'127.0.0.1:{manager_port}',
+            process = start(str(ROOT / 'target/rust-pwa/debug/demodex'), '--bind', f'127.0.0.1:{manager_port}',
                             '--data-dir', str(directory / 'manager'), '--web-dir', str(ROOT / 'web/dist'))
             wait_port(manager_port)
             return process
@@ -64,14 +64,8 @@ with tempfile.TemporaryDirectory(prefix='demodex-smoke-') as temporary:
         token = (directory / 'manager/access-token').read_text().strip()
 
         def api(path, body=None):
-            request = urllib.request.Request(f'http://127.0.0.1:{manager_port}/api'+path,
-                data=None if body is None else json.dumps(body).encode(),
-                headers={'Authorization': 'Bearer '+token, 'Content-Type': 'application/json'})
-            try:
-                with urllib.request.urlopen(request, timeout=60) as response:
-                    return json.load(response)
-            except urllib.error.HTTPError as error:
-                raise AssertionError(error.read().decode()) from error
+            from wormhole_client import api as actor_api
+            return actor_api(f'http://127.0.0.1:{manager_port}', token, path, body, None)
 
         targets=[]
         for index in range(2):
@@ -111,7 +105,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-smoke-') as temporary:
         base = directory / 'base.qcow2'
         subprocess.run(['qemu-img','create','-f','qcow2',str(base),'32M'], check=True, capture_output=True)
         vm = directory / 'vm'
-        subprocess.run([str(ROOT/'target/debug/demodex'),'vm','create','--base',str(base),'--directory',str(vm)], check=True, capture_output=True)
+        subprocess.run([str(ROOT/'target/rust-pwa/debug/demodex'),'vm','create','--base',str(base),'--directory',str(vm)], check=True, capture_output=True)
         info=json.loads(subprocess.check_output(['qemu-img','info','--output=json',str(vm/'disk.qcow2')]))
         assert info['backing-filename'] == str(base)
         assert (vm/'id_ed25519').stat().st_mode & 0o777 == 0o600

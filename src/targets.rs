@@ -4,12 +4,7 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct Selection {
-    pub id: String,
-    pub cwd: String,
-}
+pub use demodex_protocol::Selection;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RegisteredTarget {
@@ -175,7 +170,7 @@ impl Store {
             url.starts_with("ws://") && !url.contains(['\n', '\r', '\0']),
             "Executor URL must use ws://"
         );
-        let parsed: axum::http::Uri = url.parse().context("Invalid executor URL")?;
+        let parsed: http::Uri = url.parse().context("Invalid executor URL")?;
         ensure!(
             parsed.host().is_some() && !url.contains('@'),
             "Executor URL must have a host and no credentials"

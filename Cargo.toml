@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/protocol", "crates/web"]
+members = ["crates/client","crates/protocol", "crates/web"]
 default-members = ["."]
 resolver = "2"
 
@@ -11,7 +11,6 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 base64 = "0.22.1"
-axum = { version = "0.8", features = ["ws", "macros"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 demodex-protocol = { version = "0.1.0", path = "crates/protocol" }
 futures-util = "0.3.34"
@@ -23,12 +22,16 @@ serde_json = "1.0.151"
 sha2 = "0.11.0"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-tungstenite = "0.30.0"
-tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.1", features = ["fs", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.26.1", features = ["v4", "serde"] }
+http = "1.5.0"
+http-body-util = "0.1.5"
+hyper-util = { version = "0.1.20", features = ["tokio"] }
+hyper = { version = "1.11.1", features = ["server", "http1"] }
+demodex-client = { version = "0.1.0", path = "crates/client" }
+tokio-util = { version = "0.7.19", features = ["rt"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
-tower = { version = "0.5.3", features = ["util"] }

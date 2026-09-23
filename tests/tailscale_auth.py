@@ -140,8 +140,8 @@ with tempfile.TemporaryDirectory(prefix='demodex-identity-') as temporary:
             urllib.request.urlopen(urllib.request.Request(direct + '/api/sessions', headers={'Tailscale-User-Login': 'owner@example.com'}))
             raise AssertionError('REST accepted forged identity')
         except urllib.error.HTTPError as error:
-            assert error.code == 401
-        print('PASS: untrusted origin denied; REST remains token-only')
+            assert error.code == 404
+        print('PASS: untrusted origin denied; retired REST routes return 404')
     finally:
         if 'runner' in locals():
             asyncio.run_coroutine_threadsafe(runner.cleanup(), loop).result(15)

@@ -58,14 +58,8 @@ with tempfile.TemporaryDirectory(prefix='demodex-host-') as temporary:
     token = (data / 'access-token').read_text().strip()
 
     def api(path, body=None):
-        request = urllib.request.Request(f'http://127.0.0.1:{port}/api{path}',
-            data=None if body is None else json.dumps(body).encode(),
-            headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                return json.load(response)
-        except urllib.error.HTTPError as error:
-            raise AssertionError(error.read().decode()) from error
+        from wormhole_client import api as actor_api
+        return actor_api(f'http://127.0.0.1:{port}', token, path, body, None)
 
     try:
         runtime = api('/runtime')

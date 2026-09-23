@@ -45,7 +45,7 @@ def main():
     ssh_port, executor_port, manager_port = [free_port() for _ in range(3)]
     codex = Path(shutil.which('codex')).resolve()
     vm = run / 'vm'
-    binary = ROOT / 'target/debug/demodex'
+    binary = ROOT / 'target/rust-pwa/debug/demodex'
     ssh = ['ssh', '-F', '/dev/null', '-i', str(vm/'id_ed25519'), '-p', str(ssh_port),
            '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3',
            '-o', 'StrictHostKeyChecking=accept-new', '-o', f'UserKnownHostsFile={run}/known_hosts']
@@ -129,14 +129,8 @@ def main():
         (run/'connection.json').write_text(json.dumps(metadata, indent=2))
 
         def api(path, body=None):
-            request = urllib.request.Request(metadata['url']+'/api'+path,
-                data=None if body is None else json.dumps(body).encode(),
-                headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
-            try:
-                with urllib.request.urlopen(request, timeout=65) as response:
-                    return json.load(response)
-            except urllib.error.HTTPError as error:
-                raise RuntimeError(error.read().decode()) from error
+            from wormhole_client import api as actor_api
+            return actor_api(metadata['url'], token, path, body, None)
 
         def session(name, task):
             entry = api('/sessions', {'name':name,'endpoint':args.app_server,

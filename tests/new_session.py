@@ -70,14 +70,8 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
     daemon = launch()
     token = (root/'state/access-token').read_text().strip()
     def api(path, body=None, error=None):
-        request = urllib.request.Request(origin+'/api'+path, data=None if body is None else json.dumps(body).encode(), headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
-        try:
-            value = json.load(urllib.request.urlopen(request, timeout=30))
-            assert error is None, value
-            return value
-        except urllib.error.HTTPError as exc:
-            message = exc.read().decode()
-            assert error and error in message, message
+        from wormhole_client import api as actor_api
+        return actor_api(origin, token, path, body, error)
     try:
         target = api('/targets', {'name':'Build machine','url':'ws://127.0.0.1:5012','cwd':'/remote/project'})
         target_id = target['id']

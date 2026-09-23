@@ -6,7 +6,10 @@ daemon. There is no central coordinator. See `DESIGN.md` for the UI design syste
 
 ## Code and transport
 
-- `src/`: daemon, orchestration, persistence, VM management and static serving.
+- `src/`: core library, daemon, orchestration, persistence and VM management.
+- `src/service.rs`: transport-independent operation dispatch and durable receipts.
+- `src/wormhole.rs`: authenticated actors; `src/http.rs`: static assets and upgrades.
+- `crates/client/`: reusable native Wormhole client, used by Frosticus and the CLI.
 - `crates/web/`: the maintained Yew HTML/WASM frontend. No Node/pnpm toolchain is
   needed. Small JavaScript files provide PWA startup and service-worker glue.
 - `crates/protocol/`: shared actor API and compatibility contract.
@@ -30,8 +33,52 @@ compatibility. Bump VERSION for semantic changes, including JSON payloads;
 After login, typed actor calls and pushed change notices carry UI traffic. The
 frontend coalesces notices and fetches snapshots and event pages by cursor;
 periodic server notices refresh account/runtime state. Render through Yew's
-Message/update/view model. REST remains available for diagnostics and its
-handlers are reused internally by the actor adapter.
+Message/update/view model. There is no REST API or Axum dependency. Wormhole calls
+the core Service directly with shared typed operations and responses. Diagnostics
+use `demodex call`; library and native-client integration are described below.
+
+Storage and service dispatch reuse the shared session/event records directly,
+without JSON round-trips between duplicate types. Extensible upstream Codex
+records retain serde_json::Value; the browser converts typed replies to its dynamic
+view model. Forms construct shared command types directly. Invalid saved sandbox
+choices produce validation messages, never silently select default access.
+Data-record serde encoding lives alongside the wire declarations; encoding changes
+require a version bump because the structural hash excludes implementations.
+Exact transport dependency versions constrain consumers with separate lockfiles.
+
+## Library and native clients
+
+`demodex::Runtime::start(Config).await` opens storage, starts the configured
+executor and owns periodic monitoring. Obtain cloneable handles with
+`runtime.service()`. `Service::call(request_id, Operation)` is a trusted in-process
+API: authorization belongs to its host application.
+
+Await `runtime.shutdown()` before leaving Tokio: it rejects new calls, drains
+admitted operations and stops executors. Drop requests asynchronous cleanup,
+which requires a live Tokio runtime. Every Service handle retains the private
+state-directory lock, including closed handles; release them before reopening
+the same directory. Individual browser connections do not own the runtime.
+Connection-scoped actors and socket readers are cancelled together; accepted
+commands finish and record receipts even after their caller disconnects.
+
+`demodex-client::Client` opens a native WebSocket, checks Hello before credentials,
+authenticates and subscribes to notices. `call` takes an explicit receipt ID;
+`read` refuses mutations. It never reconnects or retries calls automatically.
+`subscribe()` reports changes and connection closure. Dropping the client releases
+its socket reader and actors. Calls return uncertainty promptly on connection
+closure rather than waiting out the RPC deadline. Native TLS uses system roots.
+
+`demodex call --url ws://127.0.0.1:4780/wormhole --token-file PATH` reads JSON lines
+from stdin and prints one Result per line. Example read:
+`{"operation":"Sessions"}`. Mutations should supply a stable UUID `request_id`;
+the CLI generates one when omitted for interactive/test convenience. Keep IDs to
+inspect uncertain results with `{"operation":{"Receipt":{"id":"UUID"}}}`.
+Logs go to stderr; neither URLs nor arguments contain access tokens.
+
+Frosticus lives at ../frost/codicillus-frosticus and depends on the client/protocol
+crates by local path. Its separate member Wormhole protocol enforces ownership;
+it does not expose Demodex's administrative actor to browsers. Rebuild affected
+clients and daemons together after incompatible protocol changes.
 
 ## Session and execution contracts
 
@@ -47,6 +94,12 @@ Requests from a lost RPC generation remain visibly unavailable. Unsupported
 approval types use explicit JSON response editing, not an automatic answer.
 Questions and approvals displayed by Demodex remain pending until the user
 responds; browser timeouts and reconnects must not submit a default answer.
+
+SQLite retains the existing schema. New receipts store a versioned typed reply;
+old string-encoded replies are decoded only on the legacy receipt path. v14
+JSON-string inputs are normalized only for command identity comparison. Completed
+receipts return their recorded result; interrupted receipts remain uncertain and
+never replay. Receipt queries expose decoded data for older persisted records too.
 
 Host-session creation/import accepts an existing absolute working directory.
 Blank preserves the service default or imported directory; an explicit path
@@ -132,14 +185,14 @@ settings, executor protocol and real Codex attachment checks without inference.
 ## Authentication and isolation
 
 The manager binds loopback by default and creates an owner-only random token in
-its data directory. Browser actor login carries the token; REST uses a Bearer
-header. Never put tokens in URLs. There is no anonymous session API.
+its data directory. Browser and native actor login carry the token after schema
+negotiation. Never put tokens in URLs. There is no anonymous session API.
 
 Optional `--tailscale-user` entries enable `tailscale.sock`, mode 0600 in the
 private data directory. Only this socket trusts a single exact
 `Tailscale-User-Login` header, supplied by Tailscale Serve, plus an explicitly
-allowed browser Origin. Direct TCP ignores identity headers and REST remains
-token-only. Empty login tokens may use trusted identity; explicitly supplied
+allowed browser Origin. Direct TCP ignores identity headers and requires an actor
+login token. Empty login tokens may use trusted identity; explicitly supplied
 invalid tokens must fail even if identity is valid. The service owner and root
 are within this trust boundary. Keep the Unix proxy's root-path alias off the
 TCP router so integrated static serving continues to work.
@@ -233,10 +286,16 @@ real local Codex processes with disposable profiles/history and no model turns;
 it covers execution, profile preservation, sandbox/cwd settings, images and
 restart/resume. `DEMODEX_BIN` overrides its candidate binary.
 
-VM/smoke runners (`tests/smoke.py`, `tests/vm_boot.py`, `tests/managed.py`,
-`tests/real_sessions.py`) currently use `target/debug/demodex`, unlike the main
-candidate build. Inspect paths before running them; do not overwrite a live
-binary to satisfy a test. VM tests require KVM, QEMU, SSH, Nix, Codex and
+Python fixtures use `tests/wormhole_client.py` and the native CLI. Its path-shaped
+helper is test shorthand, not a compatibility API; real daemon traffic is Wormhole.
+The core suite also covers native authentication, reconnects, notices, typed
+results, large event pages, reader shutdown, static routes, legacy receipts across
+database restart, and runtime shutdown draining.
+
+The older `tests/vm_boot.py` runner still uses `target/debug/demodex`; the other
+VM/smoke runners use the `target/rust-pwa/debug` candidate. Inspect paths before
+running them; do not overwrite a live binary to satisfy a test. VM tests require
+KVM, QEMU, SSH, Nix, Codex and
 bubblewrap as appropriate; omit `hostOnly` for the shell's VM tools.
 
 `uv run tests/vm_boot.py IMAGE.qcow2` checks disposable guest boot/reboot;
@@ -285,8 +344,9 @@ no session database and starts no Codex processes:
 target/rust-pwa/debug/demodex web --bind 127.0.0.1:4782 --directory web/.rust-dist
 ```
 
-The usual layout is loopback API 4780, static UI 4782, and Tailscale Serve HTTPS
-8443 with `/`, `/api` and `/wormhole` routes. Identity-enabled WebSockets must go
+The usual layout is loopback Wormhole 4780, static UI 4782, and Tailscale Serve HTTPS
+8443 with `/` and `/wormhole` routes. Retired `/api` routes return 404.
+Identity-enabled WebSockets must go
 through the private socket. Inspect existing Serve mappings before changes;
 another application may already use port 443. Check installed Tailscale support
 for Unix-socket proxies. The NixOS module exposes `apiOnly`, `allowedOrigins`,
@@ -297,6 +357,12 @@ tabs. Keep daemon/frontend release selection separate. Changed protocol or schem
 requires compatible releases at both ends. Inspect current session activity,
 back up state and plan an idle restart before daemon deployment. Keep runtime
 Nix dependencies rooted.
+
+Historical `_Tasks/*/activate.py` and check scripts target old REST releases;
+do not use them for protocol v16 or later rollouts. Prepare activity checks with
+the native client and review matched daemon/PWA release paths before deployment.
+The v16 refactor was verified locally without deployment, VM boot/provisioning,
+or paid model inference.
 
 For a standalone Pages frontend:
 

@@ -138,6 +138,7 @@ pub enum Msg {
     Send,
     Queue,
     Run(Operation),
+    InvalidForm(String),
     Completed(u64, Operation, String, Result<Value, String>),
     LoadSaved(bool),
     SavedThreads(u64, Result<Value, String>, bool),
@@ -277,6 +278,14 @@ impl App {
     }
     fn button(&self, ctx: &Context<Self>, label: &str, operation: Operation) -> Html {
         html! {<button type="button" disabled={self.busy||!self.connected} onclick={ctx.link().callback(move |_|Msg::Run(operation.clone()))}>{label.to_owned()}</button>}
+    }
+    fn checked_button(
+        &self,
+        ctx: &Context<Self>,
+        label: &str,
+        operation: Result<Operation, String>,
+    ) -> Html {
+        html! {<button type="button" disabled={self.busy||!self.connected} onclick={ctx.link().callback(move |_|operation.clone().map_or_else(Msg::InvalidForm,Msg::Run))}>{label.to_owned()}</button>}
     }
 }
 
@@ -1131,10 +1140,7 @@ impl Component for App {
                             Operation::Goal { id, input } => {
                                 // Status actions do not submit the objective/budget draft.
                                 // Pausing or resuming must leave those unsaved edits intact.
-                                if serde_json::from_str::<Value>(&input)
-                                    .ok()
-                                    .is_some_and(|v| v["action"] == "save")
-                                {
+                                if input.action == "save" {
                                     for field in ["objective", "budget"] {
                                         self.saved.fields.remove(&format!("control:{id}:{field}"));
                                     }
@@ -1245,10 +1251,11 @@ impl Component for App {
                     Operation::Answer {
                         id: self.saved.selected.clone(),
                         key,
-                        result: result.to_string(),
+                        result: demodex_protocol::CodexRecord(result),
                     },
                 );
             }
+            Msg::InvalidForm(error) => self.error = error,
             Msg::Dismiss => self.error.clear(),
             Msg::Latest => {
                 self.follow = true;
@@ -1434,7 +1441,7 @@ impl App {
                     <section class="runtime-panel"><p>{"Active sandbox: "}<strong>{sandbox_name(text(&self.current["effective_sandbox"],"type"))}</strong></p>{self.sandbox(ctx,"session_sandbox","Session sandbox")}
                     {if self.saved.field("session_sandbox") != text(&self.current,"sandbox") {html!{<p class="sandbox-pending" role="status">{"Selection not applied. Active sandbox remains as shown above."}</p>}}else{Html::default()}}
                     {if self.saved.field("session_sandbox").is_empty(){html!{<p class="muted">{"No override preserves the current policy on a connected session; it does not enable full access."}</p>}}else{Html::default()}}
-                    {if !working && !waiting && self.current["archived"]!=true{self.button(ctx,"Apply sandbox",Operation::Sandbox{id:id.clone(),input:json!({"sandbox":nonempty(self.saved.field("session_sandbox"))}).to_string()})}else{html!{<p class="muted">{"Sandbox settings can be changed when the session is idle."}</p>}}}</section>
+                    {if !working && !waiting && self.current["archived"]!=true{self.checked_button(ctx,"Apply sandbox",sandbox_choice(&self.saved.field("session_sandbox")).map(|sandbox|Operation::Sandbox{id:id.clone(),input:demodex_protocol::SandboxChoice{sandbox}}))}else{html!{<p class="muted">{"Sandbox settings can be changed when the session is idle."}</p>}}}</section>
                 </details>
 
                 </section>
@@ -1493,7 +1500,15 @@ impl App {
             || self.busy;
         let operation = Operation::SelectTargets {
             id: self.saved.selected.clone(),
-            input: json!({"targets":chosen}).to_string(),
+            input: demodex_protocol::SelectTargets {
+                targets: chosen
+                    .iter()
+                    .map(|target| demodex_protocol::Selection {
+                        id: text(target, "id").into(),
+                        cwd: text(target, "cwd").into(),
+                    })
+                    .collect(),
+            },
         };
         html! {<details class="target-picker"><summary>{"Execution targets"}</summary>
             <p class="muted">{"Pause the goal, stop the turn and clear queued messages before changing targets. The next message applies your selection. Sharing a target shares its files and machine access. SSH commands require danger-full-access; SSH does not enforce a remote sandbox."}</p>
@@ -1525,8 +1540,19 @@ impl App {
     }
 
     fn target_registry(&self, ctx: &Context<Self>) -> Html {
-        let payload=json!({"name":self.saved.field("target_name"),"url":self.saved.field("target_url"),"cwd":self.saved.field("target_cwd")}).to_string();
-        let ssh_payload=json!({"name":self.saved.field("ssh_name"),"destination":self.saved.field("ssh_destination"),"cwd":self.saved.field("ssh_cwd"),"port":nonempty(self.saved.field("ssh_port")).map(|p|p.parse::<u16>().unwrap_or(0)),"identity_file":nonempty(self.saved.field("ssh_identity")),"known_hosts_file":nonempty(self.saved.field("ssh_known_hosts"))}).to_string();
+        let payload = demodex_protocol::RegisterTarget {
+            name: self.saved.field("target_name"),
+            url: self.saved.field("target_url"),
+            cwd: self.saved.field("target_cwd"),
+        };
+        let ssh_payload = demodex_protocol::SshTarget {
+            name: self.saved.field("ssh_name"),
+            destination: self.saved.field("ssh_destination"),
+            cwd: self.saved.field("ssh_cwd"),
+            port: nonempty(self.saved.field("ssh_port")).map(|p| p.parse::<u16>().unwrap_or(0)),
+            identity_file: nonempty(self.saved.field("ssh_identity")),
+            known_hosts_file: nonempty(self.saved.field("ssh_known_hosts")),
+        };
         html! {<section class="target-registry"><h2>{"Shared targets"}</h2>{if !self.target_notice.is_empty(){html!{<p role="status">{self.target_notice.clone()}</p>}}else{Html::default()}}<p>{"Attach these targets from any session's Execution targets settings. A VM can be used by several sessions."}</p>
             {for self.targets.iter().map(|target|{
                 let users=array(&target["users"]);
@@ -1567,4 +1593,28 @@ impl App {
 fn nonempty(value: String) -> Option<String> {
     let value = value.trim().to_owned();
     if value.is_empty() { None } else { Some(value) }
+}
+
+fn sandbox_choice(value: &str) -> Result<Option<demodex_protocol::Sandbox>, String> {
+    use demodex_protocol::Sandbox;
+    match value {
+        "" => Ok(None),
+        "read-only" => Ok(Some(Sandbox::ReadOnly)),
+        "workspace-write" => Ok(Some(Sandbox::WorkspaceWrite)),
+        "danger-full-access" => Ok(Some(Sandbox::DangerFullAccess)),
+        _ => Err("Select a valid sandbox policy before submitting.".into()),
+    }
+}
+
+#[cfg(test)]
+mod form_tests {
+    #[test]
+    fn malformed_saved_sandbox_never_becomes_default_access() {
+        assert_eq!(super::sandbox_choice(""), Ok(None));
+        assert_eq!(
+            super::sandbox_choice("read-only"),
+            Ok(Some(demodex_protocol::Sandbox::ReadOnly))
+        );
+        assert!(super::sandbox_choice("corrupted-setting").is_err());
+    }
 }

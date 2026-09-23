@@ -27,11 +27,21 @@ impl App {
                         .any(|known| known["id"] == target["id"] && known["available"] == true)
             });
         let sandbox = self.saved.field("new_sandbox");
-        let payload = json!({"name":self.saved.field("new_session_name"),"targets":chosen,"sandbox":nonempty(sandbox.clone())}).to_string();
+        let payload = sandbox_choice(&sandbox).map(|sandbox| demodex_protocol::SelectedSession {
+            name: self.saved.field("new_session_name"),
+            targets: chosen
+                .iter()
+                .map(|target| demodex_protocol::Selection {
+                    id: text(target, "id").into(),
+                    cwd: text(target, "cwd").into(),
+                })
+                .collect(),
+            sandbox,
+        });
         html! {<crate::modal::Modal title="New Session" onclose={ctx.link().callback(|_|Msg::NewSession(false))}>
             {self.modal_error(ctx)}
             {if self.runtime["running"]!=true || self.runtime["account"].is_null(){html!{<p class="muted">{"Start the Codex runtime and sign in from Server Settings before creating a session."}</p>}}else{Html::default()}}
-            <form class="setup new-session-form" onsubmit={ctx.link().callback(move |event:SubmitEvent|{event.prevent_default();Msg::Run(Operation::CreateSession{input:payload.clone()})})}>
+            <form class="setup new-session-form" onsubmit={ctx.link().callback(move |event:SubmitEvent|{event.prevent_default();payload.clone().map(|input|Operation::CreateSession{input}).map_or_else(Msg::InvalidForm,Msg::Run)})}>
                 <fieldset disabled={self.busy||!self.connected}>
                     {self.field(ctx,"new_session_name","Session name","What are you working on?")}
                     <h3>{"Execution targets"}</h3><p class="muted">{"Choose where this session can work. The first target is primary."}</p>
@@ -68,12 +78,24 @@ impl App {
         </crate::modal::Modal>}
     }
     fn create_vm_form(&self, ctx: &Context<Self>) -> Html {
-        let payload=json!({"name":self.saved.field("environment_name"),"memory_mib":self.saved.field("memory").parse::<u32>().unwrap_or(4096),"cpus":self.saved.field("cpus").parse::<u16>().unwrap_or(2),"internet":self.saved.field("internet")=="true"}).to_string();
+        let payload = demodex_protocol::NewEnvironment {
+            name: self.saved.field("environment_name"),
+            memory_mib: self.saved.field("memory").parse::<u32>().unwrap_or(4096),
+            cpus: self.saved.field("cpus").parse::<u16>().unwrap_or(2),
+            internet: self.saved.field("internet") == "true",
+        };
         html! {<form class="setup" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();Msg::Run(Operation::CreateEnvironment{input:payload.clone()})})}><h2>{"Create a work VM"}</h2>{self.field(ctx,"environment_name","Environment name","Scratch workspace")}<div class="resource-fields"><label>{"Memory (MiB)"}<input type="number" min="512" max="65536" step="1" placeholder="4096" value={self.saved.field("memory")} oninput={ctx.link().callback(|e|Msg::Field("memory".into(),input(e)))}/></label><label>{"CPUs"}<input type="number" min="1" max="32" step="1" placeholder="2" value={self.saved.field("cpus")} oninput={ctx.link().callback(|e|Msg::Field("cpus".into(),input(e)))}/></label></div><label class="checkbox"><input type="checkbox" checked={self.saved.field("internet")=="true"} onchange={ctx.link().callback(|e:Event|Msg::Field("internet".into(),e.target_unchecked_into::<HtmlInputElement>().checked().to_string()))}/>{"Internet and LAN access"}</label><button disabled={self.busy||!self.connected}>{"Create and start"}</button></form>}
     }
     fn resume_session_form(&self, ctx: &Context<Self>) -> Html {
-        let payload=json!({"name":self.saved.field("session_name"),"thread_id":nonempty(self.saved.field("thread_id")),"cwd":nonempty(self.saved.field("cwd")),"sandbox":nonempty(self.saved.field("sandbox"))}).to_string();
-        html! {<>                <form class="setup" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();Msg::Run(Operation::HostSession{input:payload.clone()})})}><h3>{"Resume a saved host session"}</h3><p>{"Tools run with the service user's file and hardware access."}</p><p class="muted">{format!("Default working directory: {}",text(&self.runtime,"workspace"))}</p>
+        let payload = sandbox_choice(&self.saved.field("sandbox")).map(|sandbox| {
+            demodex_protocol::HostSession {
+                name: self.saved.field("session_name"),
+                thread_id: nonempty(self.saved.field("thread_id")),
+                cwd: nonempty(self.saved.field("cwd")),
+                sandbox,
+            }
+        });
+        html! {<>                <form class="setup" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();payload.clone().map(|input|Operation::HostSession{input}).map_or_else(Msg::InvalidForm,Msg::Run)})}><h3>{"Resume a saved host session"}</h3><p>{"Tools run with the service user's file and hardware access."}</p><p class="muted">{format!("Default working directory: {}",text(&self.runtime,"workspace"))}</p>
                             {self.field(ctx,"session_name","Resumed session name","Hardware workspace")}{self.field(ctx,"thread_id","Existing Codex thread ID","Resume a saved Codex session")}{self.field(ctx,"cwd","Working directory (optional)","Keep default / saved directory")}{self.sandbox(ctx,"sandbox","Resume sandbox")}<p class="muted">{"Exit an external CLI session before attaching its saved thread here."}</p><button class="primary" disabled={self.busy||!self.connected||self.runtime["account"].is_null()||self.saved.field("session_name").trim().is_empty()||self.saved.field("thread_id").trim().is_empty()}>{"Resume host session"}</button>
                         </form>
                         <section class="saved-threads"><h2>{"Saved Codex sessions"}</h2>{self.field(ctx,"search","Search saved sessions","Title contains…")}<button disabled={!self.connected||self.busy} onclick={ctx.link().callback(|_|Msg::LoadSaved(false))}>{"Find saved sessions"}</button>{for self.saved_threads.iter().map(|thread|{let t=thread.clone();let name=thread["name"].as_str().filter(|s|!s.is_empty()).unwrap_or_else(||text(thread,"preview"));html!{<button class="session" onclick={ctx.link().callback(move |_|Msg::ChooseThread(t.clone()))}><strong>{name}</strong><span>{text(thread,"cwd")}</span><small>{text(thread,"id")}</small></button>}})}{if self.cursor.is_some(){html!{<button onclick={ctx.link().callback(|_|Msg::LoadSaved(true))}>{"Load more"}</button>}}else{Html::default()}}</section>

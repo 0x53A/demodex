@@ -1,65 +1,19 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{path::Path, sync::Mutex};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Target {
-    pub id: String,
-    pub url: String,
-    pub cwd: String,
-}
+pub use demodex_protocol::Target;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Environment {
-    pub id: String,
-    pub name: String,
-    pub memory_mib: u32,
-    pub cpus: u16,
-    pub internet: bool,
-    pub status: String,
-    pub error: Option<String>,
-}
+pub use demodex_protocol::Environment;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Session {
-    pub archived: bool,
-    pub context_usage: Value,
-    pub id: String,
-    pub name: String,
-    pub endpoint: String,
-    pub thread_id: Option<String>,
-    pub targets: Vec<Target>,
-    pub status: String,
-    pub error: Option<String>,
-    pub sandbox: Option<Sandbox>,
-    pub effective_sandbox: Option<Value>,
-    pub presentation: crate::session_context::Presentation,
-}
+pub use demodex_protocol::Session;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Sandbox {
-    ReadOnly,
-    WorkspaceWrite,
-    DangerFullAccess,
-}
+pub use demodex_protocol::Sandbox;
 
-#[derive(Debug, Serialize)]
-pub struct Event {
-    pub seq: i64,
-    pub at: String,
-    pub message: Value,
-}
+pub use demodex_protocol::Event;
 
-#[derive(Debug, Serialize)]
-pub struct Pending {
-    pub key: String,
-    pub method: String,
-    pub params: Value,
-    pub state: String,
-}
+pub use demodex_protocol::Pending;
 
 pub struct Store(Mutex<Connection>);
 
@@ -120,7 +74,7 @@ impl Store {
                 "INSERT INTO session_presentation VALUES(?1,?2)",
                 params![
                     id,
-                    serde_json::to_string(&crate::session_context::Presentation::generate())?
+                    serde_json::to_string(&crate::session_context::generate_presentation())?
                 ],
             )?;
         }
@@ -335,7 +289,7 @@ impl Store {
             "INSERT INTO session_presentation VALUES(?1,?2)",
             params![
                 id,
-                serde_json::to_string(&crate::session_context::Presentation::generate())?
+                serde_json::to_string(&crate::session_context::generate_presentation())?
             ],
         )?;
         if let Some(attachment) = attachment {

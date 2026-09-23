@@ -206,7 +206,7 @@ impl Client {
         let response = self.api.ask(|reply| Api::Call { request_id, operation, reply }, Some(Duration::from_secs(60))).await
             .context("Connection interrupted; the command may have been accepted. It will not be replayed")?
             .map_err(anyhow::Error::msg)?;
-        Ok(serde_json::from_str(&response)?)
+        Ok(response.into_value())
     }
 
     pub async fn read(&self, operation: Operation) -> Result<Value> {

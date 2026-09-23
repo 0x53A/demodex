@@ -216,8 +216,8 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
                     pass
 
         def api(path):
-            req = urllib.request.Request(host + "/api" + path, headers={"Authorization": "Bearer " + token})
-            return json.load(urllib.request.urlopen(req))
+            from wormhole_client import api as actor_api
+            return actor_api(host, token, path, None, None)
 
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(executable_path="/run/current-system/sw/bin/google-chrome", headless=True, args=["--no-sandbox"])
@@ -265,9 +265,8 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             expect(creation.get_by_label('Session name',exact=True)).to_have_value('Preserved creation draft')
             creation.press('Escape')
             expect(creation).to_have_count(0)
-            # The external app-server API remains available for diagnostic fixtures.
-            request=urllib.request.Request(host+'/api/sessions',data=json.dumps({'name':'Wormhole fixture','endpoint':f'ws://127.0.0.1:{codex_port}','targets':[{'id':'fixture-host','url':'ws://127.0.0.1:4501','cwd':'/home/operator/src'}]}).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
-            with urllib.request.urlopen(request) as response: json.load(response)
+            from wormhole_client import api as actor_api
+            actor_api(host, token, '/sessions', {'name':'Wormhole fixture','endpoint':f'ws://127.0.0.1:{codex_port}','targets':[{'id':'fixture-host','url':'ws://127.0.0.1:4501','cwd':'/home/operator/src'}]})
             page.get_by_role('button',name='Wormhole fixture',exact=False).click()
             page.get_by_role("button", name="Connect / resume").click()
             expect(page.locator(".session-heading .status")).to_have_text("connected")

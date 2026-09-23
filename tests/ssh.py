@@ -103,14 +103,8 @@ Subsystem sftp internal-sftp
             wait_port(ssh_port); wait_port(api_port)
             token = (root/'state/access-token').read_text().strip()
             def api(path, body=None, error=None):
-                request=urllib.request.Request(f'http://127.0.0.1:{api_port}/api'+path,data=None if body is None else json.dumps(body).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
-                try:
-                    value=json.load(urllib.request.urlopen(request,timeout=60))
-                    assert not error, value
-                    return value
-                except urllib.error.HTTPError as e:
-                    message=e.read().decode()
-                    assert error and error.lower() in message.lower(),message
+                from wormhole_client import api as actor_api
+                return actor_api(f'http://127.0.0.1:{api_port}', token, path, body, error)
             config={'name':'Disposable SSH','destination':f'{getpass.getuser()}@127.0.0.1','port':ssh_port,'identity_file':str(root/'client_key'),'known_hosts_file':str(root/'known_hosts'),'cwd':str(root)}
             api('/targets/ssh',dict(config,destination='-oProxyCommand=bad'),error='SSH config alias')
             (root/'empty_hosts').touch()

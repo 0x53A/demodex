@@ -46,6 +46,18 @@ pub struct Config {
     #[serde(default)]
     pub known_hosts_file: Option<String>,
 }
+impl From<demodex_protocol::SshTarget> for Config {
+    fn from(input: demodex_protocol::SshTarget) -> Self {
+        Self {
+            name: input.name,
+            destination: input.destination,
+            cwd: input.cwd,
+            port: input.port,
+            identity_file: input.identity_file,
+            known_hosts_file: input.known_hosts_file,
+        }
+    }
+}
 impl Config {
     pub fn validate(&self) -> Result<()> {
         ensure!(
@@ -697,7 +709,7 @@ pub fn require_local_app_server(
     }
     let local = endpoint.starts_with("unix://")
         || endpoint
-            .parse::<axum::http::Uri>()
+            .parse::<http::Uri>()
             .ok()
             .and_then(|uri| uri.host().map(str::to_owned))
             .is_some_and(|host| matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]"));

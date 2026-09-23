@@ -1,6 +1,6 @@
 use crate::model::{array, text};
 use demodex_protocol::Operation;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use yew::prelude::*;
 
@@ -107,7 +107,7 @@ impl Component for SessionControls {
         let action = |action: &'static str, label: &str, disabled: bool| {
             let id = props.id.clone();
             let run = props.onrun.clone();
-            html! {<button type="button" disabled={disabled} onclick={Callback::from(move |_|run.emit(Operation::Goal{id:id.clone(),input:json!({"action":action}).to_string()}))}>{label}</button>}
+            html! {<button type="button" disabled={disabled} onclick={Callback::from(move |_|run.emit(Operation::Goal{id:id.clone(),input:demodex_protocol::GoalAction{action:action.into(),objective:None,token_budget:None}}))}>{label}</button>}
         };
         let model_submit = {
             let run = props.onrun.clone();
@@ -117,7 +117,18 @@ impl Component for SessionControls {
             let tier = tier.clone();
             Callback::from(move |e: SubmitEvent| {
                 e.prevent_default();
-                run.emit(Operation::Model{id:id.clone(),input:json!({"model":model,"effort":effort,"serviceTier":if tier.is_empty(){None}else{Some(tier.clone())}}).to_string()});
+                run.emit(Operation::Model {
+                    id: id.clone(),
+                    input: demodex_protocol::ModelChoice {
+                        model: model.clone(),
+                        effort: effort.clone(),
+                        service_tier: if tier.is_empty() {
+                            None
+                        } else {
+                            Some(tier.clone())
+                        },
+                    },
+                });
             })
         };
         let goal_submit = {
@@ -127,7 +138,18 @@ impl Component for SessionControls {
             let budget = budget.clone();
             Callback::from(move |e: SubmitEvent| {
                 e.prevent_default();
-                run.emit(Operation::Goal{id:id.clone(),input:json!({"action":"save","objective":objective,"tokenBudget":if budget.trim().is_empty(){None}else{Some(budget.parse::<i64>().unwrap_or(0))}}).to_string()});
+                run.emit(Operation::Goal {
+                    id: id.clone(),
+                    input: demodex_protocol::GoalAction {
+                        action: "save".into(),
+                        objective: Some(objective.clone()),
+                        token_budget: if budget.trim().is_empty() {
+                            None
+                        } else {
+                            Some(budget.parse::<i64>().unwrap_or(0))
+                        },
+                    },
+                });
             })
         };
         let objective_change = {

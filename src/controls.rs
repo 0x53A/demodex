@@ -1,24 +1,11 @@
 //! Explicit UI counterparts of Codex commands; never interpreted as chat text.
 use crate::manager::{Live, Manager};
 use anyhow::{Context, Result, ensure};
-use serde::Deserialize;
 use serde_json::{Value, json};
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct ModelChoice {
-    pub model: String,
-    pub effort: String,
-    pub service_tier: Option<String>,
-}
+pub use demodex_protocol::ModelChoice;
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct GoalAction {
-    pub action: String,
-    pub objective: Option<String>,
-    pub token_budget: Option<i64>,
-}
+pub use demodex_protocol::GoalAction;
 
 pub fn effective_settings(settings: &Value) -> Value {
     if !settings["model"].is_string() {
