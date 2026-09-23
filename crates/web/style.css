@@ -34,12 +34,140 @@ aside{min-height:0;overflow-y:auto;overscroll-behavior:contain}
 }
 
 select{font:inherit;border:1px solid #4c5248;border-radius:0;padding:10px;background:#101210;color:#f0eee8;width:100%}.host-picker{overflow-wrap:anywhere}.session small{overflow-wrap:anywhere}
-.layout.connections-page{display:block}
-.layout.connections-page>aside{display:block;height:100%;max-width:720px;margin:auto;border:0}
-.layout.connections-page>main,.connections-page .environment-nav,.connections-page .section-title,.connections-page .session{display:none}
-.connections-page .host-picker>summary{display:none}
 .connection{padding:16px 0;display:grid;gap:8px}
 .connection-open{display:grid;text-align:left;gap:8px;width:100%;overflow-wrap:anywhere}
 .connection-open small{color:#a3aa9e}
 .connection>div{display:flex;gap:8px}
 header{gap:12px}
+
+/* Project overview and stable agent identities. */
+.layout{grid-template-columns:340px minmax(0,1fr)}
+.server-heading{padding:0 0 16px;border-bottom:1px solid #3b403a;margin-bottom:16px;overflow-wrap:anywhere}
+.eyebrow{font:10px ui-monospace,monospace;letter-spacing:1.2px;color:#a3aa9e}
+.server-heading h2{font-size:18px;margin:8px 0}.server-heading p{font:12px ui-monospace,monospace;color:#a3aa9e;margin:8px 0 0}
+.session-tree ul{list-style:none;padding:0;margin:0}.session-tree .tree-folder>ul{border-left:1px solid #3b403a;margin-left:5px;padding-left:12px}
+.tree-environment{margin:20px 0}.tree-environment h3{font:11px ui-monospace,monospace;color:#a3aa9e;overflow-wrap:anywhere}
+.folder-name{padding:12px 0 6px;font:12px/1.5 ui-monospace,monospace;color:#e8e5df;overflow-wrap:anywhere}
+.tree-agent .session{margin:6px 0 12px;gap:6px;padding:12px;min-width:0;background:#1b1e1a}
+.agent-identity{display:flex;align-items:center;gap:8px;font-size:14px;overflow-wrap:anywhere}
+.agent-icon{font-size:21px;letter-spacing:0;margin-right:8px;flex:none}.agent-identity .agent-icon{margin:0}
+.session .session-title{font:12px/1.4 system-ui,sans-serif;color:#c1c7bb;overflow-wrap:anywhere}
+.session .agent-status{font:11px ui-monospace,monospace}.session .location-source{color:#8f978a;font:10px ui-monospace,monospace}
+.agent-status::before,.session-heading .status::before{content:'■';font-size:8px;margin-right:6px}
+.agent-status.working,.status.working{color:#91b88b}.agent-status.waiting,.status.waiting{color:#ff9b61}
+.agent-status.failed,.status.failed{color:#f2594e}.agent-status.disconnected,.status.disconnected{color:#a3aa9e}
+.agent-status.idle,.status.idle{color:#c1c7bb}
+.session-heading-text{flex:1;min-width:0}.session-heading-text h1{display:flex;align-items:center}
+.session-heading-text p{margin:5px 0 0;font-size:13px;color:#a3aa9e;overflow-wrap:anywhere}
+.thread-reference{display:block;font:11px/1.5 ui-monospace,monospace;color:#a3aa9e;margin-top:5px;overflow-wrap:anywhere;user-select:all}
+.session-controls{border:1px solid #4c5248;padding:16px;margin:0 0 20px}
+.session-controls h2{font-size:18px;margin-top:0}.session-controls h3{font-size:15px}
+.session-controls form+form{border-top:1px solid #3b403a;padding-top:16px;margin-top:20px}
+.session-controls button{margin:4px 8px 4px 0}.control-fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.goal-actions{display:flex;flex-wrap:wrap}.accepted-model,.goal-status{font:12px/1.6 ui-monospace,monospace;color:#ffb079;overflow-wrap:anywhere}
+.session-controls textarea{min-height:100px}.controls-toggle{font-size:12px}
+@media(max-width:700px){.control-fields{grid-template-columns:1fr}.controls-toggle{margin-left:auto}.session-controls{padding:12px}}
+@media(max-width:700px){
+  .session-heading{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 12px}
+  .session-heading>.back{grid-column:1;grid-row:1;justify-self:start}
+  .session-heading>.controls-toggle{grid-column:2;grid-row:1;margin:0}
+  .session-heading-text{grid-column:1 / -1;grid-row:2}
+  .session-heading>.status{grid-column:1;grid-row:3}
+  .session-heading>button:not(.back):not(.controls-toggle){grid-column:2;grid-row:3}
+}
+.session-context{padding:8px 0 16px;border-bottom:1px solid #3b403a}
+.context-project p{margin:8px 0;overflow-wrap:anywhere}.environment-label{font:11px ui-monospace,monospace;color:#a3aa9e;margin-right:10px}
+.context-description{font-size:14px}.session-identifiers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:16px}
+.session-identifiers label{margin:0;gap:6px;font:11px ui-monospace,monospace;color:#a3aa9e}
+input.session-uuid{font:11px ui-monospace,monospace;padding:10px 7px;letter-spacing:-.3px;color:#d8ddd1;cursor:text;min-width:0}
+.connections-page .session-tree{display:none}
+@media(max-width:1000px){.session-identifiers{grid-template-columns:1fr}}
+@media(max-width:700px){.layout{display:block}.server-heading h2{font-size:20px}.tree-agent .session{padding:14px}.session-heading-text h1{font-size:20px}.session-identifiers{gap:10px}.empty{padding-top:24px}}
+
+.message-queue{border:1px solid #4c5248;padding:12px;margin:16px 0}.queued-message{border-top:1px solid #343a32;padding:8px 0}.composer-shortcut{font-size:11px;color:#a3aa9e;margin:6px 0 0;line-height:1.3}
+
+/* Settings are independent of conversation length and scroll position. */
+.session-modal{padding:0;border:1px solid #4c5248;background:#141615;color:#e8e5df;width:min(760px,calc(100vw - 32px));max-width:calc(100vw - 32px);height:min(820px,calc(100dvh - 32px));max-height:calc(100dvh - 32px);overflow:hidden}
+.session-modal[open]{display:flex;flex-direction:column}
+.session-modal::backdrop{background:rgb(0 0 0 / .7)}
+.modal-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;flex:none;padding:12px 16px;border-bottom:1px solid #4c5248}
+.modal-heading h2{font-size:18px;margin:0}.modal-heading button{flex:none}
+.modal-body{min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:16px;scrollbar-gutter:stable;overflow-wrap:anywhere}
+.modal-body .session-controls{border:0;padding:0}.modal-body .session-controls>h2{display:none}
+.session-inbox{flex:0 1 auto;min-height:0;max-height:28dvh;overflow-y:auto;overscroll-behavior:contain;border-top:1px solid #4c5248}
+.session-inbox:empty{display:none}.session-inbox .approval,.session-inbox .message-queue{margin:8px 0;padding:12px}
+.session-inbox .approval h2{margin-top:0}.session-inbox textarea{min-height:64px}
+.session-heading-text h1,.session-heading-text p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.session-heading-text h1{display:block}.session-heading-text .agent-icon{display:inline}
+@media(max-width:700px){.session-modal{width:calc(100vw - 16px);max-width:calc(100vw - 16px);height:calc(100dvh - 16px);max-height:calc(100dvh - 16px)}.modal-body{padding:12px}.session-heading-text p{display:none}}
+@media(max-height:600px){header{flex-basis:44px;height:44px}.session-heading{padding-bottom:6px}.session-heading-text h1{font-size:16px}.session-heading-text p,.thread-reference,.composer-shortcut{display:none}.composer{padding-top:6px;padding-bottom:6px}.composer textarea{height:52px}.session-inbox{max-height:22dvh}}
+
+/* Target editing lives in the independently scrolling controls dialog. */
+.target-picker, .target-registry { margin-block: 1rem; }
+.target-picker fieldset { border: 0; padding: 0; min-width: 0; }
+.target-directory { margin-block: .75rem; }
+.target-directory input { width: 100%; min-width: 0; box-sizing: border-box; }
+.target-registry code { overflow-wrap: anywhere; }
+.transcript{overflow-anchor:none;scroll-behavior:auto}
+.transcript-toolbar{flex:none;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:4px 0;color:#a3aa9e;font:11px ui-monospace,monospace}
+.transcript-toolbar button{min-height:32px;padding:5px 8px;font-size:11px}
+
+/* Usage stays outside the history and never changes the transcript's width. */
+.weekly-usage{flex:none;margin:0;padding:6px 16px;border-bottom:1px solid #3b403a;font:12px ui-monospace,monospace;background:#1b1e1a}
+.weekly-usage summary{color:#c1c7bb;min-height:22px;line-height:22px}.weekly-details{max-height:22dvh;overflow-y:auto;overscroll-behavior:contain;padding-bottom:8px}.weekly-details p{margin:8px 0}.weekly-window{display:flex;align-items:center;flex-wrap:wrap;gap:8px 16px;margin:8px 0}.weekly-window small{color:#a3aa9e}
+meter{width:80px;height:12px;accent-color:#91b88b}
+.context-usage{display:inline-flex;align-items:center;flex-wrap:wrap;gap:5px 8px;font:11px ui-monospace,monospace;color:#c1c7bb}.context-usage meter{width:56px}.context-usage small{flex-basis:100%;color:#a3aa9e}.context-usage.unavailable{color:#8f978a}
+.transcript-position{display:grid;gap:3px}.modal-body>.context-usage{margin-bottom:16px}.session .context-usage span{font-size:11px}
+.composer>div{flex-wrap:wrap}.composer>div button{flex-shrink:0}
+@media(max-width:700px){.composer>div{display:grid;grid-template-columns:1fr 1fr}.composer>div button{padding:8px;min-width:0}}
+
+.background-terminal { border-top: 1px solid var(--border, #555); padding-block: .75rem; overflow-wrap: anywhere; }
+.background-terminal pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.transcript-toolbar { flex-wrap: wrap; }
+
+/* Server connection belongs to the header; session creation belongs to the sidebar. */
+.app-header{height:auto;min-height:64px;flex:0 0 auto;padding:10px 20px;gap:12px}
+.current-server{display:grid;gap:3px;min-width:0;margin-right:auto}
+.current-server strong{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:32vw}
+.connection-actions{display:flex;gap:8px}
+.new-session-nav{width:100%;margin-bottom:16px;text-align:left}
+.new-session-form fieldset{border:0;padding:0;margin:0;min-width:0}
+.new-session-form button[type="submit"]{margin-top:16px}
+.new-session-form h3{font-size:14px;margin-top:24px}
+.creation-target{display:flex;align-items:center;gap:12px;flex-wrap:wrap;border-bottom:1px solid #343a32}
+.creation-target label{flex:1;margin:12px 0}
+.target-directory button{margin-right:8px}
+.create-vm,.resume-session{border-top:1px solid #3b403a;margin-top:20px;padding-top:16px}
+.session-executors{color:#a3aa9e;overflow-wrap:anywhere}
+.session-tree>ul{list-style:none;padding:0;margin:0}
+@media(max-width:700px){
+ .app-header{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 12px;padding:8px 16px}
+ .current-server{margin:0}.current-server strong{max-width:100%}
+ .connection-actions button{min-height:34px;padding:6px 9px;font-size:12px}
+ .app-header .indicator{justify-self:end;font-size:10px}
+}
+
+
+/* Separate session behavior, execution, context and history without hiding decisions. */
+.control-section{border-top:1px solid #3b403a;padding:16px 0;margin-top:16px}
+.control-section>h3{font-size:15px;margin:0 0 12px}
+.control-section .target-picker{margin-top:0}
+.control-section .session-context{border-bottom:0}
+.control-section .context-usage{margin-bottom:12px}
+.session-archive button{margin-top:4px}
+.device-settings{border-top:1px solid #3b403a;margin-top:24px;padding-top:16px}
+button:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid #ff792f;outline-offset:3px}
+input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid #ff792f;outline-offset:1px}
+.resource-fields{grid-template-columns:repeat(2,minmax(0,1fr))}
+
+/* Small phones still need a readable transcript between fixed controls. */
+@media(max-height:600px){
+ .layout>main.chat-main{padding-top:8px}
+ .thread-reference{display:block;font-size:9px;line-height:1.4}
+ .transcript-position>span:first-child{display:none}
+}
+@media(max-width:380px) and (max-height:600px){
+ .transcript-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px}
+ .transcript-toolbar .background-toggle{min-width:0}
+ .transcript-position{grid-column:1 / -1;grid-row:2;display:block}
+}

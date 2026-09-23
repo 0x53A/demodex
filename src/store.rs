@@ -24,6 +24,8 @@ pub struct Environment {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
+    pub archived: bool,
+    pub context_usage: Value,
     pub id: String,
     pub name: String,
     pub endpoint: String,
@@ -33,6 +35,7 @@ pub struct Session {
     pub error: Option<String>,
     pub sandbox: Option<Sandbox>,
     pub effective_sandbox: Option<Value>,
+    pub presentation: crate::session_context::Presentation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +68,9 @@ impl Store {
                id TEXT PRIMARY KEY, name TEXT NOT NULL, endpoint TEXT NOT NULL,
                thread_id TEXT, targets TEXT NOT NULL, status TEXT NOT NULL,
                error TEXT, created INTEGER NOT NULL DEFAULT (unixepoch()));
+             CREATE TABLE IF NOT EXISTS ssh_targets (id TEXT PRIMARY KEY, config TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS execution_targets (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, cwd TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS session_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id), selection TEXT NOT NULL, pending INTEGER NOT NULL DEFAULT 0);
              CREATE TABLE IF NOT EXISTS events (
                seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id),
                at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), message TEXT NOT NULL);
@@ -79,20 +85,55 @@ impl Store {
              CREATE TABLE IF NOT EXISTS session_environment (
                session_id TEXT PRIMARY KEY REFERENCES sessions(id),
                environment_id TEXT NOT NULL REFERENCES environments(id));
+             CREATE TABLE IF NOT EXISTS runtime_sessions (session_id TEXT PRIMARY KEY REFERENCES sessions(id));
              CREATE TABLE IF NOT EXISTS host_sessions (
                session_id TEXT PRIMARY KEY REFERENCES sessions(id));
              CREATE TABLE IF NOT EXISTS session_settings (
                session_id TEXT PRIMARY KEY REFERENCES sessions(id), sandbox TEXT, effective_sandbox TEXT);
              CREATE TABLE IF NOT EXISTS command_receipts (
                id TEXT PRIMARY KEY, operation TEXT NOT NULL, response TEXT);
+             CREATE TABLE IF NOT EXISTS session_presentation (
+               session_id TEXT PRIMARY KEY REFERENCES sessions(id), value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS session_usage (
+               session_id TEXT PRIMARY KEY REFERENCES sessions(id), value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS session_archive (
+               session_id TEXT PRIMARY KEY REFERENCES sessions(id));
+             CREATE TABLE IF NOT EXISTS session_model (
+               session_id TEXT PRIMARY KEY REFERENCES sessions(id), selection TEXT, effective TEXT);
+             CREATE TABLE IF NOT EXISTS context_tool_receipts (
+               id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
+               thread_id TEXT NOT NULL, call_id TEXT NOT NULL, request TEXT NOT NULL,
+               response TEXT NOT NULL, UNIQUE(session_id,thread_id,call_id));
              UPDATE environments SET status='stopped', error=NULL;
              UPDATE sessions SET status='disconnected', error=NULL;
              UPDATE pending SET state='unavailable' WHERE state IN ('pending','responding','delivered');",
         )?;
-        Ok(Self(Mutex::new(connection)))
+        // Add identities to existing data without replacing sessions or history.
+        let ids = connection.prepare("SELECT id FROM sessions WHERE id NOT IN (SELECT session_id FROM session_presentation)")?
+            .query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for id in ids {
+            connection.execute("INSERT INTO session_presentation VALUES(?1,?2)", params![id, serde_json::to_string(&crate::session_context::Presentation::generate())?])?;
+        }
+        // Recover the last report already in persisted history on first upgrade.
+        let usage_ids = connection.prepare("SELECT id FROM sessions WHERE id NOT IN (SELECT session_id FROM session_usage)")?
+            .query_map([], |r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for id in usage_ids {
+            let report: Option<(String,Option<i64>)> = connection.query_row(
+                "SELECT message,unixepoch(at) FROM events WHERE session_id=?1 AND json_extract(message,'$.method')='thread/tokenUsage/updated' ORDER BY seq DESC LIMIT 1",
+                [&id], |r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+            if let Some((message, at)) = report {
+                let message: Value = serde_json::from_str(&message)?;
+                let mut usage = crate::usage::context(&message["params"]["tokenUsage"]);
+                usage["reported_at"] = serde_json::json!(at);
+                connection.execute("INSERT INTO session_usage VALUES(?1,?2)",params![id,usage.to_string()])?;
+            }
+        }
+        let store = Self(Mutex::new(connection));
+        for session in store.list()? { store.ensure_target_selection(&session.id)?; }
+        Ok(store)
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+    pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.0
             .lock()
             .map_err(|_| anyhow::anyhow!("database lock poisoned"))
@@ -128,19 +169,17 @@ impl Store {
     pub fn environment_status(&self,id:&str,status:&str,error:Option<&str>)->Result<()> {
         self.lock()?.execute("UPDATE environments SET status=?2,error=?3 WHERE id=?1",params![id,status,error])?;Ok(())
     }
+    #[cfg(test)]
     pub fn bind_environment(&self,session:&str,environment:&str)->Result<()> {
         self.lock()?.execute("INSERT INTO session_environment VALUES(?1,?2)",params![session,environment])?;Ok(())
     }
     pub fn session_environment(&self,session:&str)->Result<Option<String>> {
         Ok(self.lock()?.query_row("SELECT environment_id FROM session_environment WHERE session_id=?1",[session],|r|r.get(0)).optional()?)
     }
-    pub fn environment_sessions(&self,environment:&str)->Result<Vec<String>> {
-        let db=self.lock()?;let mut q=db.prepare("SELECT session_id FROM session_environment WHERE environment_id=?1")?;
-        Ok(q.query_map([environment],|r|r.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
     pub fn retarget(&self,session:&str,endpoint:&str,targets:&[Target])->Result<()> {
         self.lock()?.execute("UPDATE sessions SET endpoint=?2,targets=?3 WHERE id=?1",params![session,endpoint,serde_json::to_string(targets)?])?;Ok(())
     }
+    #[cfg(test)]
     pub fn bind_host(&self, session: &str) -> Result<()> {
         self.lock()?.execute("INSERT INTO host_sessions VALUES(?1)", [session])?;
         Ok(())
@@ -158,9 +197,54 @@ impl Store {
         targets: &[Target],
         thread_id: Option<&str>,
     ) -> Result<Session> {
+        self.create_attached(name,endpoint,targets,thread_id,None)
+    }
+
+    pub fn create_attached(
+        &self,
+        name: &str,
+        endpoint: &str,
+        targets: &[Target],
+        thread_id: Option<&str>,
+        attachment: Option<&crate::targets::Selection>,
+    ) -> Result<Session> {
+        self.create_initial(name, endpoint, targets, thread_id, attachment, None)
+    }
+
+    pub fn create_selected(&self, name: &str, endpoint: &str, targets: &[Target], selection: &[crate::targets::Selection], sandbox: Option<Sandbox>) -> Result<Session> {
+        self.create_initial(name, endpoint, targets, None, None, Some((selection, sandbox)))
+    }
+
+    pub fn uses_runtime(&self, id: &str) -> Result<bool> {
+        Ok(self.lock()?.query_row("SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?1)", [id], |r| r.get(0))?)
+    }
+
+    fn create_initial(&self, name: &str, endpoint: &str, targets: &[Target], thread_id: Option<&str>, attachment: Option<&crate::targets::Selection>, selected: Option<(&[crate::targets::Selection], Option<Sandbox>)>) -> Result<Session> {
         let id = uuid::Uuid::new_v4().to_string();
-        self.lock()?.execute("INSERT INTO sessions(id,name,endpoint,targets,thread_id,status) VALUES(?1,?2,?3,?4,?5,'disconnected')",
+        let mut db = self.lock()?;
+        let tx = db.transaction()?;
+        tx.execute("INSERT INTO sessions(id,name,endpoint,targets,thread_id,status) VALUES(?1,?2,?3,?4,?5,'disconnected')",
             params![id, name, endpoint, serde_json::to_string(targets)?, thread_id])?;
+        tx.execute("INSERT INTO session_presentation VALUES(?1,?2)", params![id, serde_json::to_string(&crate::session_context::Presentation::generate())?])?;
+        if let Some(attachment) = attachment {
+            // Publish the session and its initial managed selection atomically.
+            // Concurrent snapshots must never migrate a half-created host/VM
+            // session as an external executor or an empty selection.
+            if attachment.id == "host" {
+                tx.execute("INSERT INTO host_sessions VALUES(?1)",[&id])?;
+            } else {
+                let vm=attachment.id.strip_prefix("vm-").context("Invalid managed attachment")?;
+                tx.execute("INSERT INTO session_environment VALUES(?1,?2)",params![id,vm])?;
+            }
+            tx.execute("INSERT INTO session_targets VALUES(?1,?2,0)",params![id,serde_json::to_string(&[attachment])?])?;
+        }
+        if let Some((selection, sandbox)) = selected {
+            tx.execute("INSERT INTO runtime_sessions VALUES(?1)", [&id])?;
+            tx.execute("INSERT INTO session_targets VALUES(?1,?2,0)", params![id, serde_json::to_string(selection)?])?;
+            tx.execute("INSERT INTO session_settings(session_id,sandbox) VALUES(?1,?2)", params![id, sandbox.map(|v| serde_json::to_string(&v)).transpose()?])?;
+        }
+        tx.commit()?;
+        drop(db);
         self.get(&id)
     }
 
@@ -177,7 +261,7 @@ impl Store {
 
     pub fn list(&self) -> Result<Vec<Session>> {
         let db = self.lock()?;
-        let mut query = db.prepare("SELECT id,name,endpoint,thread_id,targets,status,error,sandbox,effective_sandbox FROM sessions LEFT JOIN session_settings ON sessions.id=session_settings.session_id ORDER BY created,id")?;
+        let mut query = db.prepare("SELECT id,name,endpoint,thread_id,targets,status,error,sandbox,effective_sandbox,session_presentation.value, EXISTS(SELECT 1 FROM session_archive WHERE session_id=sessions.id), (SELECT value FROM session_usage WHERE session_id=sessions.id) FROM sessions LEFT JOIN session_settings ON sessions.id=session_settings.session_id JOIN session_presentation ON sessions.id=session_presentation.session_id ORDER BY created,id")?;
         let rows = query.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -189,11 +273,16 @@ impl Store {
                 row.get::<_, Option<String>>(6)?,
                 row.get::<_, Option<String>>(7)?,
                 row.get::<_, Option<String>>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, bool>(10)?,
+                row.get::<_, Option<String>>(11)?,
             ))
         })?;
         rows.map(|row| {
-            let (id, name, endpoint, thread_id, targets, status, error, sandbox, effective_sandbox) = row?;
+            let (id, name, endpoint, thread_id, targets, status, error, sandbox, effective_sandbox, presentation, archived, context_usage) = row?;
             Ok(Session {
+                archived,
+                context_usage: context_usage.as_deref().map(serde_json::from_str).transpose()?.unwrap_or(Value::Null),
                 id,
                 name,
                 endpoint,
@@ -203,9 +292,27 @@ impl Store {
                 error,
                 sandbox: sandbox.as_deref().map(serde_json::from_str).transpose()?,
                 effective_sandbox: effective_sandbox.as_deref().map(serde_json::from_str).transpose()?,
+                presentation: serde_json::from_str(&presentation)?,
             })
         })
         .collect()
+    }
+
+    pub fn context_usage(&self, id: &str, usage: &Value) -> Result<()> {
+        self.lock()?.execute("INSERT INTO session_usage VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET value=excluded.value",
+            params![id, crate::usage::context(usage).to_string()])?;
+        Ok(())
+    }
+
+    pub fn archive(&self, id: &str, archived: bool) -> Result<()> {
+        self.get(id)?;
+        let db = self.lock()?;
+        if archived {
+            db.execute("INSERT OR IGNORE INTO session_archive(session_id) VALUES(?1)", [id])?;
+        } else {
+            db.execute("DELETE FROM session_archive WHERE session_id=?1", [id])?;
+        }
+        Ok(())
     }
 
     pub fn get(&self, id: &str) -> Result<Session> {
@@ -213,6 +320,68 @@ impl Store {
             .into_iter()
             .find(|s| s.id == id)
             .context("session not found")
+    }
+
+    pub fn enable_context_reporting(&self, id: &str) -> Result<()> {
+        let mut presentation = self.get(id)?.presentation;
+        presentation.context_reporting = true;
+        self.lock()?.execute("UPDATE session_presentation SET value=?2 WHERE session_id=?1", params![id, serde_json::to_string(&presentation)?])?;
+        Ok(())
+    }
+
+    pub fn model_settings(&self, id: &str) -> Result<Value> {
+        let values: Option<(Option<String>,Option<String>)> = self.lock()?.query_row("SELECT selection,effective FROM session_model WHERE session_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let (selection,effective) = values.unwrap_or_default();
+        Ok(serde_json::json!({"selection":selection.map(|v|serde_json::from_str::<Value>(&v)).transpose()?,"effective":effective.map(|v|serde_json::from_str::<Value>(&v)).transpose()?}))
+    }
+    pub fn model_selection(&self, id: &str, value: &Value) -> Result<()> {
+        self.lock()?.execute("INSERT INTO session_model(session_id,selection) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET selection=excluded.selection",params![id,value.to_string()])?;
+        Ok(())
+    }
+    pub fn model_effective(&self, id: &str, value: &Value) -> Result<()> {
+        self.lock()?.execute("INSERT INTO session_model(session_id,effective) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET effective=excluded.effective",params![id,value.to_string()])?;
+        Ok(())
+    }
+
+    /// Metadata and its UUID receipt commit together before replying to Codex.
+    /// A retried call returns its original result, never overwrites newer context.
+    pub fn context_tool(&self, id: &str, thread: &str, request: &Value) -> Result<Value> {
+        use crate::session_context::{self, UserVisibleContext};
+        let mut session = self.get(id)?;
+        anyhow::ensure!(request["threadId"] == thread && session.thread_id.as_deref() == Some(thread), "tool call does not belong to this session");
+        let call_id = request["callId"].as_str().filter(|s| !s.is_empty()).context("missing tool call ID")?;
+        let request_text = request.to_string();
+        let mut db = self.lock()?;
+        let tx = db.transaction()?;
+        let previous: Option<(String, String)> = tx.query_row("SELECT request,response FROM context_tool_receipts WHERE session_id=?1 AND thread_id=?2 AND call_id=?3", params![id,thread,call_id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+        if let Some((original, response)) = previous {
+            anyhow::ensure!(original == request_text, "tool call ID reused with different arguments");
+            return Ok(serde_json::from_str(&response)?);
+        }
+        let result = (|| -> Result<Value> {
+            anyhow::ensure!(session.presentation.context_reporting, "Demodex context tools were not registered for this thread");
+            anyhow::ensure!(request["namespace"] == "demodex", "unsupported tool namespace");
+            match request["tool"].as_str().unwrap_or("") {
+                "set_user_visible_session_context" => {
+                    let mut context: UserVisibleContext = serde_json::from_value(request["arguments"].clone())?;
+                    session_context::validate(&mut context, &session.targets)?;
+                    session.presentation.context = Some(context);
+                    Ok(serde_json::to_value(&session.presentation)?)
+                }
+                "get_session_context" => {
+                    anyhow::ensure!(request["arguments"].as_object().is_some_and(|v| v.is_empty()), "get_session_context takes no arguments");
+                    Ok(serde_json::json!({"session_id":session.id,"thread_id":session.thread_id,"presentation":session.presentation,"environments":session.targets.iter().map(|t| serde_json::json!({"environment_id":t.id,"execution_directory":t.cwd,"executor_guidance":if t.id.starts_with("ssh-"){Some(crate::ssh::AGENT_INSTRUCTIONS)}else{None}})).collect::<Vec<_>>()}))
+                }
+                _ => anyhow::bail!("unsupported Demodex tool"),
+            }
+        })();
+        let response = session_context::response(result);
+        tx.execute("INSERT INTO context_tool_receipts VALUES(?1,?2,?3,?4,?5,?6)", params![uuid::Uuid::new_v4().to_string(),id,thread,call_id,request_text,response.to_string()])?;
+        if response["success"] == true && request["tool"] == "set_user_visible_session_context" {
+            tx.execute("UPDATE session_presentation SET value=?2 WHERE session_id=?1", params![id,serde_json::to_string(&session.presentation)?])?;
+        }
+        tx.commit()?;
+        Ok(response)
     }
 
     pub fn thread(&self, id: &str, thread: &str) -> Result<()> {
@@ -292,7 +461,7 @@ impl Store {
 
     pub fn request_state(&self, key: &str, state: &str) -> Result<()> {
         self.lock()?.execute(
-            "UPDATE pending SET state=?2 WHERE key=?1 AND state != 'resolved'",
+            "UPDATE pending SET state=?2 WHERE key=?1 AND state NOT IN ('resolved','unavailable')",
             params![key, state],
         )?;
         Ok(())
@@ -316,6 +485,36 @@ impl Store {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[tokio::test]
+    async fn archive_requires_stopped_state_and_survives_restart_without_losing_history() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("archive.db");
+        let id;
+        {
+            let manager = crate::manager::Manager::new(Store::open(&path)?);
+            let session = manager.store.create("keep", "ws://localhost:1", &[], Some("thread"))?;
+            id = session.id;
+            manager.store.event(&id, &json!({"history":"preserved"}))?;
+            for state in ["working", "active", "waiting", "connecting", "running", "error"] {
+                manager.store.status(&id, state, None)?;
+                assert!(manager.archive(&id, true).await.is_err());
+                assert!(!manager.store.get(&id)?.archived);
+            }
+            manager.store.status(&id, "disconnected", None)?;
+            manager.archive(&id, true).await?;
+            assert!(manager.prompt(&id, "must not run").await.unwrap_err().to_string().contains("Restore"));
+            assert!(manager.connect(&id).await.unwrap_err().to_string().contains("Restore"));
+        }
+        let manager = crate::manager::Manager::new(Store::open(&path)?);
+        assert!(manager.store.get(&id)?.archived);
+        assert_eq!(manager.store.get(&id)?.thread_id.as_deref(), Some("thread"));
+        assert_eq!(manager.store.events(&id, 0)?.len(), 1);
+        manager.archive(&id, false).await?;
+        assert!(!manager.store.get(&id)?.archived);
+        assert!(manager.archive("missing", true).await.is_err());
+        Ok(())
+    }
+
     #[test]
     fn approval_cannot_be_answered_twice_or_on_replacement_connection() -> Result<()> {
         let store = Store::open(Path::new(":memory:"))?;
@@ -330,6 +529,19 @@ mod tests {
         assert!(store.claim(&session.id, "first:7", "first").is_err());
         Ok(())
     }
+    #[test]
+    fn late_send_acknowledgement_cannot_revive_a_lost_approval() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        let session = store.create("test", "ws://localhost:1", &[], None)?;
+        store.request(&session.id, "old", &json!({"id":7,"method":"approval","params":{}}))?;
+        store.claim(&session.id, "old:7", "old")?;
+        store.disconnected(&session.id, "old")?;
+        store.request_state("old:7", "delivered")?;
+        assert_eq!(store.pending(&session.id)?[0].state, "unavailable");
+        assert!(store.claim(&session.id, "old:7", "replacement").is_err());
+        Ok(())
+    }
+
     #[test]
     fn restart_keeps_identity_and_history_but_not_live_approvals() -> Result<()> {
         let dir = tempfile::tempdir()?;

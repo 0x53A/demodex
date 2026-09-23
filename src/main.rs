@@ -1,8 +1,14 @@
+mod ssh;
 mod uploads;
+mod usage;
+mod targets;
 mod manager;
 mod orchestrator;
 mod rpc;
 mod store;
+mod session_context;
+mod controls;
+mod background;
 mod vm;
 mod wormhole;
 
@@ -224,8 +230,19 @@ fn api(app: App) -> Router {
         .route("/sessions", get(list).post(create))
         .route("/sessions/{id}", get(detail))
         .route("/sessions/{id}/connect", post(connect))
+        .route("/sessions/{id}/archive", post(archive))
         .route("/sessions/{id}/sandbox", post(change_sandbox))
+        .route("/sessions/{id}/targets", post(select_targets))
+        .route("/targets", get(targets).post(register_target))
+        .route("/targets/ssh", post(register_ssh_target))
+        .route("/targets/{id}/check", post(check_ssh_target))
+        .route("/targets/{id}/reconnect", post(reconnect_ssh_target))
+        .route("/targets/{id}/forget", post(forget_target))
+        .route("/sessions/{id}/models", get(models))
+        .route("/sessions/{id}/model", post(change_model))
+        .route("/sessions/{id}/goal", post(change_goal))
         .route("/sessions/{id}/messages", post(prompt))
+        .route("/sessions/{id}/queue", post(queue_prompt))
         .route("/sessions/{id}/interrupt", post(interrupt))
         .route("/sessions/{id}/answer", post(answer))
         .route("/sessions/{id}/events", get(events))
@@ -233,6 +250,7 @@ fn api(app: App) -> Router {
         .route("/runtime/start",post(runtime_start))
         .route("/runtime/login",post(runtime_login))
         .route("/host/sessions",post(host_session))
+        .route("/runtime/sessions",post(selected_session))
         .route("/environments",get(environments).post(environment_create))
         .route("/environments/{id}/start",post(environment_start))
         .route("/environments/{id}/stop",post(environment_stop))
@@ -295,14 +313,61 @@ async fn create(State(app): State<App>, Json(input): Json<NewSession>) -> Api<st
         &input.targets,
         input.thread_id.as_deref().filter(|s| !s.is_empty()),
     )?;
+    app.manager.store.ensure_target_selection(&session.id)?;
     app.manager.changed();
     app.manager.store.sandbox(&session.id,input.sandbox)?;
     Ok(Json(app.manager.store.get(&session.id)?))
 }
 async fn detail(State(app): State<App>, Path(id): Path<String>) -> Api<Value> {
-    Ok(Json(
-        json!({"session":app.manager.store.get(&id)?,"pending":app.manager.store.pending(&id)?}),
-    ))
+    app.manager.store.ensure_target_selection(&id)?;
+    let session = app.manager.store.get(&id)?;
+    let (queued, queue_error) = match app.manager.queued(&id).await {
+        Ok(queued) => (queued, Value::Null),
+        Err(error) => (Value::Null, json!(format!("{error:#}"))),
+    };
+    let controls = app.manager.control_snapshot(&id).await?;
+    let background = app.manager.background_snapshot(&id).await;
+    Ok(Json(json!({"session":session,"pending":app.manager.store.pending(&id)?,"queued":queued,"queue_error":queue_error,"controls":controls,"background":background,"target_selection":app.manager.store.target_selection(&id)?,"targets_pending":app.manager.store.targets_pending(&id)?})))
+}
+
+async fn targets(State(app): State<App>) -> Api<Value> {
+    Ok(Json(app.orchestrator.targets().await?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegisterTarget { name: String, url: String, cwd: String }
+async fn register_target(State(app): State<App>, Json(input): Json<RegisterTarget>) -> Api<Value> {
+    let result = app.manager.store.register_target(&input.name, &input.url, &input.cwd)?;
+    app.manager.changed();
+    Ok(Json(json!(result)))
+}
+async fn register_ssh_target(State(app): State<App>, Json(input): Json<ssh::Config>) -> Api<Value> {
+    Ok(Json(app.orchestrator.register_ssh_target(input).await?))
+}
+async fn reconnect_ssh_target(State(app): State<App>, Path(id): Path<String>) -> Api<Value> {
+    app.orchestrator.reconnect_ssh_target(&id).await?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn check_ssh_target(State(app): State<App>, Path(id): Path<String>) -> Api<Value> {
+    app.orchestrator.check_ssh_target(&id).await?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn forget_target(State(app): State<App>, Path(id): Path<String>) -> Api<Value> {
+    app.orchestrator.forget_target(&id).await?;
+    Ok(Json(json!({"ok":true})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectTargets { targets: Vec<targets::Selection> }
+async fn select_targets(State(app): State<App>, Path(id): Path<String>, Json(input): Json<SelectTargets>) -> Api<Value> {
+    app.orchestrator.select_targets(&id, &input.targets).await?;
+    Ok(Json(json!({"ok":true,"applies_on_next_message":true})))
+}
+#[derive(Deserialize)]
+struct ArchiveChoice { archived: bool }
+async fn archive(State(app): State<App>, Path(id): Path<String>, Json(input): Json<ArchiveChoice>) -> Api<Value> {
+    app.manager.archive(&id, input.archived).await?;
+    Ok(Json(json!({"archived":input.archived})))
 }
 async fn connect(State(app): State<App>, Path(id): Path<String>) -> Api<Value> {
     app.orchestrator.connect_session(&id).await?;
@@ -314,10 +379,25 @@ async fn change_sandbox(State(app):State<App>,Path(id):Path<String>,Json(input):
     app.orchestrator.connect_session(&id).await?;
     Ok(Json(json!({"ok":true})))
 }
+async fn models(State(app):State<App>,Path(id):Path<String>)->Api<Value> {
+    Ok(Json(app.manager.model_catalog(&id).await?))
+}
+async fn change_model(State(app):State<App>,Path(id):Path<String>,Json(input):Json<controls::ModelChoice>)->Api<Value> {
+    Ok(Json(app.manager.change_model(&id,input).await?))
+}
+async fn change_goal(State(app):State<App>,Path(id):Path<String>,Json(input):Json<controls::GoalAction>)->Api<Value> {
+    Ok(Json(app.manager.change_goal(&id,input).await?))
+}
 
 async fn runtime_status(State(app):State<App>)->Api<Value> {Ok(Json(app.orchestrator.runtime_status().await?))}
 async fn runtime_start(State(app):State<App>)->Api<Value> {Ok(Json(app.orchestrator.start_runtime().await?))}
 async fn runtime_login(State(app):State<App>)->Api<Value> {Ok(Json(app.orchestrator.login().await?))}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectedSession { name: String, targets: Vec<targets::Selection>, sandbox: Option<store::Sandbox> }
+async fn selected_session(State(app): State<App>, Json(input): Json<SelectedSession>) -> Api<store::Session> {
+    Ok(Json(app.orchestrator.selected_session(&input.name, &input.targets, input.sandbox).await?))
+}
 #[derive(Deserialize)] struct HostSession {name:String,thread_id:Option<String>,sandbox:Option<store::Sandbox>,cwd:Option<String>}
 async fn host_session(State(app):State<App>,Json(input):Json<HostSession>)->Api<store::Session> {
     Ok(Json(app.orchestrator.host_session(&input.name,input.thread_id.as_deref().filter(|s|!s.is_empty()),input.sandbox,input.cwd.as_deref().map(str::trim).filter(|s|!s.is_empty())).await?))
@@ -338,6 +418,9 @@ async fn environment_session(State(app):State<App>,Path(id):Path<String>,Json(in
 #[derive(Deserialize)]
 struct Prompt {
     text: String,
+}
+async fn queue_prompt(State(app): State<App>, Path(id): Path<String>, Json(input): Json<Prompt>) -> Api<Value> {
+    Ok(Json(app.manager.queue_prompt(&id, &input.text).await?))
 }
 async fn prompt(
     State(app): State<App>,

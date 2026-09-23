@@ -19,5 +19,5 @@ tokio = { version = "1.53.1", features = ["sync"] }
 uuid = { version = "1.26.1", features = ["v4", "js"] }
 wasm-bindgen = "0.2.128"
 wasm-bindgen-futures = "0.4.78"
-web-sys = { version = "0.3.105", features = ["Window", "Document", "Location", "Storage", "HtmlInputElement", "HtmlTextAreaElement", "HtmlSelectElement", "HtmlElement", "Element", "Event", "EventTarget", "CustomEvent", "Url", "History", "PopStateEvent", "File", "FileList", "Blob", "ClipboardEvent", "DataTransfer"] }
+web-sys = { version = "0.3.105", features = ["Window", "Document", "Location", "Storage", "HtmlInputElement", "HtmlTextAreaElement", "HtmlSelectElement", "HtmlElement", "HtmlDialogElement", "NodeList", "Element", "Event", "EventTarget", "CustomEvent", "Url", "History", "PopStateEvent", "File", "FileList", "Blob", "ClipboardEvent", "DataTransfer", "KeyboardEvent"] }
 yew = { version = "0.23.0", features = ["csr"] }

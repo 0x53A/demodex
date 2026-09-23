@@ -211,15 +211,17 @@ impl Client {
     }
 
     pub async fn snapshot(&self, selected: String, after: i64) -> Result<Snapshot> {
-        let (sessions, runtime, environments) = futures_util::try_join!(
+        let (sessions, runtime, environments, targets) = futures_util::try_join!(
             self.read(Operation::Sessions),
             self.read(Operation::Runtime),
-            self.read(Operation::Environments)
+            self.read(Operation::Environments),
+            self.read(Operation::Targets)
         )?;
         let mut snapshot = Snapshot {
             sessions,
             runtime,
             environments,
+            targets,
             selected: selected.clone(),
             detail: Value::Null,
             events: vec![],
@@ -261,6 +263,7 @@ pub struct Snapshot {
     pub sessions: Value,
     pub runtime: Value,
     pub environments: Value,
+    pub targets: Value,
     pub selected: String,
     pub detail: Value,
     pub events: Vec<Value>,

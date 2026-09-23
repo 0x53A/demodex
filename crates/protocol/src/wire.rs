@@ -34,6 +34,11 @@ pub enum Notice {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, WormholeTransmaterializable)]
 pub enum Operation {
     Sessions,
+    StopBackground {
+        id: String,
+        generation: String,
+        processes: Vec<(String, String)>,
+    },
     Detail {
         id: String,
     },
@@ -48,6 +53,7 @@ pub enum Operation {
         cursor: Option<String>,
         search: String,
     },
+    CreateSession { input: String },
     HostSession {
         input: String,
     },
@@ -57,13 +63,39 @@ pub enum Operation {
     Connect {
         id: String,
     },
+    Archive {
+        id: String,
+        archived: bool,
+    },
     Sandbox {
+        id: String,
+        input: String,
+    },
+    Models {
+        id: String,
+    },
+    Model {
+        id: String,
+        input: String,
+    },
+    Goal {
         id: String,
         input: String,
     },
     Prompt {
         id: String,
         text: String,
+    },
+    QueuePrompt {
+        id: String,
+        text: String,
+    },
+    CancelQueued {
+        id: String,
+        queued_id: String,
+    },
+    ResumeQueue {
+        id: String,
     },
     UploadImage {
         id: String,
@@ -78,6 +110,13 @@ pub enum Operation {
         result: String,
     },
     Environments,
+    Targets,
+    RegisterTarget { input: String },
+    RegisterSshTarget { input: String },
+    CheckSshTarget { id: String },
+    ReconnectSshTarget { id: String },
+    ForgetTarget { id: String },
+    SelectTargets { id: String, input: String },
     CreateEnvironment {
         input: String,
     },

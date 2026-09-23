@@ -15,12 +15,36 @@ use tokio_tungstenite::tungstenite::Message;
 
 type Reply = oneshot::Sender<Result<Value>>;
 type Waiters = Arc<Mutex<HashMap<u64, Reply>>>;
+// Reads can be cancelled by an outer snapshot timeout. Remove their waiter
+// even when the call future never reaches its normal return path.
+struct PendingCall<'a> {
+    waiters: &'a Waiters,
+    id: u64,
+}
+impl Drop for PendingCall<'_> {
+    fn drop(&mut self) {
+        self.waiters.lock().unwrap().remove(&self.id);
+    }
+}
 type WsError = tokio_tungstenite::tungstenite::Error;
 type WsSink = Pin<Box<dyn Sink<Message,Error=WsError>+Send>>;
 type WsStream = Pin<Box<dyn Stream<Item=std::result::Result<Message,WsError>>+Send>>;
 struct Outgoing {
     message: Value,
     sent: oneshot::Sender<Result<()>>,
+}
+
+/// An explicit JSON-RPC error reply, distinct from unknown-delivery transport errors.
+#[derive(Debug)]
+pub struct RemoteError(pub Value);
+impl std::fmt::Display for RemoteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "Codex: {}", self.0) }
+}
+impl std::error::Error for RemoteError {}
+
+pub fn no_active_turn(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<RemoteError>().is_some_and(|reply|
+        reply.0["code"] == -32600 && reply.0["message"] == "no active turn to steer")
 }
 
 pub struct Rpc {
@@ -84,7 +108,7 @@ impl Rpc {
                                         if let Some(id) = message["id"].as_u64() {
                                             let waiter = waiters.lock().unwrap().remove(&id);
                                             if let Some(waiter) = waiter {
-                                                let reply = if let Some(error)=message.get("error") { Err(anyhow!("Codex: {error}")) }
+                                                let reply = if let Some(error)=message.get("error") { Err(anyhow::Error::new(RemoteError(error.clone()))) }
                                                     else { Ok(message["result"].clone()) };
                                                 let _ = waiter.send(reply);
                                             }
@@ -139,20 +163,61 @@ impl Rpc {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, sender);
-        let outcome=async {
-            self.send(json!({"id":id,"method":method,"params":params})).await?;
-            tokio::time::timeout(Duration::from_secs(45),receiver).await
-                .context("Codex response timed out; operation may have executed, inspect state before retrying")?
-                .context("connection lost before response")?
-        }.await;
-        self.pending.lock().unwrap().remove(&id);
-        outcome
+        let _pending = PendingCall { waiters: &self.pending, id };
+        self.send(json!({"id":id,"method":method,"params":params})).await?;
+        tokio::time::timeout(Duration::from_secs(45),receiver).await
+            .context("Codex response timed out; operation may have executed, inspect state before retrying")?
+            .context("connection lost before response")?
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fallback_requires_the_explicit_no_active_turn_error() {
+        let reply=|code,message|anyhow::Error::new(RemoteError(json!({"code":code,"message":message})));
+        assert!(no_active_turn(&reply(-32600,"no active turn to steer")));
+        assert!(!no_active_turn(&reply(-32600,"cannot steer a review turn")));
+        assert!(!no_active_turn(&reply(-32603,"no active turn to steer")));
+        assert!(!no_active_turn(&anyhow!("no active turn to steer")));
+        assert!(!no_active_turn(&anyhow!("connection lost before response")));
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_call_releases_its_waiter_and_keeps_the_connection() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("ws://{}", listener.local_addr()?);
+        let (seen, received) = oneshot::channel();
+        let fake = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut seen = Some(seen);
+            while let Some(Ok(Message::Text(raw))) = ws.next().await {
+                let request: Value = serde_json::from_str(&raw).unwrap();
+                if request["method"] == "initialized" { continue; }
+                if request["method"] == "hang" {
+                    seen.take().unwrap().send(()).unwrap();
+                    continue;
+                }
+                ws.send(Message::Text(json!({"id":request["id"],"result":{}}).to_string().into())).await.unwrap();
+            }
+        });
+        let (rpc, _events) = Rpc::connect(&url).await?;
+        let mut call = Box::pin(rpc.call("hang", json!({})));
+        tokio::select! {
+            result = &mut call => panic!("call completed unexpectedly: {result:?}"),
+            result = received => result?,
+        }
+        assert_eq!(rpc.pending.lock().unwrap().len(), 1);
+        drop(call);
+        assert!(rpc.pending.lock().unwrap().is_empty());
+        assert_eq!(rpc.call("still-connected", json!({})).await?, json!({}));
+        rpc.close();
+        fake.await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn routes_interleaved_server_requests_and_out_of_order_responses() -> Result<()> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;

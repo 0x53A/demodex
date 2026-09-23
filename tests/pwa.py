@@ -51,11 +51,20 @@ with tempfile.TemporaryDirectory(prefix='demodex-pwa-') as directory:
             browser = p.chromium.launch(executable_path='/run/current-system/sw/bin/google-chrome', headless=True, args=['--no-sandbox'])
             context = browser.new_context(viewport={'width': 390, 'height': 844})
             page = context.new_page()
+            # Restore a previously opened form. A fresh unauthenticated window
+            # correctly starts at the connection picker; this static-only fixture
+            # has no daemon with which to complete login and navigate there.
+            page.add_init_script('''if (!sessionStorage.getItem('pwa-fixture-seeded')) {
+                sessionStorage.setItem('pwa-fixture-seeded', '1');
+                sessionStorage.setItem('demodex-rust-view', JSON.stringify({host:location.origin,page:'environments'}));
+                history.replaceState(JSON.stringify({host:location.origin,selected:'',page:'environments',connections:false}), '');
+            }''')
             errors = []
             page.on('pageerror', lambda error: errors.append(str(error)))
             page.goto(origin)
-            page.get_by_role('button', name='+ External').click()
-            page.get_by_label('Name', exact=True).fill('Unsubmitted session')
+            page.get_by_role('heading', name='Server settings', exact=True).wait_for()
+            page.get_by_text('Add SSH target', exact=True).click()
+            page.get_by_label('SSH target name', exact=True).fill('Unsubmitted session')
             page.evaluate('navigator.serviceWorker.ready')
             page.wait_for_function('navigator.serviceWorker.controller !== null')
             page.evaluate("window.marker=1; caches.open('unrelated-app')")
@@ -68,13 +77,14 @@ with tempfile.TemporaryDirectory(prefix='demodex-pwa-') as directory:
             page.get_by_role('button', name='Update now', exact=True).wait_for(timeout=20_000)
             assert page.locator('body').get_attribute('data-version') == 'one'
             assert page.evaluate('window.marker') == 1
-            assert page.get_by_label('Name', exact=True).input_value() == 'Unsubmitted session'
+            assert page.get_by_label('SSH target name', exact=True).input_value() == 'Unsubmitted session'
             assert page.evaluate('document.documentElement.scrollHeight <= innerHeight')
             with page.expect_navigation():
                 page.get_by_role('button', name='Update now', exact=True).click()
-            page.get_by_role('heading', name='Connect an agent', exact=True).wait_for()
+            page.get_by_role('heading', name='Server settings', exact=True).wait_for()
+            page.get_by_text('Add SSH target', exact=True).click()
             assert page.locator('body').get_attribute('data-version') == 'two'
-            assert page.get_by_label('Name', exact=True).input_value() == 'Unsubmitted session'
+            assert page.get_by_label('SSH target name', exact=True).input_value() == 'Unsubmitted session'
             assert other.evaluate('window.marker') == 2, 'another tab was forcibly reloaded'
             other.get_by_role('button', name='Update now', exact=True).wait_for()
             release(root, 'three')
@@ -114,7 +124,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-pwa-') as directory:
             assert launched.locator('body').get_attribute('data-version') == 'three'
             assert launched.get_by_role('heading', name='PWA fixture', exact=True).count() == 0
             context.set_offline(False)
-            assert page.get_by_label('Name', exact=True).input_value() == 'Unsubmitted session'
+            assert page.get_by_label('SSH target name', exact=True).input_value() == 'Unsubmitted session'
             assert errors == [], errors
             browser.close()
             print('PASS: update notice, explicit reload, launch update, other tabs preserved, form recovery, partial release rejected, offline shell, static-only cache')

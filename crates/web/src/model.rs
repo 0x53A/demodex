@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -28,9 +30,31 @@ pub struct Saved {
     pub answers: BTreeMap<String, String>,
     pub fields: BTreeMap<String, String>,
     pub receipts: BTreeMap<String, String>,
+    pub host_fields: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Saved {
+    /// Keep the current host's legacy fields in place and stash other hosts'
+    /// drafts separately. Old saved views deserialize without losing their fields.
+    pub fn switch_host(&mut self, host: String) {
+        if self.host == host { return; }
+        self.host_fields.insert(self.host.clone(), std::mem::take(&mut self.fields));
+        self.fields = self.host_fields.remove(&host).unwrap_or_default();
+        self.host = host;
+        self.separate_creation_fields();
+    }
+
+    pub fn separate_creation_fields(&mut self) {
+        // The old create/resume widget shared these fields. Copy them once so
+        // either interpretation of an existing draft remains recoverable.
+        if !self.fields.contains_key("new_session_name") {
+            self.fields.insert("new_session_name".into(), self.field("session_name"));
+        }
+        if !self.fields.contains_key("new_sandbox") {
+            self.fields.insert("new_sandbox".into(), self.field("sandbox"));
+        }
+    }
+
     pub fn legacy(value: Value, host: String) -> Self {
         let mut saved = Self {
             host,
@@ -135,53 +159,9 @@ pub fn sandbox_name(value: &str) -> &str {
         "workspaceWrite" => "Workspace-write",
         "dangerFullAccess" => "Danger-full-access",
         "externalSandbox" => "External sandbox",
-        "" => "Not connected",
+        "" => "Unconfirmed",
         v => v,
     }
-}
-
-/// Deterministic transcript projection: replay and duplicate delivery are harmless.
-pub fn transcript(events: &[Value]) -> Vec<Value> {
-    let mut items = Vec::<Value>::new();
-    let mut positions = BTreeMap::<String, usize>::new();
-    fn put(items: &mut Vec<Value>, positions: &mut BTreeMap<String, usize>, item: Value) {
-        let id = text(&item, "id").to_owned();
-        if id.is_empty() {
-            return;
-        }
-        if let Some(index) = positions.get(&id) {
-            items[*index] = item;
-        } else {
-            positions.insert(id, items.len());
-            items.push(item);
-        }
-    }
-    for event in events {
-        let message = &event["message"];
-        let params = &message["params"];
-        match text(message, "method") {
-            "demodex/threadSnapshot" => {
-                for turn in array(&params["thread"]["turns"]) {
-                    for item in array(&turn["items"]) {
-                        put(&mut items, &mut positions, item);
-                    }
-                }
-            }
-            "item/started" | "item/completed" => {
-                put(&mut items, &mut positions, params["item"].clone())
-            }
-            "item/agentMessage/delta" | "item/commandExecution/outputDelta" => {
-                let id = text(params, "itemId");
-                let output = text(message, "method") == "item/commandExecution/outputDelta";
-                let mut item = positions.get(id).map(|index|items[*index].clone()).unwrap_or_else(||json!({"id":id,"type":if output {"commandExecution"} else {"agentMessage"}}));
-                let field = if output { "aggregatedOutput" } else { "text" };
-                item[field] = json!(format!("{}{}", text(&item, field), text(params, "delta")));
-                put(&mut items, &mut positions, item);
-            }
-            _ => {}
-        }
-    }
-    items
 }
 
 #[cfg(test)]
@@ -198,12 +178,35 @@ mod tests {
         assert_eq!(saved.field("cwd"), "/work");
     }
     #[test]
+    fn server_switch_preserves_distinct_setup_and_control_drafts() {
+        let mut saved: Saved = serde_json::from_value(json!({
+            "host":"https://one",
+            "fields":{"session_name":"Existing draft","sandbox":"read-only","control:s:objective":"First goal"}
+        })).unwrap();
+        saved.separate_creation_fields();
+        saved.fields.insert("new_session_name".into(), "New draft".into());
+        saved.switch_host("https://two".into());
+        assert_eq!(saved.field("control:s:objective"), "");
+        saved.fields.insert("control:s:objective".into(), "Second goal".into());
+        // Exercise persistence while the other host's fields are stashed.
+        let mut saved: Saved = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        saved.switch_host("https://one".into());
+        assert_eq!(saved.field("new_session_name"), "New draft");
+        assert_eq!(saved.field("session_name"), "Existing draft");
+        assert_eq!(saved.field("new_sandbox"), "read-only");
+        assert_eq!(saved.field("control:s:objective"), "First goal");
+        saved.switch_host("https://two".into());
+        assert_eq!(saved.field("control:s:objective"), "Second goal");
+    }
+    #[test]
     fn completed_items_replace_streamed_text() {
         let events = vec![
             json!({"message":{"method":"item/agentMessage/delta","params":{"itemId":"one","delta":"hel"}}}),
             json!({"message":{"method":"item/completed","params":{"item":{"id":"one","type":"agentMessage","text":"hello"}}}}),
         ];
-        let items = transcript(&events);
+        let mut projection = crate::transcript::Transcript::default();
+        projection.append(&events);
+        let items = &projection.chunks[0];
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["text"], "hello");
     }
