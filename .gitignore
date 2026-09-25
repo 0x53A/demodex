@@ -13,6 +13,7 @@
 /.cargo-build
 /result
 /.releases
+/_Tasks/
 __pycache__/
 *.pyc
 *.qcow2
