@@ -127,6 +127,8 @@ impl Response {
         Ok(match operation {
             Operation::Sessions => Self::Sessions(serde_json::from_value(value)?),
             Operation::CreateSession { .. }
+            | Operation::CreateSessionWithPrompt { .. }
+            | Operation::HostSessionWithPrompt { .. }
             | Operation::ExternalSession { .. }
             | Operation::HostSession { .. }
             | Operation::EnvironmentSession { .. } => Self::Session(serde_json::from_value(value)?),
@@ -186,6 +188,9 @@ pub enum Operation {
         after: i64,
     },
     Runtime,
+    DefaultPrompt,
+    CreateSessionWithPrompt { input: SelectedSession, prompt: String },
+    HostSessionWithPrompt { input: HostSession, prompt: String },
     StartRuntime,
     Login,
     SavedThreads {

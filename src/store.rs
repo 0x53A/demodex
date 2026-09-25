@@ -18,6 +18,15 @@ pub use demodex_protocol::Pending;
 pub struct Store(Mutex<Connection>);
 
 impl Store {
+    pub fn save_prompt(&self, id: &str, text: &str) -> Result<()> {
+        self.0.lock().unwrap().execute("INSERT INTO session_prompt VALUES(?1,?2)", params![id, text])?;
+        Ok(())
+    }
+
+    pub fn prompt(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.0.lock().unwrap().query_row("SELECT text FROM session_prompt WHERE session_id=?1", [id], |row| row.get(0)).optional()?)
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         let connection = Connection::open(path)?;
         connection.execute_batch(
@@ -58,6 +67,8 @@ impl Store {
                session_id TEXT PRIMARY KEY REFERENCES sessions(id));
              CREATE TABLE IF NOT EXISTS session_model (
                session_id TEXT PRIMARY KEY REFERENCES sessions(id), selection TEXT, effective TEXT);
+             CREATE TABLE IF NOT EXISTS session_prompt (
+               session_id TEXT PRIMARY KEY REFERENCES sessions(id), text TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS context_tool_receipts (
                id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
                thread_id TEXT NOT NULL, call_id TEXT NOT NULL, request TEXT NOT NULL,

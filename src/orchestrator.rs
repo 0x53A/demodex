@@ -25,6 +25,11 @@ struct Runtime {
     rpc: Arc<Rpc>,
     endpoint: String,
 }
+
+fn validate_prompt(prompt: Option<&str>) -> Result<()> {
+    ensure!(prompt.is_none_or(|text| text.len() <= 262144 && !text.contains('\0')), "Prompt must be at most 262144 UTF-8 bytes without NUL characters");
+    Ok(())
+}
 struct Machine {
     child: Child,
     tunnel: Option<Child>,
@@ -526,6 +531,36 @@ impl Orchestrator {
             .await
     }
 
+    /// Resolve the editable instruction layers from this runtime's profile/catalogue.
+    /// This does not start a thread or submit a model turn.
+    pub async fn default_prompt(&self) -> Result<Value> {
+        ensure!(self.is_host_mode(), "Prompt discovery requires a local host runtime");
+        let (rpc, _) = self.runtime_rpc().await?;
+        let response = rpc.call("config/read", json!({"cwd":self.host_workspace,"includeLayers":false})).await?;
+        let config = &response["config"];
+        let models = rpc.call("model/list", json!({"includeHidden":false})).await?;
+        let model = config["model"].as_str().or_else(|| models["data"].as_array()?.iter().find(|m|m["isDefault"] == true)?["model"].as_str()).context("Codex did not identify its default model")?;
+        let base = if let Some(path) = config["model_instructions_file"].as_str() {
+            ensure!(Path::new(path).is_absolute(), "Model instructions path must be resolved by Codex");
+            tokio::fs::read_to_string(path).await?
+        } else if let Some(text) = config["instructions"].as_str() {
+            text.to_owned()
+        } else {
+            let profile = self.codex_home.clone().unwrap_or_else(||self.root.join("runtime/home"));
+            let cache = profile.join("models_cache.json");
+            let catalog: Value = if cache.is_file() {
+                serde_json::from_slice(&tokio::fs::read(cache).await?)?
+            } else {
+                let output = tokio::time::timeout(Duration::from_secs(30), Command::new(find_binary("codex")?).args(["debug", "models", "--bundled"]).env("CODEX_HOME", &profile).kill_on_drop(true).output()).await??;
+                ensure!(output.status.success(), "Codex model catalogue unavailable");
+                serde_json::from_slice(&output.stdout)?
+            };
+            let entry = catalog["models"].as_array().context("Invalid model catalogue")?.iter().find(|entry|entry["slug"] == model).context("Default model missing from Codex catalogue")?;
+            entry["model_messages"]["instructions_template"].as_str().or_else(||entry["base_instructions"].as_str()).context("Model does not expose base instructions")?.to_owned()
+        };
+        Ok(json!({"model":model,"text":format!("{base}\n\n{}\n\n{}\n\n{}", config["developer_instructions"].as_str().unwrap_or(""), crate::session_context::INSTRUCTIONS, crate::ssh::AGENT_INSTRUCTIONS)}))
+    }
+
     pub async fn saved_threads(&self, cursor: Option<String>, search: String) -> Result<Value> {
         ensure!(
             self.is_host_mode(),
@@ -941,7 +976,9 @@ impl Orchestrator {
         name: &str,
         selection: &[crate::targets::Selection],
         sandbox: Option<crate::store::Sandbox>,
+        prompt: Option<&str>,
     ) -> Result<Session> {
+        validate_prompt(prompt)?;
         ensure!(
             !name.trim().is_empty() && name.len() <= 120,
             "session name must be 1–120 characters"
@@ -973,6 +1010,9 @@ impl Orchestrator {
                 sandbox,
             )?
         };
+        if let Some(prompt) = prompt {
+            self.manager.store.save_prompt(&session.id, prompt)?;
+        }
         // Preserve the created session on an uncertain thread/start outcome; never retry it here.
         if let Err(error) = self.connect_session(&session.id).await {
             self.manager
@@ -989,7 +1029,10 @@ impl Orchestrator {
         thread_id: Option<&str>,
         sandbox: Option<crate::store::Sandbox>,
         cwd: Option<&str>,
+        prompt: Option<&str>,
     ) -> Result<Session> {
+        validate_prompt(prompt)?;
+        ensure!(prompt.is_none() || thread_id.is_none(), "Prompt overrides require a new thread");
         ensure!(self.is_host_mode(), "host execution is not configured");
         ensure!(
             !name.trim().is_empty() && name.len() <= 120,
@@ -1071,6 +1114,9 @@ impl Orchestrator {
             Some(&attachment),
         )?;
         self.manager.store.sandbox(&session.id, sandbox)?;
+        if let Some(prompt) = prompt {
+            self.manager.store.save_prompt(&session.id, prompt)?;
+        }
         if let Err(error) = self.connect_session(&session.id).await {
             self.manager
                 .store

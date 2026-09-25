@@ -48,6 +48,16 @@ Exact transport dependency versions constrain consumers with separate lockfiles.
 
 ## Library and native clients
 
+Protocol v17 adds DefaultPrompt (read-only) and new-session prompt overrides through
+CreateSessionWithPrompt / HostSessionWithPrompt. DefaultPrompt resolves the runtime
+profile's base instructions (configured file/text or model catalogue) plus operator
+developer and Demodex integration instructions. It requires a local host runtime.
+Overrides persist in session_prompt and are sent as baseInstructions on start/resume,
+with empty developerInstructions and project_doc_max_bytes=0. Runtime-generated
+context and tools remain enabled. Overrides cannot be applied to imported threads.
+Receipt response encoding remains v16; its existing response types are unchanged.
+tests/prompt.py checks the real Codex catalogue and thread creation without inference.
+
 `demodex::Runtime::start(Config).await` opens storage, starts the configured
 executor and owns periodic monitoring. Obtain cloneable handles with
 `runtime.service()`. `Service::call(request_id, Operation)` is a trusted in-process
@@ -255,6 +265,12 @@ Removing a draft path does not delete the upload; retention cleanup is not imple
 
 ## Build and checks
 
+`nix/package.nix` builds/tests the native daemon from source with a caller-supplied
+nightly `rustPlatform`. Frosticus on frost-8000 uses this package from the local
+/home/frost/src/demodex checkout (including uncommitted changes). The source-built
+package is intended for its native-host deployment; automatic VM provisioning still
+expects a runtime checkout containing nix/ and is not enabled by this package.
+
 Use `shell.nix` and UV. Rust/Wormhole requires rustup nightly and the
 wasm32-unknown-unknown target. The shell supplies Trunk, the WASM linker and a
 NixOS loader wrapper. Follow the repository workflow's toolchain pins when
@@ -336,6 +352,9 @@ mapping. Host cache access must be read-only. VM reset and workspace deletion
 must remain distinct and must never silently discard data.
 
 ## Serving and deployment
+
+Current three-host deployment inventory, release fingerprints and verification
+commands are in `~/_Tasks/demodex/0023-wormhole-v16/AGENTS.md` on nixos (2026-09-23).
 
 `--api-only` separates the daemon from static serving. The static process opens
 no session database and starts no Codex processes:

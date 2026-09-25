@@ -146,7 +146,13 @@ impl Manager {
                     params["config"] = json!({"model_reasoning_effort":effort});
                 }
             }
-            if session.thread_id.is_none() || session.presentation.context_reporting {
+            if let Some(prompt) = self.store.prompt(id)? {
+                params["baseInstructions"] = json!(prompt);
+                params["developerInstructions"] = json!("");
+                // The caller supplied the complete editable instruction text.
+                // Retain runtime context/tools, but do not load AGENTS.md again.
+                params["config"]["project_doc_max_bytes"] = json!(0);
+            } else if session.thread_id.is_none() || session.presentation.context_reporting {
                 // Read effective instructions instead of replacing the operator's
                 // configuration with our integration snippet. Never write the profile.
                 let config = rpc.call("config/read", json!({"cwd":cwd,"includeLayers":false})).await?;
@@ -983,5 +989,44 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn prompt_override_replaces_defaults_on_start_and_after_restart() -> Result<()> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("ws://{}", listener.local_addr()?);
+        let fake = tokio::spawn(async move {
+            for expected in ["thread/start", "thread/resume"] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                while let Some(Ok(Message::Text(text))) = ws.next().await {
+                    let request: Value = serde_json::from_str(&text).unwrap();
+                    let method = request["method"].as_str().unwrap();
+                    if method == "initialized" { continue; }
+                    let result = if method == "initialize" { json!({}) } else {
+                        assert_eq!(method, expected);
+                        assert_eq!(request["params"]["baseInstructions"], "Custom Codex base");
+                        assert_eq!(request["params"]["developerInstructions"], "");
+                        assert_eq!(request["params"]["config"]["project_doc_max_bytes"], 0);
+                        json!({"thread":{"id":"thread","turns":[]},"sandbox":{"type":"readOnly","networkAccess":false}})
+                    };
+                    ws.send(Message::Text(json!({"id":request["id"],"result":result}).to_string().into())).await.unwrap();
+                }
+            }
+        });
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("db");
+        let manager = Manager::new(Store::open(&path)?);
+        let session = manager.store.create("custom", &url, &[], None)?;
+        manager.store.save_prompt(&session.id, "Custom Codex base")?;
+        manager.connect(&session.id).await?;
+        manager.disconnect(&session.id, "restart").await?;
+        let resumed = Manager::new(Store::open(&path)?);
+        resumed.connect(&session.id).await?;
+        resumed.disconnect(&session.id, "done").await?;
+        fake.await?;
+        Ok(())
     }
 }

@@ -27,6 +27,14 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         Detail { id } => return Ok(Response::Detail(detail(app, id).await?)),
         Events { id, after } => return Ok(Response::Events(app.manager.store.events(&id, after)?)),
         Runtime => runtime_status(app).await?,
+        DefaultPrompt => app.orchestrator.default_prompt().await?,
+        CreateSessionWithPrompt { input, prompt } => {
+            return Ok(Response::Session(app.orchestrator.selected_session(&input.name, &input.targets, input.sandbox, Some(&prompt)).await?));
+        }
+        HostSessionWithPrompt { input, prompt } => {
+            ensure!(input.thread_id.is_none(), "Prompt overrides require a new thread");
+            return Ok(Response::Session(app.orchestrator.host_session(&input.name, None, input.sandbox, input.cwd.as_deref(), Some(&prompt)).await?));
+        }
         StartRuntime => runtime_start(app).await?,
         Login => runtime_login(app).await?,
         SavedThreads { cursor, search } => app.orchestrator.saved_threads(cursor, search).await?,
@@ -368,7 +376,7 @@ async fn runtime_login(app: &App) -> Result<Value> {
 
 async fn selected_session(app: &App, input: SelectedSession) -> Result<store::Session> {
     app.orchestrator
-        .selected_session(&input.name, &input.targets, input.sandbox)
+        .selected_session(&input.name, &input.targets, input.sandbox, None)
         .await
 }
 
@@ -383,6 +391,7 @@ async fn host_session(app: &App, input: HostSession) -> Result<store::Session> {
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty()),
+            None,
         )
         .await
 }
