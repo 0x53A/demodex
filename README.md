@@ -22,6 +22,14 @@ If you use nix, this repo contains the files I use to host it on my system.
 
 The web UI is a PWA and can be pinned to the home screen on mobile devices. It detects new static frontend releases and prompts for update and reload.
 
+Server settings includes Codex feature flags discovered from the managed app-server.
+Choose Profile, Enabled or Disabled for each flag. Overrides are saved by Demodex
+without editing your Codex profile. Restart Codex from that screen to apply them;
+first stop active work, pause goals, clear queues and stop background terminals.
+Restart disconnects sessions; reconnect them explicitly afterward. These settings
+do not configure external app-servers. The feature catalogue requires an app-server
+that supports `experimentalFeature/list`.
+
 ### Recommended setup
 
 Install and configure both codex and tailscale. Ask your agent to scan the repository for malicious code (important!) and to set it up on your system. :)

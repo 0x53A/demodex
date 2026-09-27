@@ -36,6 +36,8 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
             return Ok(Response::Session(app.orchestrator.host_session(&input.name, None, input.sandbox, input.cwd.as_deref(), Some(&prompt)).await?));
         }
         StartRuntime => runtime_start(app).await?,
+        SetRuntimeFeature { name, enabled } => app.orchestrator.set_runtime_feature(&name, enabled).await?,
+        RestartRuntime => app.orchestrator.restart_runtime().await?,
         Login => runtime_login(app).await?,
         SavedThreads { cursor, search } => app.orchestrator.saved_threads(cursor, search).await?,
         CreateSession { input } => {

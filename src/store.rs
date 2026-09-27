@@ -18,6 +18,23 @@ pub use demodex_protocol::Pending;
 pub struct Store(Mutex<Connection>);
 
 impl Store {
+    pub fn runtime_features(&self) -> Result<std::collections::BTreeMap<String, bool>> {
+        let connection = self.0.lock().unwrap();
+        let mut statement = connection.prepare("SELECT name, enabled FROM runtime_features ORDER BY name")?;
+        Ok(statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_runtime_feature(&self, name: &str, enabled: Option<bool>) -> Result<()> {
+        let connection = self.0.lock().unwrap();
+        if let Some(enabled) = enabled {
+            connection.execute("INSERT INTO runtime_features VALUES(?1, ?2) ON CONFLICT(name) DO UPDATE SET enabled=excluded.enabled", params![name, enabled])?;
+        } else {
+            connection.execute("DELETE FROM runtime_features WHERE name=?1", [name])?;
+        }
+        Ok(())
+    }
+
     pub fn save_prompt(&self, id: &str, text: &str) -> Result<()> {
         self.0.lock().unwrap().execute("INSERT INTO session_prompt VALUES(?1,?2)", params![id, text])?;
         Ok(())
@@ -36,6 +53,7 @@ impl Store {
                thread_id TEXT, targets TEXT NOT NULL, status TEXT NOT NULL,
                error TEXT, created INTEGER NOT NULL DEFAULT (unixepoch()));
              CREATE TABLE IF NOT EXISTS ssh_targets (id TEXT PRIMARY KEY, config TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS runtime_features (name TEXT PRIMARY KEY, enabled INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS session_ssh_targets (target_id TEXT PRIMARY KEY REFERENCES ssh_targets(id) ON DELETE CASCADE, session_id TEXT NOT NULL REFERENCES sessions(id));
              CREATE TABLE IF NOT EXISTS containers (id TEXT PRIMARY KEY, name TEXT NOT NULL, image TEXT NOT NULL, memory_mib INTEGER NOT NULL, cpus INTEGER NOT NULL, status TEXT NOT NULL, error TEXT, engine TEXT NOT NULL DEFAULT 'docker');
              CREATE TABLE IF NOT EXISTS execution_targets (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, cwd TEXT NOT NULL);

@@ -1631,6 +1631,7 @@ impl App {
                 {if !self.login.is_null(){html!{<><a href={text(&self.login,"verificationUrl").to_owned()} target="_blank" rel="noopener noreferrer">{"Continue sign-in in your browser"}</a><p>{"Device code: "}<strong>{text(&self.login,"userCode")}</strong></p></>}}else{Html::default()}}
                 {if let Some(error)=self.runtime["error"].as_str(){html!{<p class="muted">{error}</p>}}else{Html::default()}}
             </section>
+            <crate::runtime_features::RuntimeFeatures runtime={self.runtime.clone()} disabled={self.busy||!self.connected} onrun={ctx.link().callback(Msg::Run)}/>
             {self.target_registry(ctx)}
             <section class="container-management"><h2>{"Containers"}</h2>
                 <p class="muted">{"Each container has a private persistent workspace. Bridge networking permits outbound access. The image must already be present for that engine. Container tools require danger-full-access."}</p>

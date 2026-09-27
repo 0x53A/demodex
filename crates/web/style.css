@@ -171,6 +171,11 @@ input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px soli
  .transcript-toolbar .background-toggle{min-width:0}
  .transcript-position{grid-column:1 / -1;grid-row:2;display:block}
 }
+/* Server-wide feature overrides remain readable on narrow screens. */
+.feature-flag { padding: .6rem 0; border-bottom: 1px solid #444; }
+.feature-flag label { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; }
+.feature-flag code { overflow-wrap: anywhere; }
+.feature-flag p { margin: .3rem 0; }
 
 /* Keep history actions separate from session navigation and touch accessible. */
 .tree-agent{position:relative}.tree-agent .session{padding-right:58px}.session-archive-action{position:absolute;right:5px;top:5px;min-width:44px;padding:8px;font:13px monospace}.archived-sessions .tree-agent .session{padding-right:88px}

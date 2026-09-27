@@ -5,6 +5,7 @@ mod conversation;
 mod modal;
 mod model;
 mod overview;
+mod runtime_features;
 mod transcript;
 mod usage;
 

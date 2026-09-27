@@ -192,6 +192,8 @@ pub enum Operation {
     CreateSessionWithPrompt { input: SelectedSession, prompt: String },
     HostSessionWithPrompt { input: HostSession, prompt: String },
     StartRuntime,
+    SetRuntimeFeature { name: String, enabled: Option<bool> },
+    RestartRuntime,
     Login,
     SavedThreads {
         cursor: Option<String>,

@@ -48,6 +48,18 @@ Exact transport dependency versions constrain consumers with separate lockfiles.
 
 ## Library and native clients
 
+Protocol v21 adds server-wide Codex feature overrides and explicit runtime restart
+(`SetRuntimeFeature`, `RestartRuntime`). Overrides live in Demodex SQLite, not the
+Codex profile, and become `--enable`/`--disable` app-server launch arguments.
+`Runtime.features` exposes saved/applied overrides and the startup catalogue from
+the paginated `experimentalFeature/list` API. Discovery failures remain visible.
+Restart requires idle managed threads, no active goals, queued messages, unresolved
+decisions or background terminals; unknown loaded threads block it. It disconnects
+sessions and replaces the host executor. Reconnect explicitly; never replay work.
+Run `uv run tests/runtime_features.py` for disposable real-Codex checks without
+inference. Existing receipt response encoding stays v16. Deploy matching protocol
+v21 clients and daemon together.
+
 Protocol v17 added DefaultPrompt (read-only) and new-session prompt overrides through
 CreateSessionWithPrompt / HostSessionWithPrompt. DefaultPrompt resolves the runtime
 profile's base instructions (configured file/text or model catalogue) plus operator

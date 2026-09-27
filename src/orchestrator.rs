@@ -6,7 +6,7 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -24,6 +24,8 @@ struct Runtime {
     host_target: Option<Target>,
     rpc: Arc<Rpc>,
     endpoint: String,
+    feature_overrides: BTreeMap<String, bool>,
+    feature_catalog: Value,
 }
 
 fn validate_prompt(prompt: Option<&str>) -> Result<()> {
@@ -703,6 +705,7 @@ impl Orchestrator {
             active.rpc.close();
         }
         *runtime = None;
+        let feature_overrides = self.manager.store.runtime_features()?;
         for id in self.runtime_sessions()? {
             self.manager
                 .disconnect(&id, "host runtime is restarting; reconnect to resume")
@@ -804,6 +807,11 @@ impl Orchestrator {
                 .env_remove("CODEX_ACCESS_TOKEN")
                 .current_dir(workspace);
         }
+        for (name, enabled) in &feature_overrides {
+            command
+                .arg(if *enabled { "--enable" } else { "--disable" })
+                .arg(name);
+        }
         let mut child = spawn_logged(command, &directory.join("app-server.log"))?;
         let mut ready = false;
         for _ in 0..100 {
@@ -821,12 +829,20 @@ impl Orchestrator {
         let (rpc, mut events) = Rpc::connect(&endpoint).await?;
         // Authentication notifications are consumed here, never written to conversation logs.
         tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let feature_catalog = match runtime_feature_catalog(&rpc).await {
+            Ok(features) => json!({"data":features}),
+            Err(error) => {
+                json!({"data":[],"error":format!("Feature discovery unavailable: {error:#}")})
+            }
+        };
         *runtime = Some(Runtime {
             child,
             executor,
             host_target,
             rpc: Arc::new(rpc),
             endpoint,
+            feature_overrides,
+            feature_catalog,
         });
         Ok(json!({"running":true}))
     }
@@ -871,7 +887,128 @@ impl Orchestrator {
         } else {
             "dedicated"
         });
+        let saved = self.manager.store.runtime_features()?;
+        let runtime = self.runtime.lock().await;
+        status["features"] = match runtime.as_ref() {
+            Some(active) => json!({"saved":saved,"applied":active.feature_overrides,
+                "restart_required":saved != active.feature_overrides,"catalog":active.feature_catalog}),
+            None => json!({"saved":saved,"applied":null,"restart_required":false,
+                "catalog":{"data":[],"error":"Start the Codex runtime to discover available features."}}),
+        };
         Ok(status)
+    }
+
+    pub async fn set_runtime_feature(&self, name: &str, enabled: Option<bool>) -> Result<Value> {
+        if enabled.is_some() {
+            let runtime = self.runtime.lock().await;
+            let runtime = runtime
+                .as_ref()
+                .context("Start the runtime to discover available features")?;
+            let feature = runtime.feature_catalog["data"]
+                .as_array()
+                .and_then(|features| features.iter().find(|feature| feature["name"] == name))
+                .context("Unknown feature; restart the runtime to refresh feature discovery")?;
+            ensure!(
+                feature["stage"] != "removed",
+                "This feature has been removed from Codex"
+            );
+        }
+        self.manager.store.set_runtime_feature(name, enabled)?;
+        self.manager.changed();
+        Ok(json!({"saved":true}))
+    }
+
+    pub async fn restart_runtime(&self) -> Result<Value> {
+        let _lifecycle = self.jobs.lock().await;
+        let _settings = self.manager.connecting.lock().await;
+        let (rpc, endpoint) = self.runtime_rpc().await?;
+        let sessions: Vec<_> = self
+            .manager
+            .store
+            .list()?
+            .into_iter()
+            .filter(|session| session.endpoint == endpoint)
+            .collect();
+        // Refuse to terminate threads controlled outside this manager, including
+        // independently running subagents. Never use restart as an implicit stop.
+        let loaded = rpc.call("thread/loaded/list", json!({})).await?;
+        let threads = loaded["data"]
+            .as_array()
+            .context("Cannot verify loaded Codex threads")?;
+        ensure!(
+            loaded["nextCursor"].is_null(),
+            "Too many loaded threads to verify a safe restart"
+        );
+        for thread in threads {
+            ensure!(
+                sessions
+                    .iter()
+                    .any(|s| s.thread_id.as_deref() == thread.as_str()),
+                "Codex has a loaded thread outside the managed sessions; stop/unload it before restarting"
+            );
+        }
+        for session in &sessions {
+            if let Ok(live) = self.manager.runtime(&session.id).await {
+                Manager::require_idle(&live)
+                    .await
+                    .context("Stop all active sessions before restarting Codex")?;
+                ensure!(
+                    !self
+                        .manager
+                        .store
+                        .pending(&session.id)?
+                        .iter()
+                        .any(|p| matches!(
+                            p.state.as_str(),
+                            "pending" | "responding" | "delivered"
+                        )),
+                    "Resolve pending decisions before restarting Codex"
+                );
+                ensure!(
+                    self.manager
+                        .queued(&session.id)
+                        .await?
+                        .as_array()
+                        .is_some_and(|q| q.is_empty()),
+                    "Remove queued messages before restarting Codex"
+                );
+                let goal = live
+                    .rpc
+                    .call("thread/goal/get", json!({"threadId":live.thread}))
+                    .await?;
+                ensure!(
+                    goal.get("goal").is_some() && goal["goal"]["status"] != "active",
+                    "Pause all active goals before restarting Codex"
+                );
+                ensure!(
+                    crate::background::list(&live).await?.is_empty(),
+                    "Stop background terminals before restarting Codex"
+                );
+            } else {
+                ensure!(
+                    !threads
+                        .iter()
+                        .any(|thread| thread.as_str() == session.thread_id.as_deref()),
+                    "Reconnect loaded sessions so their activity can be checked before restarting"
+                );
+            }
+        }
+        for session in &sessions {
+            self.manager
+                .disconnect(&session.id, "Codex restarted; reconnect to resume")
+                .await?;
+        }
+        if let Some(mut runtime) = self.runtime.lock().await.take() {
+            runtime.rpc.close();
+            terminate(&mut runtime.child).await;
+            if let Some(mut executor) = runtime.executor.take() {
+                terminate(&mut executor).await;
+            }
+            let _ = std::fs::remove_file(self.root.join("runtime/ipc/app.sock"));
+        }
+        let result = self.start_runtime().await;
+        self.manager.changed();
+        result
     }
 
     pub async fn login(&self) -> Result<Value> {
@@ -1628,6 +1765,33 @@ impl Orchestrator {
             let _ = std::fs::remove_file(self.root.join("runtime/ipc/app.sock"));
         }
     }
+}
+
+async fn runtime_feature_catalog(rpc: &Rpc) -> Result<Vec<Value>> {
+    let mut result = Vec::new();
+    let mut cursor = Value::Null;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let page = rpc
+            .call(
+                "experimentalFeature/list",
+                json!({"cursor":cursor,"limit":100}),
+            )
+            .await?;
+        let data = page["data"]
+            .as_array()
+            .context("Invalid feature discovery response")?;
+        result.extend(data.iter().cloned());
+        cursor = page["nextCursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+        ensure!(
+            seen.insert(cursor.to_string()) && result.len() <= 10000,
+            "Invalid feature pagination"
+        );
+    }
+    Ok(result)
 }
 
 fn free_port() -> Result<u16> {
