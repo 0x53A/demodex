@@ -37,6 +37,10 @@ struct Machine {
     target: Option<Target>,
 }
 
+struct ContainerRuntime {
+    target: Target,
+}
+
 pub struct Orchestrator {
     manager: Arc<Manager>,
     root: PathBuf,
@@ -46,6 +50,7 @@ pub struct Orchestrator {
     runtime: Mutex<Option<Runtime>>,
     usage: crate::usage::RateLimitsCache,
     machines: Mutex<HashMap<String, Machine>>,
+    containers: Mutex<HashMap<String, ContainerRuntime>>,
     ssh: Mutex<HashMap<String, crate::ssh::Engine>>,
     jobs: Mutex<HashMap<String, JoinHandle<()>>>,
 }
@@ -65,11 +70,17 @@ impl Orchestrator {
             let id = format!("vm-{}", vm.id);
             targets.push(json!({"id":id,"name":vm.name,"kind":"vm","cwd":"/workspace","available":vm.status=="running" && machines.get(&vm.id).is_some_and(|m|m.target.is_some()),"environment_id":vm.id,"users":self.manager.store.target_users(&id)?}));
         }
+        let containers = self.containers.lock().await;
+        for container in self.manager.store.containers()? {
+            let id = format!("container-{}", container.id);
+            targets.push(json!({"id":id,"name":container.name,"kind":"container","cwd":"/workspace","engine":container.engine,"image":container.image,"status":container.status,"error":container.error,"available":container.status=="running" && containers.contains_key(&container.id),"users":self.manager.store.target_users(&id)?}));
+        }
         for target in self.manager.store.registered_targets()? {
             targets.push(json!({"id":target.id,"name":target.name,"kind":"external","cwd":target.cwd,"url":target.url,"available":true,"users":self.manager.store.target_users(&target.id)?}));
         }
         for (id, config) in self.manager.store.ssh_targets()? {
-            targets.push(json!({"id":id,"name":config.name,"kind":"ssh","cwd":config.cwd,"destination":config.destination,"port":config.port,"identity_file":config.identity_file,"available":true,"users":self.manager.store.target_users(&id)?}));
+            let owner = self.manager.store.ssh_target_owner(&id)?;
+            targets.push(json!({"id":id,"name":config.name,"kind":"ssh","cwd":config.cwd,"destination":config.destination,"port":config.port,"identity_file":config.identity_file,"available":true,"users":self.manager.store.target_users(&id)?,"owner":owner}));
         }
         Ok(json!(targets))
     }
@@ -107,6 +118,10 @@ impl Orchestrator {
                     .get(vm)
                     .and_then(|m| m.target.clone())
                     .context("VM executor is unavailable")?
+            } else if let Some(id) = chosen.id.strip_prefix("container-") {
+                ensure!(self.manager.store.container(id)?.status == "running", "Start the selected container before attaching it");
+                self.containers.lock().await.get(id).map(|container| container.target.clone())
+                    .context("Container executor is unavailable")?
             } else if chosen.id.starts_with("ssh-") {
                 let config = self
                     .manager
@@ -146,10 +161,45 @@ impl Orchestrator {
         id: &str,
         selection: &[crate::targets::Selection],
     ) -> Result<()> {
+        self.select_targets_inner(id, selection, None).await
+    }
+
+    pub async fn change_targets(
+        &self,
+        id: &str,
+        selection: &[crate::targets::Selection],
+        mode: demodex_protocol::TargetChangeMode,
+    ) -> Result<()> {
+        self.select_targets_inner(id, selection, Some(mode)).await
+    }
+
+    async fn select_targets_inner(
+        &self,
+        id: &str,
+        selection: &[crate::targets::Selection],
+        mode: Option<demodex_protocol::TargetChangeMode>,
+    ) -> Result<()> {
         let _lifecycle = self.jobs.lock().await;
         let _settings = self.manager.connecting.lock().await;
         self.manager.store.ensure_target_selection(id)?;
+        for target in selection {
+            if let Some(owner) = self.manager.store.ssh_target_owner(&target.id)? {
+                ensure!(owner == id, "SSH target belongs to another session");
+            }
+        }
         let session = self.manager.store.get(id)?;
+        if selection
+            .iter()
+            .any(|target| target.id.starts_with("container-"))
+        {
+            ensure!(
+                matches!(
+                    session.sandbox,
+                    Some(crate::store::Sandbox::DangerFullAccess)
+                ),
+                "Container targets require danger-full-access"
+            );
+        }
         ensure!(
             !session.archived,
             "Restore the session before changing its targets"
@@ -158,8 +208,25 @@ impl Orchestrator {
             .manager
             .runtime(id)
             .await
-            .context("Connect the session to verify it is paused before changing targets")?;
-        Manager::require_idle(&live).await?;
+            .context("Connect the session before changing targets")?;
+        if mode.is_none() {
+            Manager::require_idle(&live).await?;
+        } else {
+            let state = live
+                .rpc
+                .call(
+                    "thread/read",
+                    json!({"threadId":live.thread,"includeTurns":false}),
+                )
+                .await?;
+            ensure!(
+                matches!(
+                    state["thread"]["status"]["type"].as_str(),
+                    Some("idle" | "active")
+                ),
+                "Cannot verify the session activity; targets were not saved"
+            );
+        }
         ensure!(
             !self
                 .manager
@@ -195,11 +262,68 @@ impl Orchestrator {
                 )
                 .await?;
         }
-        // Check again after executor connection work. Nothing has changed on the thread yet.
-        Manager::require_idle(&live).await?;
-        self.manager
-            .store
-            .save_target_selection(id, selection, &targets)?;
+        if mode == Some(demodex_protocol::TargetChangeMode::Interrupt) {
+            // Subscribe before sending so completion cannot race the wait. Never
+            // infer interruption from an accepted RPC response or a timeout.
+            let mut notices = self.manager.updates.subscribe();
+            let interrupted_turn = live.turn.lock().await.clone();
+            if let Some(turn) = interrupted_turn {
+                live.rpc.call("turn/interrupt", json!({"threadId":live.thread,"turnId":turn})).await
+                    .context("Interrupt was not confirmed; targets were not saved. Check session state before retrying")?;
+                tokio::time::timeout(Duration::from_secs(15), async {
+                    loop {
+                        let current = self.manager.runtime(id).await?;
+                        ensure!(current.generation == live.generation, "Session connection changed; targets were not saved");
+                        let active = live.turn.lock().await.clone();
+                        if active.is_none() { return Ok::<(),anyhow::Error>(()); }
+                        ensure!(active.as_ref() == Some(&turn), "Another turn started; targets were not saved");
+                        match notices.recv().await {
+                            Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                }).await.context("Interruption is still unconfirmed; targets were not saved. Check session state before retrying")??;
+            }
+        }
+        // Recheck after connection/interrupt work, then retain the generation
+        // guard through persistence. Old turns keep their effective targets.
+        if mode != Some(demodex_protocol::TargetChangeMode::NextTurn) {
+            Manager::require_idle(&live).await?;
+        }
+        let turn = live.turn.lock().await;
+        if mode != Some(demodex_protocol::TargetChangeMode::NextTurn) {
+            ensure!(
+                turn.is_none(),
+                "Another turn started; targets were not saved"
+            );
+        }
+        let sessions = self.manager.live.lock().await;
+        ensure!(
+            sessions
+                .get(id)
+                .is_some_and(|current| current.generation == live.generation),
+            "Session connection changed; targets were not saved"
+        );
+        ensure!(
+            !self
+                .manager
+                .store
+                .pending(id)?
+                .iter()
+                .any(|p| matches!(p.state.as_str(), "pending" | "responding" | "delivered")),
+            "Resolve pending decisions before changing targets; targets were not saved"
+        );
+        if mode.is_some() {
+            self.manager
+                .store
+                .stage_target_selection(id, selection, &targets)?;
+        } else {
+            self.manager
+                .store
+                .save_target_selection(id, selection, &targets)?;
+        }
+        drop(sessions);
+        drop(turn);
         self.manager.store.event(id,&json!({"method":"demodex/targetsSelected","params":{"selection":selection,"appliesOnNextMessage":true}}))?;
         self.manager.changed();
         Ok(())
@@ -211,6 +335,22 @@ impl Orchestrator {
         let id = self.manager.store.register_ssh_target(&config)?;
         self.manager.changed();
         Ok(json!({"id":id,"name":config.name,"kind":"ssh","cwd":config.cwd}))
+    }
+    pub async fn register_session_ssh_target(&self, session_id: &str, config: crate::ssh::Config) -> Result<Value> {
+        let session = self.manager.store.get(session_id)?;
+        ensure!(matches!(session.sandbox, Some(crate::store::Sandbox::DangerFullAccess)), "Set session sandbox to danger-full-access before adding SSH");
+        config.probe().await?;
+        self.manager.store.ensure_target_selection(session_id)?;
+        let mut selection = self.manager.store.target_selection(session_id)?.unwrap_or_default();
+        let target_id = self.manager.store.register_ssh_target(&config)?;
+        self.manager.store.own_ssh_target(&target_id, session_id)?;
+        selection.push(crate::targets::Selection { id: target_id.clone(), cwd: config.cwd.clone() });
+        if let Err(error) = self.select_targets(session_id, &selection).await {
+            self.ssh.lock().await.remove(&target_id);
+            self.manager.store.forget_target(&target_id)?;
+            return Err(error);
+        }
+        Ok(json!({"id":target_id,"name":config.name,"kind":"ssh","cwd":config.cwd,"owner":session_id}))
     }
     pub async fn check_ssh_target(&self, id: &str) -> Result<()> {
         let config = self
@@ -295,6 +435,214 @@ impl Orchestrator {
         self.manager.changed();
         Ok(())
     }
+
+    fn container_directory(&self, id: &str) -> PathBuf {
+        self.root.join("containers").join(id)
+    }
+
+    fn container_name(id: &str) -> String {
+        format!("demodex-container-{id}")
+    }
+
+    fn container_network(id: &str) -> String {
+        format!("demodex-network-{id}")
+    }
+
+    async fn remove_container_network(engine: &Path, id: &str) -> Result<()> {
+        let output = Command::new(engine)
+            .args(["network", "rm", &Self::container_network(id)])
+            .kill_on_drop(true).output().await?;
+        let error = String::from_utf8_lossy(&output.stderr);
+        let lower = error.to_ascii_lowercase();
+        ensure!(output.status.success() || lower.contains("not found")
+            || lower.contains("no such network") || lower.contains("does not exist"),
+            "Cannot remove container network: {error}");
+        Ok(())
+    }
+
+    pub async fn reap_stale_containers(&self) -> Result<()> {
+        for container in self.manager.store.containers()? {
+            let name = Self::container_name(&container.id);
+            let result = async {
+                let output = Command::new(find_binary(&container.engine)?)
+                    .args(["container", "rm", "--force", &name]).output().await?;
+                // A missing container is normal after an orderly shutdown.
+                let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+                if !output.status.success() && !stderr.contains("no such container")
+                    && !stderr.contains("no container with name") {
+                    bail!("{}", String::from_utf8_lossy(&output.stderr));
+                }
+                Self::remove_container_network(&find_binary(&container.engine)?, &container.id).await?;
+                Ok::<(), anyhow::Error>(())
+            };
+            let cleanup = tokio::time::timeout(Duration::from_secs(10), result).await;
+            if let Err(error) = cleanup.unwrap_or_else(|timeout| Err(timeout.into())) {
+                self.manager.store.container_status(&container.id, "error", Some(&format!("Cannot clean up stale container: {error:#}")))?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn container_running(engine: &str, name: &str) -> Result<bool> {
+        let output = tokio::time::timeout(Duration::from_secs(10), Command::new(find_binary(engine)?)
+            .args(["container", "inspect", "--format", "{{.State.Running}}", name])
+            .kill_on_drop(true).output()).await.context("Container inspection timed out")??;
+        if output.status.success() {
+            return match String::from_utf8_lossy(&output.stdout).trim() {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                other => bail!("Unrecognized container state: {other}"),
+            };
+        }
+        let error = String::from_utf8_lossy(&output.stderr);
+        let lower = error.to_ascii_lowercase();
+        ensure!(lower.contains("no such container") || lower.contains("no container with name"), "{engine} inspect failed: {error}");
+        Ok(false)
+    }
+
+    async fn disconnect_container(&self, id: &str, reason: &str) -> Result<()> {
+        for session in self.manager.store.target_users(&format!("container-{id}"))? {
+            self.manager.disconnect(&session, reason).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn create_container(&self, input: demodex_protocol::NewContainer) -> Result<Value> {
+        ensure!(matches!(input.engine.as_str(), "docker" | "podman"), "Choose Docker or Podman");
+        let engine = find_binary(&input.engine)?;
+        run(Command::new(&engine).args(["image", "inspect", &input.image]))
+            .await.context("Container image must be present locally in the selected engine; pull or build it explicitly")?;
+        let container = self.manager.store.container_create(
+            &input.name, &input.engine, &input.image, input.memory_mib, input.cpus,
+        )?;
+        self.start_container(&container.id).await?;
+        Ok(json!(self.manager.store.container(&container.id)?))
+    }
+
+    pub async fn start_container(&self, id: &str) -> Result<()> {
+        let _lifecycle = self.jobs.lock().await;
+        let container = self.manager.store.container(id)?;
+        let name = Self::container_name(id);
+        if self.containers.lock().await.contains_key(id) && Self::container_running(&container.engine, &name).await? {
+            self.manager.store.container_status(id, "running", None)?;
+            self.manager.changed();
+            return Ok(());
+        }
+        self.disconnect_container(id, "container executor is restarting").await?;
+        self.containers.lock().await.remove(id);
+        self.manager.store.container_status(id, "starting", None)?;
+        let result = self.start_container_inner(&container).await;
+        match result {
+            Ok(target) => {
+                self.containers.lock().await.insert(id.into(), ContainerRuntime { target });
+                self.manager.store.container_status(id, "running", None)?;
+                self.manager.changed();
+                Ok(())
+            }
+            Err(error) => {
+                self.manager.store.container_status(id, "error", Some(&format!("{error:#}")))?;
+                self.manager.changed();
+                Err(error)
+            }
+        }
+    }
+
+    async fn start_container_inner(&self, container: &crate::targets::ContainerRecord) -> Result<Target> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let engine = find_binary(&container.engine)?;
+        run(Command::new(&engine).args(["image", "inspect", &container.image]))
+            .await.context("Docker image is unavailable locally")?;
+        let directory = self.container_directory(&container.id);
+        let workspace = directory.join("workspace");
+        let home = directory.join("home");
+        std::fs::create_dir_all(&workspace)?;
+        std::fs::create_dir_all(&home)?;
+        for path in [&directory, &workspace, &home] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+            ensure!(!path.to_string_lossy().contains([',', ':']), "Container data path cannot contain a comma or colon");
+        }
+        let metadata = std::fs::metadata(&directory)?;
+        let name = Self::container_name(&container.id);
+        // A previous daemon may have left this Demodex-owned container running.
+        let _ = Command::new(&engine).args(["container", "rm", "--force", &name]).output().await;
+        let port = free_port()?;
+        let codex = find_binary("codex")?;
+        let nix_codex = codex.starts_with("/nix/store/");
+        let executable = if nix_codex { codex.to_string_lossy().into_owned() } else { "codex".into() };
+        // Never share the executor's network with unrelated containers. Recreate
+        // it rather than trusting potentially stale network configuration.
+        let network = Self::container_network(&container.id);
+        if container.engine == "podman" {
+            // Older Netavark versions only isolate networks whose peers also
+            // opt in, which leaves the executor reachable from default bridges.
+            let version = run(Command::new(&engine).args(["version", "--format", "{{.Client.Version}}"])).await?;
+            ensure!(version.trim().split('.').next().and_then(|v| v.parse::<u32>().ok()).is_some_and(|major| major >= 6),
+                "Container executors require Podman 6 or newer with strict bridge isolation");
+        }
+        Self::remove_container_network(&engine, &container.id).await?;
+        let mut create_network = Command::new(&engine);
+        create_network.args(["network", "create", "--driver", "bridge", "--opt",
+            if container.engine == "podman" { "isolate=strict" }
+            else { "com.docker.network.bridge.enable_icc=false" }, &network]);
+        run(&mut create_network).await.context("Creating isolated executor network (Podman requires strict bridge isolation support)")?;
+        let mut command = Command::new(&engine);
+        command.args(["run", "--detach", "--rm", "--pull", "never", "--init",
+            "--name", &name, "--network", &network, "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges", "--pids-limit", "512",
+            "--user", &format!("{}:{}", metadata.uid(), metadata.gid()),
+            "--memory", &format!("{}m", container.memory_mib),
+            "--cpus", &container.cpus.to_string(),
+            "--publish", &format!("127.0.0.1:{port}:4501"),
+            "--mount", &format!("type=bind,source={},target=/workspace", workspace.display()),
+            "--mount", &format!("type=bind,source={},target=/home/agent", home.display()),
+            "--env", "HOME=/home/agent", "--workdir", "/workspace"]);
+        if container.engine == "podman" {
+            command.args(["--userns", "keep-id"]);
+        }
+        if nix_codex {
+            command.args(["--mount", "type=bind,source=/nix/store,target=/nix/store,readonly"]);
+        }
+        command.arg(&container.image).args([executable.as_str(), "exec-server", "--listen", "ws://0.0.0.0:4501"]);
+        if let Err(error) = run(&mut command).await {
+            let _ = Self::remove_container_network(&engine, &container.id).await;
+            return Err(error).with_context(|| format!("starting {} container", container.engine));
+        }
+        let ready = async {
+            for _ in 0..100 {
+                if !Self::container_running(&container.engine, &name).await? { bail!("container exited before executor became ready"); }
+                if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+                    probe_executor(port).await?;
+                    return Ok::<(), anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            bail!("container executor did not become ready")
+        }.await;
+        if let Err(error) = ready {
+            let logs = Command::new(&engine).args(["logs", &name]).output().await.ok()
+                .map(|output| String::from_utf8_lossy(&output.stderr).into_owned()).unwrap_or_default();
+            let _ = Command::new(&engine).args(["container", "rm", "--force", &name]).output().await;
+            let _ = Self::remove_container_network(&engine, &container.id).await;
+            bail!("{error:#}; container logs: {logs}");
+        }
+        Ok(Target { id: format!("container-{}-{}",container.id,uuid::Uuid::new_v4().simple()),
+            url: format!("ws://127.0.0.1:{port}"), cwd: "/workspace".into() })
+    }
+
+    pub async fn stop_container(&self, id: &str) -> Result<()> {
+        let _lifecycle = self.jobs.lock().await;
+        let container = self.manager.store.container(id)?;
+        self.disconnect_container(id, "container stopped; workspace preserved").await?;
+        let name = Self::container_name(id);
+        if Self::container_running(&container.engine, &name).await? {
+            run(Command::new(find_binary(&container.engine)?).args(["container", "stop", "--time", "3", &name])).await?;
+        }
+        self.containers.lock().await.remove(id);
+        Self::remove_container_network(&find_binary(&container.engine)?, id).await?;
+        self.manager.store.container_status(id, "stopped", None)?;
+        self.manager.changed();
+        Ok(())
+    }
     pub fn new(
         manager: Arc<Manager>,
         root: PathBuf,
@@ -311,6 +659,7 @@ impl Orchestrator {
             runtime: Mutex::new(None),
             usage: crate::usage::RateLimitsCache::default(),
             machines: Mutex::new(HashMap::new()),
+            containers: Mutex::new(HashMap::new()),
             ssh: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
         })
@@ -885,6 +1234,11 @@ impl Orchestrator {
         let extension = crate::uploads::extension(bytes)?;
         let _lifecycle = self.jobs.lock().await;
         self.manager.store.get(id)?;
+        if self.manager.store.staged_targets(id)?.is_some()
+            && let Ok(live) = self.manager.runtime(id).await
+        {
+            ensure!(live.turn.lock().await.is_none(), "Wait for the current turn to finish before uploading to the newly selected targets");
+        }
         self.manager.store.ensure_target_selection(id)?;
         let selection = self.manager.store.target_selection(id)?.unwrap_or_default();
         let primary = selection
@@ -900,6 +1254,20 @@ impl Orchestrator {
                 .get(&primary.id)
                 .context("Reconnect the session before uploading to SSH")?;
             return engine.upload(&primary.cwd, bytes, extension).await;
+        }
+        if let Some(container_id) = primary.id.strip_prefix("container-") {
+            use std::io::Write;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            ensure!(self.containers.lock().await.contains_key(container_id),
+                "Start the session's container before uploading");
+            let directory_name = format!(".demodex-upload-{}", uuid::Uuid::new_v4());
+            let directory = self.container_directory(container_id).join("workspace").join(&directory_name);
+            std::fs::create_dir(&directory)?;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+                .open(directory.join(format!("image.{extension}")))?;
+            file.write_all(bytes)?;
+            return Ok(format!("/workspace/{directory_name}/image.{extension}"));
         }
         let environment = primary
             .id
@@ -961,6 +1329,14 @@ impl Orchestrator {
         };
         crate::ssh::require_local_app_server(&endpoint, &selection)?;
         let targets = self.resolve_targets(&selection).await?;
+        if self.manager.store.staged_targets(id)?.is_some() {
+            // A surviving app-server may resume an active turn. Keep its exact
+            // executor identities and registry usage until turn/start accepts
+            // the staged selection; reconnecting is not target application.
+            self.manager.store.retarget(id, &endpoint, &session.targets)?;
+            self.manager.store.stage_target_selection(id, &selection, &targets)?;
+            return self.manager.connect(id).await;
+        }
         self.manager.store.retarget(id, &endpoint, &targets)?;
         // Resuming does not update Codex's selected environments until turn/start.
         if session.thread_id.is_some() {
@@ -984,6 +1360,13 @@ impl Orchestrator {
             "session name must be 1–120 characters"
         );
         crate::targets::validate_selection(selection)?;
+        for target in selection {
+            ensure!(self.manager.store.ssh_target_owner(&target.id)?.is_none(), "SSH target belongs to another session");
+        }
+        if selection.iter().any(|target| target.id.starts_with("container-")) {
+            ensure!(matches!(sandbox, Some(crate::store::Sandbox::DangerFullAccess)),
+                "Container targets require danger-full-access");
+        }
         if selection.iter().any(|target| target.id.starts_with("ssh-")) {
             ensure!(
                 matches!(sandbox, Some(crate::store::Sandbox::DangerFullAccess)),
@@ -1196,14 +1579,44 @@ impl Orchestrator {
                 Some("VM or SSH connection ended. Reconnect preserves the guest disk."),
             )?;
         }
+        let container_ids: Vec<_> = self.containers.lock().await.keys().cloned().collect();
+        for id in container_ids {
+            let engine = self.manager.store.container(&id)?.engine;
+            let health = Self::container_running(&engine, &Self::container_name(&id)).await;
+            self.record_container_health(&id, health).await?;
+        }
         Ok(())
     }
 
+    async fn record_container_health(&self, id: &str, health: Result<bool>) -> Result<()> {
+        let (status, error) = match health {
+            Ok(true) => ("running", None),
+            Ok(false) => {
+                self.disconnect_container(id, "container executor ended; restart it before reconnecting").await?;
+                self.containers.lock().await.remove(id);
+                ("error", Some("Container executor ended. Workspace preserved.".to_owned()))
+            }
+            // An unavailable engine is not evidence that its container stopped.
+            // Retain ownership for later monitoring and orderly shutdown.
+            Err(error) => ("unknown", Some(format!("Cannot verify container state: {error:#}"))),
+        };
+        let previous = self.manager.store.container(id)?;
+        if previous.status != status || previous.error != error {
+            self.manager.store.container_status(id, status, error.as_deref())?;
+            self.manager.changed();
+        }
+        Ok(())
+    }
     pub async fn shutdown(&self) {
         self.ssh.lock().await.clear();
         let ids: Vec<_> = self.jobs.lock().await.keys().cloned().collect();
         for id in ids {
             let _ = self.stop(&id).await;
+        }
+        // Include containers whose start/inspection failed: the engine may
+        // have recovered, and stopped containers can still own bridge networks.
+        for container in self.manager.store.containers().unwrap_or_default() {
+            let _ = self.stop_container(&container.id).await;
         }
         if let Some(mut runtime) = self.runtime.lock().await.take() {
             runtime.rpc.close();
@@ -1309,4 +1722,36 @@ async fn probe_executor(port: u16) -> Result<()> {
     })
     .await
     .context("executor health check timed out")?
+}
+
+#[cfg(test)]
+mod container_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn uncertain_inspection_retains_ownership_and_recovers_same_executor() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = crate::store::Store::open(&root.path().join("db"))?;
+        let container = store.container_create("Fixture", "docker", "local-image", 512, 1)?;
+        store.container_status(&container.id, "running", None)?;
+        let manager = Manager::new(store);
+        let orchestrator = Orchestrator::new(manager.clone(), root.path().into(), None, None, None);
+        let target = Target { id:"original-executor".into(), url:"ws://127.0.0.1:1".into(), cwd:"/workspace".into() };
+        orchestrator.containers.lock().await.insert(container.id.clone(), ContainerRuntime { target:target.clone() });
+        for _ in 0..2 {
+            orchestrator.record_container_health(&container.id, Err(anyhow::anyhow!("engine temporarily unavailable"))).await?;
+            assert_eq!(orchestrator.containers.lock().await[&container.id].target, target);
+            let record = manager.store.container(&container.id)?;
+            assert_eq!(record.status, "unknown");
+            assert!(record.error.unwrap().contains("engine temporarily unavailable"));
+        }
+        orchestrator.record_container_health(&container.id, Ok(true)).await?;
+        assert_eq!(orchestrator.containers.lock().await[&container.id].target, target);
+        assert_eq!(manager.store.container(&container.id)?.status, "running");
+        assert!(manager.store.container(&container.id)?.error.is_none());
+        orchestrator.record_container_health(&container.id, Ok(false)).await?;
+        assert!(!orchestrator.containers.lock().await.contains_key(&container.id));
+        assert_eq!(manager.store.container(&container.id)?.status, "error");
+        Ok(())
+    }
 }

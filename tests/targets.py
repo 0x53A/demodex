@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import uuid
 from playwright.sync_api import sync_playwright, expect
 from websockets.sync.server import serve
 from websockets.exceptions import ConnectionClosed
@@ -25,6 +26,10 @@ def port():
 
 calls = []
 active = False
+interrupt_gate = False
+interrupt_release = threading.Event()
+interrupt_requested = threading.Event()
+interrupt_reject = False
 
 
 def codex(ws):
@@ -46,7 +51,21 @@ def codex(ws):
             elif method == 'turn/start':
                 active = True
                 result = {'turn': {'id': 'fixture-turn'}}
+            elif method == 'turn/steer': result = {'turnId':'fixture-turn'}
             elif method == 'turn/interrupt':
+                if interrupt_reject:
+                    ws.send(json.dumps({'id':request['id'],'error':{'code':-1,'message':'Fixture interrupt rejected'}}))
+                    continue
+                if interrupt_gate:
+                    ws.send(json.dumps({'id':request['id'],'result':{}}))
+                    interrupt_requested.set()
+                    def finish():
+                        global active
+                        if not interrupt_release.wait(20): return
+                        active = False
+                        ws.send(json.dumps({'method':'turn/completed','params':{'turn':{'id':'fixture-turn','status':'interrupted'}}}))
+                    threading.Thread(target=finish,daemon=True).start()
+                    continue
                 active = False
                 ws.send(json.dumps({'method': 'turn/completed', 'params': {'turn': {'id': 'fixture-turn'}}}))
             ws.send(json.dumps({'id': request['id'], 'result': result}))
@@ -99,7 +118,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-targets-') as temporary:
                 page.get_by_label('Message',exact=True).fill('Draft kept while changing targets')
                 page.get_by_role('button',name='Session controls',exact=True).click()
                 dialog=page.get_by_role('dialog',name='Session controls',exact=True)
-                dialog.locator('.target-picker summary').click()
+                dialog.locator('.target-picker > summary').click()
                 dialog.get_by_label('Second · external',exact=True).check()
                 dialog.get_by_label('Second working directory',exact=True).fill('/second/project')
                 dialog.get_by_role('button',name='Make primary',exact=True).click()
@@ -118,27 +137,105 @@ with tempfile.TemporaryDirectory(prefix='demodex-targets-') as temporary:
                 assert [t['cwd'] for t in turn['params']['environments']]==['/second/project','/first']
                 assert turn['params']['threadId']=='fixture-thread'
                 page.get_by_role('button',name='Session controls',exact=True).click()
-                dialog.locator('.target-picker summary').click()
-                expect(dialog.get_by_role('button',name='Save targets',exact=True)).to_be_disabled()
-                dialog.get_by_role('button',name='Close',exact=True).click()
-                page.get_by_role('button',name='Interrupt',exact=True).click()
-                expect(page.locator('.session-heading .status')).to_have_text('idle')
-                page.get_by_role('button',name='Session controls',exact=True).click()
-                dialog.locator('.target-picker summary').click()
-                expect(dialog.get_by_role('button',name='Start / resume goal',exact=True)).to_be_enabled()
-                expect(dialog.get_by_label('Second · external',exact=True)).to_be_checked()
+                dialog.locator('.target-picker > summary').click()
+                expect(dialog.get_by_role('button',name='Save for next turn',exact=True)).to_be_enabled()
+                expect(dialog.get_by_role('button',name='Interrupt and save',exact=True)).to_be_enabled()
+                page.set_viewport_size({'width':390,'height':844})
+                dialog.get_by_role('button',name='Interrupt and save',exact=True).scroll_into_view_if_needed()
+                page.screenshot(path=str(ROOT/'target'/'review-target-actions-mobile.png'))
+                page.set_viewport_size({'width':1200,'height':850})
+                starts=sum(c['method']=='turn/start' for c in calls)
+                interrupts=sum(c['method']=='turn/interrupt' for c in calls)
+                # Save a reduction without changing the running turn or its users.
                 dialog.get_by_label('Second · external',exact=True).click()
                 expect(dialog.get_by_label('Second · external',exact=True)).not_to_be_checked()
+                dialog.get_by_role('button',name='Save for next turn',exact=True).click()
+                expect(dialog.locator('.effective-targets')).to_contain_text('/second/project')
+                detail=api('/sessions/'+session['id'])
+                assert len(detail['target_selection'])==1 and detail['targets_pending']
+                assert len(detail['session']['targets'])==2
+                assert sum(c['method']=='turn/interrupt' for c in calls)==interrupts
+                assert sum(c['method']=='turn/start' for c in calls)==starts
+                # Reload keeps the accepted pending selection and the active turn.
+                page.reload()
+                expect(page.locator('.session-heading .status')).to_have_text('working')
+                expect(page.locator('.session-inbox')).to_contain_text('This turn keeps its current targets')
+                expect(page.get_by_role('button',name='Attach image',exact=True)).to_be_disabled()
+                page.get_by_label('Message',exact=True).fill('Steer existing work')
+                page.get_by_role('button',name='Send',exact=True).click()
+                expect(page.get_by_label('Message',exact=True)).to_have_value('')
+                assert calls[-1]['method'] != 'turn/start'
+                assert api('/sessions/'+session['id'])['targets_pending']
+                page.get_by_role('button',name='Session controls',exact=True).click()
+                dialog.locator('.target-picker > summary').click()
+                expect(dialog.get_by_label('Second · external',exact=True)).not_to_be_checked()
+                # A rejected interrupt leaves both saved and effective selections alone.
                 dialog.get_by_label('First · external',exact=True).click()
                 expect(dialog.get_by_label('First · external',exact=True)).not_to_be_checked()
-                dialog.get_by_role('button',name='Save targets',exact=True).click()
-                expect(dialog.locator('.target-picker')).to_contain_text('Targets saved. Send a message')
+                interrupt_reject=True
+                dialog.get_by_role('button',name='Interrupt and save',exact=True).click()
+                expect(dialog.get_by_role('alert')).to_contain_text('targets were not saved')
+                interrupt_reject=False
+                detail=api('/sessions/'+session['id'])
+                assert len(detail['target_selection'])==1 and len(detail['session']['targets'])==2
+                dialog.get_by_role('button',name='Dismiss',exact=True).click()
+                # An accepted interrupt is not completion: no selection is saved yet.
+                interrupt_gate=True
+                dialog.get_by_role('button',name='Interrupt and save',exact=True).click()
+                assert interrupt_requested.wait(5)
+                expect(dialog.get_by_role('button',name='Interrupt and save',exact=True)).to_be_disabled()
+                detail=api('/sessions/'+session['id'])
+                assert len(detail['target_selection'])==1 and len(detail['session']['targets'])==2
+                interrupt_release.set()
+                interrupt_gate=False
+                expect(page.locator('.session-heading .status')).to_have_text('idle')
+                expect(dialog.get_by_role('button',name='Save targets',exact=True)).to_be_enabled()
+                detail=api('/sessions/'+session['id'])
+                assert detail['target_selection']==[] and detail['targets_pending']
+                assert len(detail['session']['targets'])==2, 'saving claimed immediate revocation'
+                assert sum(c['method']=='turn/start' for c in calls)==starts, 'hidden turn started'
+                dialog.get_by_role('button',name='Close',exact=True).click()
+                page.get_by_label('Message',exact=True).fill('Continue with no executors')
+                page.get_by_role('button',name='Send',exact=True).click()
+                expect(page.locator('.session-heading .status')).to_have_text('working')
+                last_turn=next(c for c in reversed(calls) if c['method']=='turn/start')
+                assert last_turn['params']['environments']==[]
+                detail=api('/sessions/'+session['id'])
+                assert detail['session']['targets']==[] and not detail['targets_pending']
+                # Duplicate interruption receipts cannot interrupt a later turn.
+                from wormhole_client import call
+                receipt=str(uuid.uuid4())
+                command={'ChangeTargets':{'id':session['id'],'input':{'targets':[]},'mode':'Interrupt'}}
+                result=call(origin,token,command,receipt)
+                api('/sessions/'+session['id']+'/messages',{'text':'A later turn'})
+                interrupts=sum(c['method']=='turn/interrupt' for c in calls)
+                assert call(origin,token,command,receipt)==result
+                assert sum(c['method']=='turn/interrupt' for c in calls)==interrupts
+                assert active
+                # An interrupt acknowledgement with no completion expires without
+                # saving. A late completion must not revive the expired operation.
+                interrupt_gate=True
+                interrupt_release.clear()
+                interrupt_requested.clear()
+                first=next(t for t in api('/targets') if t['name']=='First')
+                timeout_command={'ChangeTargets':{'id':session['id'],'input':{'targets':[{'id':first['id'],'cwd':'/first'}]},'mode':'Interrupt'}}
+                try:
+                    call(origin,token,timeout_command,str(uuid.uuid4()))
+                    raise AssertionError('Unconfirmed interrupt succeeded')
+                except AssertionError as exc:
+                    assert 'Interruption is still unconfirmed' in str(exc),str(exc)
+                assert active
                 assert api('/sessions/'+session['id'])['target_selection']==[]
+                interrupt_release.set()
+                interrupt_gate=False
+                expect(page.locator('.session-heading .status')).to_have_text('idle')
+                detail=api('/sessions/'+session['id'])
+                assert detail['target_selection']==[] and not detail['targets_pending']
                 page.set_viewport_size({'width':390,'height':844})
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
                 assert not errors,errors
                 browser.close()
-            print('PASS: shared registry, mobile target picker, primary/cwd, draft preservation, active lockout, next-turn selection and explicit empty selection')
+            print('PASS: shared registry, mobile target picker, primary/cwd, draft preservation, active staging, confirmed interruption, receipts, next-turn selection and explicit empty selection')
         except BaseException:
             log.flush();log.seek(0);print(log.read()[-5000:])
             raise

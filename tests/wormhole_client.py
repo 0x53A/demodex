@@ -22,6 +22,7 @@ def operation(path, body):
             'runtime': ('Runtime', None),
             'targets': ('Targets', 'RegisterTarget'),
             'environments': ('Environments', 'CreateEnvironment'),
+            'containers': ('Targets', 'CreateContainer'),
         }[parts[0]]
         return read if body is None else {write: {'input': body}}
     if parts == ['host', 'sessions']:
@@ -54,6 +55,8 @@ def operation(path, body):
         name = {'start': 'StartEnvironment', 'stop': 'StopEnvironment', 'sessions': 'EnvironmentSession'}[action]
         if action == 'sessions':
             data['input'] = body
+    elif kind == 'containers':
+        name = {'start': 'StartContainer', 'stop': 'StopContainer'}[action]
     else:
         raise AssertionError(f'Unknown fixture operation: {path}')
     return {name: data}

@@ -48,7 +48,7 @@ Exact transport dependency versions constrain consumers with separate lockfiles.
 
 ## Library and native clients
 
-Protocol v17 adds DefaultPrompt (read-only) and new-session prompt overrides through
+Protocol v17 added DefaultPrompt (read-only) and new-session prompt overrides through
 CreateSessionWithPrompt / HostSessionWithPrompt. DefaultPrompt resolves the runtime
 profile's base instructions (configured file/text or model catalogue) plus operator
 developer and Demodex integration instructions. It requires a local host runtime.
@@ -57,6 +57,18 @@ with empty developerInstructions and project_doc_max_bytes=0. Runtime-generated
 context and tools remain enabled. Overrides cannot be applied to imported threads.
 Receipt response encoding remains v16; its existing response types are unchanged.
 tests/prompt.py checks the real Codex catalogue and thread creation without inference.
+
+Protocol v18 adds RegisterSessionSshTarget. It verifies and attaches a private SSH
+target to a connected idle session. New sessions may start with zero targets;
+VMs are created from Server settings and SSH executors from Session controls.
+Protocol v19 adds managed OCI container targets. Creation selects Docker or
+Podman per container; the engine choice persists with the target. Rebuild native
+clients and the frontend with the daemon after this protocol change.
+Protocol v20 adds ChangeTargets with NextTurn and Interrupt modes. Active turns
+keep their effective targets while the requested selection persists separately.
+Interrupt mode waits for confirmed completion and idle state before saving;
+no hidden turn is sent. The next explicit turn/start applies the selection.
+Rebuild clients and the frontend with the daemon after this protocol change.
 
 `demodex::Runtime::start(Config).await` opens storage, starts the configured
 executor and owns periodic monitoring. Obtain cloneable handles with
@@ -132,8 +144,9 @@ persisted rollout: expose `no rollout found` rather than silently replacing them
 ## Shared execution targets
 
 Targets are daemon-scoped. The registry includes the configured native host,
-managed VMs, and named external executors. Several sessions may select the same
-VM; sessions do not own or exclusively reserve targets. VM provisioning is also
+managed VMs, managed Docker/Podman containers, and named external executors.
+Several sessions may select the same VM or container; sessions do not own or
+exclusively reserve targets. VM provisioning is also
 available in host mode. Host execution still requires `--host-workspace`; never
 silently expose the host from an isolated default deployment.
 
@@ -146,16 +159,41 @@ attachments without deleting history or overriding an existing selection.
 attachments, not the current set of tool targets. VM stop/loss disconnects all
 current users. Reconnect resolves the saved selection and preserves the thread.
 
-Changing targets requires a connected, idle session, no unresolved decisions,
-no queued messages, and a paused/inactive goal. Register and validate executors
-before persisting the selection. The current app-server API applies environments
+Changing targets requires a connected session, no unresolved decisions,
+no queued messages, and a paused/inactive goal. SelectTargets remains idle-only;
+ChangeTargets can stage a selection while active or explicitly interrupt first.
+Register and validate executors before persisting the selection. Staged targets
+and current targets both retain registry usage until the new turn accepts them.
+Interrupt acknowledgement alone is not completion; a failed/unconfirmed interrupt
+must leave the selection unchanged. Steering retains the current turn's targets. The current app-server API applies environments
 on the next `turn/start`, not through `thread/settings/update`; show that pending
 state and block goal/queue resumption until an explicit message applies it.
 Never send a hidden model turn to apply settings. The first selected target is
 the primary image-upload destination; unsupported external uploads fail without
 host fallback. Empty selection disables execution targets explicitly.
 
-SSH targets are configured in Server settings and persisted in `ssh_targets`.
+Managed OCI containers are created in Server settings from images already local
+to the selected engine. Each has a persistent private workspace and home in the
+daemon data directory. Docker and Podman run on a dedicated bridge per container,
+isolated from other container networks, with outbound networking,
+bounded memory/CPU/process counts, dropped capabilities, a loopback-only executor
+port, and no host home or engine socket mount. Nix-packaged Codex uses a read-only
+host Nix store bind; otherwise the image must contain `codex`. Podman uses rootless
+`keep-id` when run by an unprivileged daemon user. Podman 6 or newer and Netavark
+with strict bridge isolation support are required; creation fails if isolation
+cannot be configured. Temporary engine inspection failures retain lifecycle
+ownership and report unknown state until verification succeeds. The daemon user must be able to
+run the selected engine; stopping retains the workspace, while restart creates a
+new executor identity and requires session reconnect. Container targets require
+an explicit danger-full-access sandbox selection. NixOS `nixos-container` is a
+separate backend and is not managed here. Run `uv run tests/container.py` for the
+Docker integration check without model inference. Set
+`DEMODEX_CONTAINER_ENGINE=podman` and select an image already in Podman's local
+store to run the same check with Podman.
+
+SSH targets are configured in Session controls and persisted in `ssh_targets`.
+Legacy shared SSH targets remain available to existing sessions; newly created
+session SSH targets have an owner in `session_ssh_targets`.
 The adapter runs locally and speaks the Codex executor protocol. Foreground
 commands use standard OpenSSH; file operations use the server's existing SFTP v3
 subsystem. No Python, remote helper executable or custom server is installed.

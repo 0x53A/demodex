@@ -147,6 +147,7 @@ pub enum Msg {
     Dismiss,
     Scroll,
     Latest,
+    Resize,
     Pwa,
     ApplyUpdate,
 }
@@ -339,7 +340,9 @@ impl Component for App {
         let foreground = ctx.link().clone();
         let pwa = ctx.link().clone();
         let navigation = ctx.link().clone();
+        let resize = ctx.link().clone();
         let listeners = vec![
+            EventListener::new(&window(), "resize", move |_| resize.send_message(Msg::Resize)),
             EventListener::new(&window(), "popstate", move |event| {
                 if let Some(route) = event
                     .dyn_ref::<web_sys::PopStateEvent>()
@@ -1032,6 +1035,8 @@ impl Component for App {
                 if matches!(
                     operation,
                     Operation::RegisterSshTarget { .. }
+                        | Operation::RegisterSessionSshTarget { .. }
+                        | Operation::CreateContainer { .. }
                         | Operation::CheckSshTarget { .. }
                         | Operation::ReconnectSshTarget { .. }
                         | Operation::ForgetTarget { .. }
@@ -1071,13 +1076,13 @@ impl Component for App {
                                 }
                             }
                             Operation::CreateEnvironment { .. } => {
-                                let mut selected = self.new_session_targets();
-                                selected.push(json!({"id":format!("vm-{}",text(&value,"id")),"cwd":"/workspace"}));
-                                self.saved
-                                    .fields
-                                    .insert("new_targets".into(), json!(selected).to_string());
+                                self.target_notice = "VM created and started. Select it in a session's Execution targets.".into();
                             }
-                            Operation::SelectTargets { id, .. } => {
+                            Operation::CreateContainer { .. } => {
+                                self.target_notice = "Container created and started. Select it in a session's Execution targets.".into();
+                                self.saved.fields.remove("container_name");
+                            }
+                            Operation::SelectTargets { id, .. } | Operation::ChangeTargets { id, .. } => {
                                 self.saved.fields.remove(&format!("target-draft:{id}"));
                             }
                             Operation::CheckSshTarget { .. } => {
@@ -1086,8 +1091,8 @@ impl Component for App {
                             Operation::ReconnectSshTarget { .. } => {
                                 self.target_notice="SSH executor replaced. Reconnect each attached session to use it.".into();
                             }
-                            Operation::RegisterSshTarget { .. } => {
-                                self.target_notice="SSH target verified and saved. Enable it in a session's Execution targets settings.".into();
+                            Operation::RegisterSshTarget { .. } | Operation::RegisterSessionSshTarget { .. } => {
+                                self.target_notice="SSH target verified and attached. Send a message to apply it before resuming a goal or queue.".into();
                                 for key in [
                                     "ssh_name",
                                     "ssh_destination",
@@ -1257,6 +1262,7 @@ impl Component for App {
             }
             Msg::InvalidForm(error) => self.error = error,
             Msg::Dismiss => self.error.clear(),
+            Msg::Resize => return self.follow,
             Msg::Latest => {
                 self.follow = true;
             }
@@ -1329,8 +1335,8 @@ impl Component for App {
                             <button class="environment-nav" disabled={!self.connected} onclick={ctx.link().callback(|_|Msg::Page("environments".into()))}>{"Server settings"}</button>
                             <div class="section-title"><h2>{"Sessions"}</h2></div>
                             <button class="new-session-nav primary" disabled={!self.connected} onclick={ctx.link().callback(|_|Msg::NewSession(true))}>{"+ New Session"}</button>
-                            {crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]!=true).cloned().collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select))}
-                            {if self.sessions.iter().any(|s|s["archived"]==true){html!{<details class="archived-sessions"><summary>{format!("Archived sessions ({})",self.sessions.iter().filter(|s|s["archived"]==true).count())}</summary>{crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]==true).cloned().collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select))}</details>}}else{Html::default()}}
+                            {crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]!=true).cloned().collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::Run),self.busy||!self.connected)}
+                            {if self.sessions.iter().any(|s|s["archived"]==true){html!{<details class="archived-sessions"><summary>{format!("Archived sessions ({})",self.sessions.iter().filter(|s|s["archived"]==true).count())}</summary>{crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]==true).cloned().collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::Run),self.busy||!self.connected)}</details>}}else{Html::default()}}
                         </aside>
                         <main class={(!self.saved.selected.is_empty()).then_some("chat-main")}>
                             {if !self.saved.page.is_empty(){html!{<button class="back" onclick={ctx.link().callback(|_|Msg::Back)}>{"← Back"}</button>}}else{Html::default()}}
@@ -1405,10 +1411,12 @@ impl App {
         html! {<>
             <div class="session-heading"><button class="back" onclick={ctx.link().callback(|_|Msg::Page(String::new()))}>{"← Sessions"}</button><div class="session-heading-text"><h1><span class="agent-icon" aria-hidden="true">{text(&self.current["presentation"],"icon")}</span>{crate::overview::identity(&self.current)}</h1><p>{text(&self.current,"name")}</p>{if !text(&self.current,"thread_id").is_empty(){html!{<code class="thread-reference" title="Codex thread UUID">{text(&self.current,"thread_id")}</code>}}else{Html::default()}}</div><span class={classes!("status",crate::overview::status_class(status))}>{status}</span><button class="controls-toggle" onclick={ctx.link().callback({let open=!self.show_controls;move |_|Msg::Controls(open)})}>{if self.show_controls{"Hide controls"}else{"Session controls"}}</button>{if status=="disconnected" && self.current["archived"]!=true{self.button(ctx,"Connect / resume",Operation::Connect{id:id.clone()})}else{Html::default()}}</div>
             <div class="transcript-toolbar"><button type="button" class="background-toggle" onclick={ctx.link().callback(|_|Msg::Background(true))}>{self.background["data"].as_array().map(|rows|format!("Background terminals ({})",rows.len())).unwrap_or_else(||"Background terminals · unavailable".into())}</button><div class="transcript-position"><span>{if self.follow{"Following latest messages"}else{"Reading earlier messages"}}</span>{crate::usage::context(&self.current,false)}</div><button type="button" disabled={self.follow} onclick={ctx.link().callback(|_|Msg::Latest)}>{"Jump to latest"}</button></div>
+            {if let Some(error)=self.current["error"].as_str().filter(|e|!e.is_empty()){html!{<p class="error" role="status">{error}</p>}}else{Html::default()}}
             <div class="transcript" ref={self.transcript_ref.clone()} onscroll={ctx.link().callback(|_|Msg::Scroll)} role="region" aria-label="Chat transcript" tabindex="0">
-                <crate::conversation::Conversation key={self.saved.key()} chunks={self.transcript.chunks.clone()} {working} {waiting}/>
+                <crate::conversation::Conversation key={self.saved.key()} chunks={self.transcript.chunks.clone()} {working} {waiting} connected={self.connected}/>
             </div>
             <div class="session-inbox" role="region" aria-label="Requests and queued messages">
+                {if self.targets_pending {html!{<p class="muted" role="status">{if working {"Target changes saved for the next new turn. This turn keeps its current targets; Send still steers it. Image uploads are paused until it finishes."} else {"Target changes saved. Your next message starts a turn with the new selection."}}</p>}}else{Html::default()}}
                 {for self.pending.iter().map(|pending|self.approval(ctx,pending))}
                 {if !self.queued.is_empty() {html!{<section class="message-queue" aria-label="Queued messages"><h2>{format!("Queued messages ({})",self.queued.len())}</h2><p class="muted">{"Sent to Codex; waiting for the current work to finish. Interrupt pauses the queue."}</p>
                     {for self.queued.iter().map(|message|html!{<div class="queued-message"><pre>{array(&message["input"]).iter().map(|part|text(part,"text")).collect::<Vec<_>>().join("\n")}</pre>{self.button(ctx,"Cancel queued message",Operation::CancelQueued{id:id.clone(),queued_id:text(message,"id").into()})}</div>})}
@@ -1430,12 +1438,11 @@ impl App {
             })}/><input type="file" hidden=true ref={self.image_ref.clone()} accept="image/png,image/jpeg,image/gif,image/webp" aria-label="Upload image" onchange={ctx.link().batch_callback(|e:Event| {
                 let input=e.target_unchecked_into::<HtmlInputElement>();
                 let file=input.files().and_then(|files|files.get(0)); input.set_value(""); file.map(Msg::UploadImage)
-            })}/><div><button type="button" disabled={self.busy||!self.connected} onclick={ctx.link().callback(|_|Msg::ChooseImage)}>{if self.busy && self.upload_anchor.is_some(){"Uploading…"}else{"Attach image"}}</button><button class="primary" title="Send now; during work, steer the current turn" disabled={!self.can_send()}>{"Send"}</button><button type="button" title="Start a separate turn after the current turn finishes" disabled={!self.can_send()||!(working||waiting)} onclick={ctx.link().callback(|_|Msg::Queue)}>{"Queue for later"}</button>{if working||waiting{self.button(ctx,"Interrupt",Operation::Interrupt{id:id.clone()})}else{html!{<button type="button" disabled=true>{"Interrupt"}</button>}}}</div><p id="composer-shortcut" class="composer-shortcut">{"Enter: newline · Shift+Enter: send · Send steers active work; Queue waits for the turn to finish"}</p></form>
+            })}/><div><button type="button" disabled={self.busy||!self.connected||(self.targets_pending&&working)} onclick={ctx.link().callback(|_|Msg::ChooseImage)}>{if self.busy && self.upload_anchor.is_some(){"Uploading…"}else{"Attach image"}}</button><button class="primary" title="Send now; during work, steer the current turn" disabled={!self.can_send()}>{"Send"}</button><button type="button" title="Start a separate turn after the current turn finishes" disabled={!self.can_send()||!(working||waiting)} onclick={ctx.link().callback(|_|Msg::Queue)}>{"Queue for later"}</button>{if working||waiting{self.button(ctx,"Interrupt",Operation::Interrupt{id:id.clone()})}else{html!{<button type="button" disabled=true>{"Interrupt"}</button>}}}</div><p id="composer-shortcut" class="composer-shortcut">{"Enter: newline · Shift+Enter: send · Send steers active work; Queue waits for the turn to finish"}</p></form>
             {self.background_panel(ctx)}
             {if self.show_controls {html!{<crate::modal::Modal title="Session controls" onclose={ctx.link().callback(|_|Msg::Controls(false))}>
                 {self.controls_view(ctx,working||waiting)}
                 <section class="control-section" aria-label="Execution settings"><h3>{"Execution"}</h3>
-                {if let Some(error)=self.current["error"].as_str(){html!{<p class="error">{error}</p>}}else{Html::default()}}
                 {self.target_picker(ctx,working||waiting)}
                 <details class="session-settings"><summary>{format!("Sandbox permissions · {}",sandbox_name(text(&self.current["effective_sandbox"],"type")))}</summary>{for array(&self.current["targets"]).iter().map(|t|html!{<p class="muted">{"Working directory: "}<code>{text(t,"cwd")}</code></p>})}
                     <section class="runtime-panel"><p>{"Active sandbox: "}<strong>{sandbox_name(text(&self.current["effective_sandbox"],"type"))}</strong></p>{self.sandbox(ctx,"session_sandbox","Session sandbox")}
@@ -1488,33 +1495,51 @@ impl App {
             .unwrap_or_else(|| self.target_selection.clone());
         let chosen = array(&selected);
         let locked = !self.connected
-            || active
             || self
                 .pending
                 .iter()
                 .any(|p| matches!(text(p, "state"), "pending" | "responding" | "delivered"))
-            || !matches!(text(&self.current, "status"), "idle" | "connected")
+            || !matches!(
+                text(&self.current, "status"),
+                "idle" | "connected" | "working" | "active" | "running"
+            )
             || self.current["archived"] == true
             || !self.queued.is_empty()
             || self.controls["goal"]["status"] == "active"
             || self.busy;
-        let operation = Operation::SelectTargets {
+        let selection = demodex_protocol::SelectTargets {
+            targets: chosen
+                .iter()
+                .map(|target| demodex_protocol::Selection {
+                    id: text(target, "id").into(),
+                    cwd: text(target, "cwd").into(),
+                })
+                .collect(),
+        };
+        let operation = if active {
+            Operation::ChangeTargets {
+                id: self.saved.selected.clone(),
+                input: selection.clone(),
+                mode: demodex_protocol::TargetChangeMode::NextTurn,
+            }
+        } else {
+            Operation::SelectTargets {
+                id: self.saved.selected.clone(),
+                input: selection.clone(),
+            }
+        };
+        let interrupt = Operation::ChangeTargets {
             id: self.saved.selected.clone(),
-            input: demodex_protocol::SelectTargets {
-                targets: chosen
-                    .iter()
-                    .map(|target| demodex_protocol::Selection {
-                        id: text(target, "id").into(),
-                        cwd: text(target, "cwd").into(),
-                    })
-                    .collect(),
-            },
+            input: selection,
+            mode: demodex_protocol::TargetChangeMode::Interrupt,
         };
         html! {<details class="target-picker"><summary>{"Execution targets"}</summary>
-            <p class="muted">{"Pause the goal, stop the turn and clear queued messages before changing targets. The next message applies your selection. Sharing a target shares its files and machine access. SSH commands require danger-full-access; SSH does not enforce a remote sandbox."}</p>
-            {if self.targets_pending{html!{<p role="status">{"Targets saved. Send a message to apply them before resuming a goal or queue."}</p>}}else{Html::default()}}
+            <p class="muted">{"Pause any active goal, clear queued messages and resolve pending decisions before changing targets. A new turn applies your selection. Sharing a target shares its files and machine access. SSH and container executors require danger-full-access."}</p>
+            {if self.targets_pending{html!{<p role="status">{if active {"Targets saved for the next new turn. Current turn access is unchanged."} else {"Targets saved. Send a message to apply them before resuming a goal or queue."}}</p>}}else{Html::default()}}
+            {if active {html!{<p class="muted">{"This turn is active. Save for the next turn to let it finish with its current targets, or interrupt it and save after it stops. Neither action starts a new turn or terminates background jobs. Messages sent during work still steer the current turn."}</p>}}else{Html::default()}}
+            {if active && self.targets_pending {html!{<div class="effective-targets"><strong>{"Current turn targets"}</strong><ul>{for array(&self.current["targets"]).iter().map(|target|html!{<li>{crate::overview::environment_label(text(target,"id"),&self.targets)}{" · "}<code>{text(target,"cwd")}</code></li>})}</ul></div>}}else{Html::default()}}
             <fieldset disabled={locked}>
-                {for self.targets.iter().map(|target|{
+                {for self.targets.iter().filter(|target|target["owner"].is_null()||text(target,"owner")==self.saved.selected).map(|target|{
                     let id=text(target,"id").to_owned();
                     let enabled=chosen.iter().any(|s|s["id"]==id);
                     let mut toggled=chosen.clone();
@@ -1533,9 +1558,40 @@ impl App {
                     </div>}
                 })}
                 <p class="muted">{"Image uploads go to the primary target. With no targets, executor tools are unavailable."}</p>
-                {self.button(ctx,"Save targets",operation)}
+                {self.button(ctx,if active {"Save for next turn"} else {"Save targets"},operation)}
+                {if active {self.button(ctx,"Interrupt and save",interrupt)}else{Html::default()}}
             </fieldset>
-            {if locked{html!{<p class="muted">{"Target changes require a connected, idle session with no active goal, queued messages or pending decisions."}</p>}}else{Html::default()}}
+            {self.session_ssh_form(ctx, locked || active)}
+            {for self.targets.iter().filter(|target|text(target,"owner")==self.saved.selected).map(|target|{
+                let id=text(target,"id").to_owned();
+                html!{<section class="environment-card"><h3>{text(target,"name")}</h3><p>{format!("Private SSH executor · {}",text(target,"destination"))}</p>
+                    {self.button(ctx,"Check SSH connection",Operation::CheckSshTarget{id:id.clone()})}
+                    {self.button(ctx,"Replace SSH executor",Operation::ReconnectSshTarget{id:id.clone()})}
+                    {if array(&target["users"]).is_empty(){self.button(ctx,"Forget target",Operation::ForgetTarget{id})}else{Html::default()}}
+                </section>}
+            })}
+            {if locked{html!{<p class="muted">{"Target changes require a connected session with no active goal, queued messages or pending decisions."}</p>}}else{Html::default()}}
+        </details>}
+    }
+
+    fn session_ssh_form(&self, ctx: &Context<Self>, locked: bool) -> Html {
+        let payload = demodex_protocol::SshTarget {
+            name: self.saved.field("ssh_name"),
+            destination: self.saved.field("ssh_destination"),
+            cwd: self.saved.field("ssh_cwd"),
+            port: nonempty(self.saved.field("ssh_port")).map(|p| p.parse::<u16>().unwrap_or(0)),
+            identity_file: nonempty(self.saved.field("ssh_identity")),
+            known_hosts_file: nonempty(self.saved.field("ssh_known_hosts")),
+        };
+        let id = self.saved.selected.clone();
+        html! {<details class="session-ssh"><summary>{"Add SSH executor to this session"}</summary>
+            <form class="setup" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();Msg::Run(Operation::RegisterSessionSshTarget{id:id.clone(),input:payload.clone()})})}>
+                <fieldset disabled={locked}>
+                    {self.field(ctx,"ssh_name","SSH target name","Build machine")}{self.field(ctx,"ssh_destination","SSH destination","user@host or SSH config alias")}{self.field(ctx,"ssh_port","SSH port (optional)","22")}{self.field(ctx,"ssh_identity","Identity file on this server (optional)","/home/user/.ssh/id_ed25519")}{self.field(ctx,"ssh_known_hosts","Known hosts file on this server (optional)","/home/user/.ssh/known_hosts")}{self.field(ctx,"ssh_cwd","Remote working directory","/workspace")}
+                    <p class="muted">{"SSH uses this server user's credentials and the remote account's authority. Set this session's sandbox to danger-full-access first. The executor is private to this session; a successful check attaches it and the next message applies it."}</p>
+                    <button disabled={self.current["sandbox"]!="danger-full-access"}>{"Check and add SSH executor"}</button>
+                </fieldset>
+            </form>
         </details>}
     }
 
@@ -1545,16 +1601,8 @@ impl App {
             url: self.saved.field("target_url"),
             cwd: self.saved.field("target_cwd"),
         };
-        let ssh_payload = demodex_protocol::SshTarget {
-            name: self.saved.field("ssh_name"),
-            destination: self.saved.field("ssh_destination"),
-            cwd: self.saved.field("ssh_cwd"),
-            port: nonempty(self.saved.field("ssh_port")).map(|p| p.parse::<u16>().unwrap_or(0)),
-            identity_file: nonempty(self.saved.field("ssh_identity")),
-            known_hosts_file: nonempty(self.saved.field("ssh_known_hosts")),
-        };
-        html! {<section class="target-registry"><h2>{"Shared targets"}</h2>{if !self.target_notice.is_empty(){html!{<p role="status">{self.target_notice.clone()}</p>}}else{Html::default()}}<p>{"Attach these targets from any session's Execution targets settings. A VM can be used by several sessions."}</p>
-            {for self.targets.iter().map(|target|{
+        html! {<section class="target-registry"><h2>{"Shared targets"}</h2>{if !self.target_notice.is_empty(){html!{<p role="status">{self.target_notice.clone()}</p>}}else{Html::default()}}<p>{"Attach these targets from any session's Execution targets settings. A VM can be used by several sessions. SSH executors are created in Session controls."}</p>
+            {for self.targets.iter().filter(|target|target["owner"].is_null()&&target["kind"]!="container").map(|target|{
                 let users=array(&target["users"]);
                 html!{<article class="environment-card"><h3>{text(target,"name")}</h3><p>{format!("{} · {}",text(target,"kind"),if matches!(text(target,"kind"),"external"|"ssh"){"registered · checked on attach"}else if target["available"]==true{"available"}else{"stopped / unavailable"})}</p><code>{text(target,"cwd")}</code>
                     {if text(target,"kind")=="ssh"{html!{<><p>{format!("SSH: {}",text(target,"destination"))}</p>{self.button(ctx,"Check SSH connection",Operation::CheckSshTarget{id:text(target,"id").into()})}{self.button(ctx,"Replace SSH executor",Operation::ReconnectSshTarget{id:text(target,"id").into()})}<p class="muted">{"Replacement requires paused sessions, invalidates running process/file handles and disconnects all attached sessions. Reconnect them explicitly afterward."}</p></>}}else{Html::default()}}
@@ -1562,11 +1610,6 @@ impl App {
                     {if matches!(text(target,"kind"),"external"|"ssh") && users.is_empty(){self.button(ctx,"Forget target",Operation::ForgetTarget{id:text(target,"id").into()})}else{Html::default()}}
                 </article>}
             })}
-            <details><summary>{"Add SSH target"}</summary><form class="setup" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();Msg::Run(Operation::RegisterSshTarget{input:ssh_payload.clone()})})}>
-                {self.field(ctx,"ssh_name","SSH target name","Build machine")}{self.field(ctx,"ssh_destination","SSH destination","user@host or SSH config alias")}{self.field(ctx,"ssh_port","SSH port (optional)","22")}{self.field(ctx,"ssh_identity","Identity file on this server (optional)","/home/user/.ssh/id_ed25519")}{self.field(ctx,"ssh_known_hosts","Known hosts file on this server (optional)","/home/user/.ssh/known_hosts")}{self.field(ctx,"ssh_cwd","Remote working directory","/workspace")}
-                <p class="muted">{"Uses this server user's OpenSSH configuration, keys and known_hosts. The remote Linux host needs a POSIX shell, standard env/cat utilities and SFTP. No Python or custom remote server is needed. Commands run in the foreground with no executor time limit; interactive stdin and PTYs are unsupported. The agent can check for tmux for background work. Cancellation closes SSH; remote termination is best effort. Verify its host key with SSH first. SSH uses the remote account's authority and requires danger-full-access for commands; restricted sandbox policies are rejected."}</p>
-                <button disabled={self.busy||!self.connected}>{"Check and add SSH target"}</button>
-            </form></details>
             <details><summary>{"Register an external executor"}</summary><form class="setup" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();Msg::Run(Operation::RegisterTarget{input:payload.clone()})})}>
                 {self.field(ctx,"target_name","Target name","Build machine")}{self.field(ctx,"target_url","Executor WebSocket URL","ws://127.0.0.1:4501")}{self.field(ctx,"target_cwd","Default working directory","/workspace")}
                 <p class="muted">{"The executor must already be running and reachable from the Codex app-server. External targets are checked when attached."}</p><button disabled={self.busy||!self.connected}>{"Register target"}</button>
@@ -1575,16 +1618,48 @@ impl App {
     }
 
     fn environment_view(&self, ctx: &Context<Self>) -> Html {
+        let container = demodex_protocol::NewContainer {
+            name: self.saved.field("container_name"),
+            engine: match self.saved.field("container_engine").as_str() { "podman" => "podman", _ => "docker" }.into(),
+            image: self.saved.field("container_image"),
+            memory_mib: self.saved.field("container_memory").parse().unwrap_or(4096),
+            cpus: self.saved.field("container_cpus").parse().unwrap_or(2),
+        };
         html! {<>
-            <h1>{"Server settings"}</h1><p>{"Accounts, shared execution targets and virtual machines."}</p>
+            <h1>{"Server settings"}</h1><p>{"Accounts and shared execution targets."}</p>
             <section class="runtime-panel"><h2>{"Codex account"}</h2>{if self.runtime["running"].as_bool()==Some(true){if !self.runtime["account"].is_null(){html!{<p>{format!("Signed in {} · {} profile",text(&self.runtime["account"],"email"),text(&self.runtime,"profile"))}</p>}}else{self.button(ctx,"Sign in with ChatGPT",Operation::Login)}}else{self.button(ctx,"Start Codex runtime",Operation::StartRuntime)}}
                 {if !self.login.is_null(){html!{<><a href={text(&self.login,"verificationUrl").to_owned()} target="_blank" rel="noopener noreferrer">{"Continue sign-in in your browser"}</a><p>{"Device code: "}<strong>{text(&self.login,"userCode")}</strong></p></>}}else{Html::default()}}
                 {if let Some(error)=self.runtime["error"].as_str(){html!{<p class="muted">{error}</p>}}else{Html::default()}}
             </section>
             {self.target_registry(ctx)}
+            <section class="container-management"><h2>{"Containers"}</h2>
+                <p class="muted">{"Each container has a private persistent workspace. Bridge networking permits outbound access. The image must already be present for that engine. Container tools require danger-full-access."}</p>
+                {for self.targets.iter().filter(|target|target["kind"]=="container").map(|target|{
+                    let id=text(target,"id").strip_prefix("container-").unwrap_or_default().to_owned();
+                    html!{<section class="environment-card"><h3>{text(target,"name")}</h3><p>{format!("{} · {} · {}",text(target,"engine"),text(target,"image"),text(target,"status"))}</p>
+                        <div class="environment-actions">{if target["status"]=="running"{self.button(ctx,"Stop · keep workspace",Operation::StopContainer{id})}else{self.button(ctx,"Start container",Operation::StartContainer{id})}}</div>
+                        {if let Some(error)=target["error"].as_str(){html!{<p class="error">{error}</p>}}else{Html::default()}}
+                    </section>}
+                })}
+                <details class="create-container"><summary>{"Create a container"}</summary>
+                    <form class="setup" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();Msg::Run(Operation::CreateContainer{input:container.clone()})})}>
+                        {self.field(ctx,"container_name","Container name","Work container")}
+                        <label for="container_engine">{"Container engine"}</label><select id="container_engine" onchange={ctx.link().callback(|e:Event|Msg::Field("container_engine".into(),e.target_unchecked_into::<HtmlSelectElement>().value()))}>
+                            <option value="docker" selected={self.saved.field("container_engine")!="podman"}>{"Docker"}</option>
+                            <option value="podman" selected={self.saved.field("container_engine")=="podman"}>{"Podman"}</option>
+                        </select>
+                        {self.field(ctx,"container_image","Local container image","ubuntu:24.04")}
+                        <div class="resource-fields"><label>{"Container memory (MiB)"}<input type="number" min="256" max="65536" value={self.saved.field("container_memory")} placeholder="4096" oninput={ctx.link().callback(|e:InputEvent|Msg::Field("container_memory".into(),input(e)))}/></label>
+                        <label>{"Container CPUs"}<input type="number" min="1" max="32" value={self.saved.field("container_cpus")} placeholder="2" oninput={ctx.link().callback(|e:InputEvent|Msg::Field("container_cpus".into(),input(e)))}/></label></div>
+                        <p class="muted">{"The daemon needs access to the chosen engine. The container receives its workspace, a private home and, on Nix hosts, the read-only Nix store for the matching Codex executable. No host home or engine socket is mounted."}</p>
+                        <button disabled={self.busy||!self.connected}>{"Create and start container"}</button>
+                    </form>
+                </details>
+            </section>
             <section class="vm-management"><h2>{"Virtual machines"}</h2>
                 {for self.environments.iter().map(|env|{let id=text(env,"id").to_owned();let status=text(env,"status");html!{<section class="environment-card"><h3>{text(env,"name")}</h3><p>{status}</p><div class="environment-actions">{if status=="running"{self.button(ctx,"Stop · keep disk",Operation::StopEnvironment{id})}else{self.button(ctx,"Start",Operation::StartEnvironment{id})}}</div>{if let Some(error)=env["error"].as_str(){html!{<p class="error">{error}</p>}}else{Html::default()}}</section>}})}
-                {if self.environments.is_empty(){html!{<p class="muted">{"No VMs yet. Create one from New Session."}</p>}}else{Html::default()}}
+                {if self.environments.is_empty(){html!{<p class="muted">{"No VMs yet."}</p>}}else{Html::default()}}
+                <details class="create-vm"><summary>{"Create a VM"}</summary>{self.create_vm_form(ctx)}</details>
             </section>
             <details class="device-settings"><summary>{"Install Demodex on this device"}</summary><p>{"Use the PWA's HTTPS address and your browser's Install app / Add to Home Screen action. Updates download automatically and notify you before reloading an active page."}</p></details>
         </>}

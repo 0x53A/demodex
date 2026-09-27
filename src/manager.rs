@@ -134,7 +134,8 @@ impl Manager {
         let generation = uuid::Uuid::new_v4().to_string();
         let outcome=async {
             let (rpc,mut events)=Rpc::connect(&session.endpoint).await?;
-            for target in &session.targets {
+            let staged = self.store.staged_targets(id)?;
+            for target in staged.as_ref().unwrap_or(&session.targets) {
                 rpc.call("environment/add",json!({"environmentId":target.id,"execServerUrl":target.url})).await?;
             }
             let environments=environment_params(&session.targets);
@@ -168,6 +169,14 @@ impl Manager {
                 // Preserve the snapshot so a newly imported conversation has its existing history.
                 self.store.event(id,&json!({"method":"demodex/threadSnapshot","params":result}))?;
                 active_turn=result["thread"]["turns"].as_array().and_then(|turns|turns.iter().rev().find(|t|t["status"]=="inProgress")).and_then(|t|t["id"].as_str()).map(str::to_string);
+                // Only a surviving active turn needs the old executor IDs. An
+                // idle resume after daemon restart must not reconnect stale
+                // executor endpoints that the next explicit turn will replace.
+                if active_turn.is_some() && staged.is_some() {
+                    for target in &session.targets {
+                        rpc.call("environment/add",json!({"environmentId":target.id,"execServerUrl":target.url})).await?;
+                    }
+                }
                 result["thread"]["id"].as_str().context("missing resumed thread id")?.to_string()
             } else {
                 params["environments"] = environments;
@@ -374,13 +383,17 @@ impl Manager {
         let (result, method) = if let Some(result) = steered {
             (result, "demodex/promptSteered")
         } else {
+            let targets = self
+                .store
+                .staged_targets(id)?
+                .unwrap_or_else(|| session.targets.clone());
             let result = live
                 .rpc
                 .call(
                     "turn/start",
                     json!({"threadId":live.thread,
                 "clientUserMessageId":client_message_id,"input":[{"type":"text","text":text}],
-                "environments":environment_params(&session.targets)}),
+                "environments":environment_params(&targets)}),
                 )
                 .await?;
             *turn = result["turn"]["id"].as_str().map(str::to_owned);

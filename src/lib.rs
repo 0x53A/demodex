@@ -160,6 +160,7 @@ impl Service {
     }
     /// Start the configured native runtime; isolated deployments start explicitly.
     async fn start(&self) -> anyhow::Result<()> {
+        self.orchestrator.reap_stale_containers().await?;
         if self.orchestrator.is_host_mode() {
             self.orchestrator.start_runtime().await?;
         }

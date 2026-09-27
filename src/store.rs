@@ -36,8 +36,11 @@ impl Store {
                thread_id TEXT, targets TEXT NOT NULL, status TEXT NOT NULL,
                error TEXT, created INTEGER NOT NULL DEFAULT (unixepoch()));
              CREATE TABLE IF NOT EXISTS ssh_targets (id TEXT PRIMARY KEY, config TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS session_ssh_targets (target_id TEXT PRIMARY KEY REFERENCES ssh_targets(id) ON DELETE CASCADE, session_id TEXT NOT NULL REFERENCES sessions(id));
+             CREATE TABLE IF NOT EXISTS containers (id TEXT PRIMARY KEY, name TEXT NOT NULL, image TEXT NOT NULL, memory_mib INTEGER NOT NULL, cpus INTEGER NOT NULL, status TEXT NOT NULL, error TEXT, engine TEXT NOT NULL DEFAULT 'docker');
              CREATE TABLE IF NOT EXISTS execution_targets (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, cwd TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS session_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id), selection TEXT NOT NULL, pending INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE IF NOT EXISTS staged_session_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id), selection TEXT NOT NULL, targets TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS events (
                seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id),
                at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), message TEXT NOT NULL);
@@ -74,9 +77,16 @@ impl Store {
                thread_id TEXT NOT NULL, call_id TEXT NOT NULL, request TEXT NOT NULL,
                response TEXT NOT NULL, UNIQUE(session_id,thread_id,call_id));
              UPDATE environments SET status='stopped', error=NULL;
+             UPDATE containers SET status='stopped', error=NULL;
              UPDATE sessions SET status='disconnected', error=NULL;
              UPDATE pending SET state='unavailable' WHERE state IN ('pending','responding','delivered');",
         )?;
+        let has_engine = connection.prepare("PRAGMA table_info(containers)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|column| column == "engine");
+        if !has_engine {
+            connection.execute("ALTER TABLE containers ADD COLUMN engine TEXT NOT NULL DEFAULT 'docker'", [])?;
+        }
         // Add identities to existing data without replacing sessions or history.
         let ids = connection.prepare("SELECT id FROM sessions WHERE id NOT IN (SELECT session_id FROM session_presentation)")?
             .query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;

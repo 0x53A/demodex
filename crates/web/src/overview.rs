@@ -1,4 +1,5 @@
 use crate::model::{array, text};
+use demodex_protocol::Operation;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use yew::prelude::*;
@@ -52,7 +53,7 @@ pub fn identity(session: &Value) -> String {
 
 pub fn status_class(status: &str) -> &'static str {
     match status {
-        "working" | "active" => "working",
+        "working" | "active" | "running" => "working",
         "waiting" => "waiting",
         "error" | "systemError" => "failed",
         "disconnected" | "notLoaded" => "disconnected",
@@ -88,9 +89,28 @@ fn session_view(
     environments: &[Value],
     selected: &str,
     select: &Callback<String>,
+    run: &Callback<Operation>,
+    disabled: bool,
 ) -> Html {
     let id = text(session, "id").to_owned();
     let chosen = id == selected;
+    let archive_id = id.clone();
+    let archived = session["archived"] == true;
+    let unavailable = !archived
+        && !matches!(
+            text(session, "status"),
+            "idle" | "connected" | "disconnected"
+        );
+    let action = if archived { "Restore" } else { "Archive" };
+    let label = format!("{action} {}", identity(session));
+    let title = if unavailable {
+        "Stop the turn and resolve pending work in Session controls before archiving."
+    } else if archived {
+        "Restore session without resuming work"
+    } else {
+        "Archive session; keep its history. Pending work must be resolved first."
+    };
+    let run = run.clone();
     let select = select.clone();
     let status = text(session, "status");
     let description = text(&session["presentation"]["context"], "description");
@@ -102,7 +122,7 @@ fn session_view(
         <span class={classes!("agent-status",status_class(status))}>{status}</span>
         {crate::usage::context(session,false)}
         <small class="location-source">{if locations(session).iter().any(|(_,_,reported)|*reported){"Agent-reported project"}else{"Executor directory"}}</small>
-    </button></li>}
+    </button><button type="button" class="session-archive-action" aria-label={label} title={title} disabled={disabled||unavailable} onclick={Callback::from(move |_|run.emit(Operation::Archive{id:archive_id.clone(),archived:!archived}))}>{if archived {"Restore"} else {"[x]"}}</button></li>}
 }
 
 fn folder_view(
@@ -111,6 +131,8 @@ fn folder_view(
     environments: &[Value],
     selected: &str,
     select: &Callback<String>,
+    run: &Callback<Operation>,
+    disabled: bool,
 ) -> Html {
     // Collapse empty ancestry, but retain every folder with an attached agent.
     while folder.sessions.is_empty() && folder.children.len() == 1 {
@@ -122,8 +144,8 @@ fn folder_view(
         folder = next;
     }
     html! {<li class="tree-folder"><div class="folder-name"><span aria-hidden="true">{"▱ "}</span>{name}</div><ul>
-        {for folder.sessions.iter().map(|s|session_view(s,environments,selected,select))}
-        {for folder.children.iter().map(|(name,child)|folder_view(name.clone(),child,environments,selected,select))}
+        {for folder.sessions.iter().map(|s|session_view(s,environments,selected,select,run,disabled))}
+        {for folder.children.iter().map(|(name,child)|folder_view(name.clone(),child,environments,selected,select,run,disabled))}
     </ul></li>}
 }
 
@@ -132,10 +154,12 @@ pub fn view(
     environments: &[Value],
     selected: &str,
     select: Callback<String>,
+    run: Callback<Operation>,
+    disabled: bool,
 ) -> Html {
     let tree = forest(sessions);
     html! {<nav class="session-tree" aria-label="Sessions by project">
-        {if sessions.is_empty(){html!{<p class="muted">{"No sessions on this server yet. Choose New Session to start one."}</p>}}else{html!{<ul>{folder_view("/".into(),&tree,environments,selected,&select)}</ul>}}}
+        {if sessions.is_empty(){html!{<p class="muted">{"No sessions on this server yet. Choose New Session to start one."}</p>}}else{html!{<ul>{folder_view("/".into(),&tree,environments,selected,&select,&run,disabled)}</ul>}}}
     </nav>}
 }
 

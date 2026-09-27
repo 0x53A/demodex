@@ -263,6 +263,10 @@ pub enum Operation {
     RegisterSshTarget {
         input: SshTarget,
     },
+    RegisterSessionSshTarget {
+        id: String,
+        input: SshTarget,
+    },
     CheckSshTarget {
         id: String,
     },
@@ -275,6 +279,20 @@ pub enum Operation {
     SelectTargets {
         id: String,
         input: SelectTargets,
+    },
+    ChangeTargets {
+        id: String,
+        input: SelectTargets,
+        mode: TargetChangeMode,
+    },
+    CreateContainer {
+        input: NewContainer,
+    },
+    StartContainer {
+        id: String,
+    },
+    StopContainer {
+        id: String,
     },
     CreateEnvironment {
         input: NewEnvironment,
@@ -311,6 +329,14 @@ pub struct RegisterTarget {
     pub name: String,
     pub url: String,
     pub cwd: String,
+}
+
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, WormholeTransmaterializable,
+)]
+pub enum TargetChangeMode {
+    NextTurn,
+    Interrupt,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, WormholeTransmaterializable)]
@@ -405,4 +431,14 @@ pub struct SshTarget {
     pub port: Option<u16>,
     pub identity_file: Option<String>,
     pub known_hosts_file: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, WormholeTransmaterializable)]
+#[serde(deny_unknown_fields)]
+pub struct NewContainer {
+    pub name: String,
+    pub engine: String,
+    pub image: String,
+    pub memory_mib: u32,
+    pub cpus: u16,
 }

@@ -38,11 +38,11 @@ in {
       wantedBy = [ "multi-user.target" ];
       wants = [ "network-online.target" ];
       after = [ "network-online.target" "tailscaled.service" ];
-      path = [ cfg.codex pkgs.bash pkgs.coreutils pkgs.nix pkgs.openssh ];
+      path = [ cfg.codex pkgs.bash pkgs.coreutils pkgs.nix pkgs.openssh pkgs.docker pkgs.podman ];
       environment = {
         HOME = config.users.users.${cfg.user}.home;
         SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-        PATH = lib.mkForce "${lib.makeBinPath [ cfg.codex pkgs.bash pkgs.coreutils pkgs.nix pkgs.openssh ]}:/run/wrappers/bin:/run/current-system/sw/bin";
+        PATH = lib.mkForce "${lib.makeBinPath [ cfg.codex pkgs.bash pkgs.coreutils pkgs.nix pkgs.openssh pkgs.docker pkgs.podman ]}:/run/wrappers/bin:/run/current-system/sw/bin";
       };
       serviceConfig = {
         User = cfg.user;

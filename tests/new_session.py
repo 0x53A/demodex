@@ -91,6 +91,11 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
             expect(page.locator('header .current-server')).to_contain_text('Laptop')
             page.get_by_role('button',name='Server settings',exact=True).click()
             expect(page.locator('main').get_by_role('button',name='Create session',exact=True)).to_have_count(0)
+            page.get_by_text('Create a VM',exact=True).click()
+            expect(page.get_by_label('Environment name',exact=True)).to_be_visible()
+            page.get_by_label('Memory (MiB)',exact=True).fill('12')
+            assert not page.get_by_label('Memory (MiB)',exact=True).evaluate('e=>e.checkValidity()')
+            page.get_by_label('Memory (MiB)',exact=True).fill('4096')
             page.get_by_role('button',name='+ New Session',exact=True).click()
             dialog=page.get_by_role('dialog',name='New Session',exact=True)
             dialog.get_by_label('Session name',exact=True).fill('Remote only')
@@ -128,11 +133,6 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
                 if width==390: page.get_by_role('button',name='← Sessions',exact=True).click()
                 page.get_by_role('button',name='+ New Session',exact=True).click()
                 dialog.get_by_label('Session name',exact=True).fill('Keep this draft')
-                dialog.get_by_text('Create a VM',exact=True).click()
-                expect(dialog.get_by_label('Environment name',exact=True)).to_be_visible()
-                dialog.get_by_label('Memory (MiB)',exact=True).fill('12')
-                assert not dialog.get_by_label('Memory (MiB)',exact=True).evaluate('e=>e.checkValidity()')
-                dialog.get_by_label('Memory (MiB)',exact=True).fill('4096')
                 dialog.get_by_text('Resume a saved session',exact=True).click()
                 expect(dialog.get_by_label('Resumed session name',exact=True)).to_have_value('Keep resume draft')
                 expect(dialog.get_by_label('Existing Codex thread ID',exact=True)).to_have_value('saved-thread')
@@ -145,11 +145,18 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
                 assert page.evaluate('document.body.scrollWidth <= innerWidth')
             page.get_by_role('button',name='Remote only',exact=False).click()
             expect(page.get_by_label('Message',exact=True)).to_have_value('Unsent conversation draft')
+            page.set_viewport_size({'width':1200,'height':850})
+            page.get_by_role('button',name='+ New Session',exact=True).click()
+            dialog.get_by_label('Session name',exact=True).fill('No executors')
+            expect(dialog.get_by_role('button',name='Create session',exact=True)).to_be_enabled()
+            dialog.get_by_role('button',name='Create session',exact=True).click()
+            empty=next(s for s in api('/sessions') if s['name']=='No executors')
+            assert empty['targets']==[] and api('/sessions/'+empty['id'])['target_selection']==[]
             assert not errors,errors
             browser.close()
         calls=[json.loads(line) for line in (root/'calls.jsonl').read_text().splitlines()]
         starts=[call for call in calls if call['method']=='thread/start']
-        assert len(starts)==2 and all(len(call['params']['environments'])==1 for call in starts), starts
+        assert len(starts)==3 and sorted(len(call['params']['environments']) for call in starts)==[0,1,1], starts
         assert not any(call['method']=='turn/start' for call in calls)
         daemon.terminate();daemon.wait(timeout=20)
         daemon=launch()

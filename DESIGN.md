@@ -130,23 +130,35 @@ history, identity, drafts and execution configuration. Only stopped sessions
 can be archived: live sessions must be idle, have no pending decisions or queued
 messages, and have no active goal. Archive never interrupts a turn or pauses a
 goal. The operator uses Interrupt and the existing queue/goal controls first.
-Archived sessions appear in a collapsed section of the overview and provide a
-Restore action. Restore does not resume work. Archived sessions cannot start
+The session tree exposes archive as a separate [x] button with an accessible
+Archive label. Archived sessions appear in a collapsed section of the overview
+and provide a Restore action beside each entry. Restore does not resume work. Archived sessions cannot start
 new work through Demodex until restored; externally started turns make their
 session visible again. Archive state persists across daemon restarts.
 
 ## Execution target selection
 
 Environments contains the daemon's shared target registry: configured host,
-managed VMs and named external executor endpoints, with attached sessions shown.
+managed VMs, managed containers and named external executor endpoints, with
+attached sessions shown.
 A session's Execution targets picker selects an ordered set and working directory
 for each target. Multiple conversations can use the same VM. The first target
 receives image uploads; selecting no targets explicitly disables executor tools.
 
-Selection is editable only while connected and idle, with no pending decisions,
-queued work or active goal. Saving does not start a turn. Display “Targets saved”
-until the next explicit message applies the list; goal and queue resumption must
-not bypass that state. VM loss preserves selections and requires reconnect.
+Selection is editable while connected, with no pending decisions, queued work
+or active goal. During a turn, show “Save for next turn” and “Interrupt and save”.
+The former preserves the current turn; the latter waits for confirmed interruption
+and idle state before saving. Acknowledgement alone is insufficient, and errors
+or timeouts never trigger a replay or silently save the change. Idle sessions
+retain “Save targets”. Adding a new private SSH executor still requires idle.
+
+Saving does not start a turn or terminate background jobs. Keep pending selection
+separate from effective targets, and show the current turn's targets when a change
+is pending. A composer notice explains that Send still steers active work with
+its current targets. Pause image uploads during active work with pending targets
+to avoid uploading a path into an environment that turn cannot access.
+The next explicit new turn applies the list; goal and queue resumption must not
+bypass that state. VM or container loss preserves selections and requires reconnect.
 
 ## Independent interaction panels
 
@@ -159,7 +171,7 @@ Protocol diagnostics open separately and are serialized only when requested.
 Group session behavior (model and goal), execution (targets and sandbox),
 context/identity, and history actions in that order. Keep archive/restore apart
 from routine execution settings. Server Settings starts with account access,
-then shared targets and VM lifecycle, with device installation last.
+then shared targets, container and VM lifecycle, with device installation last.
 
 Pending questions/approvals and queued messages occupy a bounded independently
 scrolling panel above the composer. They remain reachable regardless of history
@@ -175,6 +187,14 @@ turns omitted after compaction. Preserve tool expansion, text selection and
 scroll position for unchanged messages. Keep the raw event log for diagnostics.
 This is incremental rendering, not virtualization: initial loading and retained
 browser history still scale with the full conversation.
+
+Conversation items use readable labels and show reported tool status, command
+exit codes and duration, affected file paths with collapsed diffs, searches,
+reasoning summaries, streamed plan text and step progress. Tool progress, retry
+notices and failed/interrupted turns appear in the transcript. Session errors
+remain visible outside controls; connection loss explicitly leaves activity
+unconfirmed. Raw details remain expandable for unfamiliar item types. These
+indicators report Codex events, never infer success from silence or elapsed time.
 
 ## Usage indicators
 
@@ -213,8 +233,9 @@ management opens a modal from the header. The sidebar contains Server Settings,
 then Sessions, New Session, and the folder tree. There is no External Session UI.
 
 New Session opens its own widget without navigating away from the conversation.
-It selects registered host, SSH, VM or external executors, with explicit working
-directories and a primary target. SSH-only creation requires danger-full-access.
+It selects registered host, SSH, container, VM or external executors, with explicit
+working directories and a primary target. SSH and container executors require
+danger-full-access.
 Inline VM provisioning adds the resulting VM to the draft selection; creating
 the session remains a separate explicit action. Draft fields survive closing.
 Saved host-thread discovery and explicit resume also live in this widget.
@@ -222,7 +243,7 @@ Creation and resume have independent name and sandbox drafts; completing either
 form leaves the other intact. Setup and session-control drafts survive switching
 servers and remain scoped to their original server. Goal status actions preserve
 unsaved objective and budget edits.
-Server Settings retains account/login, target registration and VM lifecycle.
+Server Settings retains account/login, target registration and VM/container lifecycle.
 
 New sessions persist daemon runtime ownership separately from execution targets.
 Creating or reconnecting an SSH-only session does not attach a host or VM target.

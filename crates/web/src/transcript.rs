@@ -40,6 +40,29 @@ impl Transcript {
         }
     }
 
+    fn finish_turn(&mut self, turn_id: &str) {
+        // A lost completion event is not evidence that the tool succeeded, or
+        // that a remote process stopped. Do not leave historical work "Running".
+        let unfinished: Vec<_> = self
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter())
+            .filter(|item| {
+                item["_demodexLifecycle"] == "running"
+                    && (text(item, "_demodexTurnId").is_empty()
+                        || text(item, "_demodexTurnId") == turn_id)
+            })
+            .map(|item| {
+                let mut item = item.as_ref().clone();
+                item["_demodexLifecycle"] = json!("ended");
+                item
+            })
+            .collect();
+        for item in unfinished {
+            self.put(&item);
+        }
+    }
+
     pub fn append(&mut self, events: &[Value]) {
         for event in events {
             if let Some(seq) = event["seq"].as_i64() {
@@ -56,14 +79,98 @@ impl Transcript {
                         for turn in turns {
                             if let Some(items) = turn["items"].as_array() {
                                 for item in items {
-                                    self.put(item);
+                                    let mut item = item.clone();
+                                    if item.is_object()
+                                        && let Some(&i) = self.positions.get(text(&item, "id"))
+                                    {
+                                        let old = &self.chunks[i / CHUNK_SIZE][i % CHUNK_SIZE];
+                                        for field in [
+                                            "_demodexLifecycle",
+                                            "_demodexProgress",
+                                            "_demodexTurnId",
+                                        ] {
+                                            if !old[field].is_null() {
+                                                item[field] = old[field].clone();
+                                            }
+                                        }
+                                    }
+                                    self.put(&item);
                                 }
                             }
                         }
                     }
                 }
-                "item/started" | "item/completed" => self.put(&params["item"]),
-                "item/agentMessage/delta" | "item/commandExecution/outputDelta" => {
+                "item/started" | "item/completed" => {
+                    let mut item = params["item"].clone();
+                    if item.is_object() {
+                        if !text(params, "turnId").is_empty() {
+                            item["_demodexTurnId"] = params["turnId"].clone();
+                        }
+                        item["_demodexLifecycle"] =
+                            json!(if text(message, "method") == "item/started" {
+                                "running"
+                            } else {
+                                "completed"
+                            });
+                        self.put(&item);
+                    }
+                }
+                "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
+                    let id = text(params, "itemId");
+                    let summary = text(message, "method") == "item/reasoning/summaryTextDelta";
+                    let field = if summary { "summary" } else { "content" };
+                    let index_field = if summary {
+                        "summaryIndex"
+                    } else {
+                        "contentIndex"
+                    };
+                    let Some(index) = params[index_field].as_u64().filter(|i| *i < 4096) else {
+                        continue;
+                    };
+                    if id.is_empty() {
+                        continue;
+                    }
+                    let mut item = self
+                        .positions
+                        .get(id)
+                        .map(|&i| self.chunks[i / CHUNK_SIZE][i % CHUNK_SIZE].as_ref().clone())
+                        .unwrap_or_else(|| json!({"id":id,"type":"reasoning"}));
+                    if !item[field].is_array() {
+                        item[field] = json!([]);
+                    }
+                    let parts = item[field].as_array_mut().unwrap();
+                    parts.resize(parts.len().max(index as usize + 1), json!(""));
+                    let mut part = parts[index as usize]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    part.push_str(text(params, "delta"));
+                    parts[index as usize] = json!(part);
+                    self.put(&item);
+                }
+                "item/mcpToolCall/progress" => {
+                    let id = text(params, "itemId");
+                    if let Some(&i) = self.positions.get(id) {
+                        let mut item = self.chunks[i / CHUNK_SIZE][i % CHUNK_SIZE].as_ref().clone();
+                        item["_demodexProgress"] = params["message"].clone();
+                        self.put(&item);
+                    }
+                }
+                "turn/plan/updated" => {
+                    self.put(&json!({"id":format!("demodex:plan:{}",text(params,"turnId")),"type":"demodexPlan","plan":params["plan"],"text":params["explanation"]}));
+                }
+                "error" => {
+                    self.put(&json!({"id":format!("demodex:error:{}",self.cursor),"type":"demodexError","text":params["error"]["message"],"retrying":params["willRetry"]}));
+                }
+                "turn/completed" => {
+                    self.finish_turn(text(&params["turn"], "id"));
+                    if matches!(text(&params["turn"], "status"), "failed" | "interrupted") {
+                        self.put(&json!({"id":format!("demodex:turn:{}",text(&params["turn"],"id")),"type":"demodexTurnEnd","status":params["turn"]["status"],"text":params["turn"]["error"]["message"]}));
+                    }
+                }
+                "item/agentMessage/delta"
+                | "item/commandExecution/outputDelta"
+                | "item/plan/delta" => {
                     let id = text(params, "itemId");
                     let delta = text(params, "delta");
                     if id.is_empty() || delta.is_empty() {
@@ -72,7 +179,7 @@ impl Transcript {
                     let output = text(message, "method") == "item/commandExecution/outputDelta";
                     let field = if output { "aggregatedOutput" } else { "text" };
                     if !self.positions.contains_key(id) {
-                        self.put(&json!({"id":id,"type":if output {"commandExecution"} else {"agentMessage"}}));
+                        self.put(&json!({"id":id,"type":if output {"commandExecution"} else if text(message,"method")=="item/plan/delta" {"plan"} else {"agentMessage"}}));
                     }
                     let index = self.positions[id];
                     let chunks = Rc::make_mut(&mut self.chunks);
@@ -97,6 +204,94 @@ mod tests {
     fn event(seq: i64, method: &str, params: Value) -> Value {
         json!({"seq":seq,"message":{"method":method,"params":params}})
     }
+    #[test]
+    fn progress_plans_and_errors_survive_paging_and_completion() {
+        let events = vec![
+            event(
+                1,
+                "item/started",
+                json!({"item":{"id":"r","type":"reasoning","summary":[]}}),
+            ),
+            event(
+                2,
+                "item/reasoning/summaryTextDelta",
+                json!({"itemId":"r","summaryIndex":1,"delta":"Second"}),
+            ),
+            event(
+                3,
+                "item/reasoning/summaryTextDelta",
+                json!({"itemId":"r","summaryIndex":0,"delta":"First"}),
+            ),
+            event(
+                4,
+                "item/reasoning/summaryTextDelta",
+                json!({"itemId":"r","summaryIndex":0,"delta":" summary"}),
+            ),
+            event(
+                5,
+                "item/plan/delta",
+                json!({"itemId":"p","delta":"Proposed plan"}),
+            ),
+            event(
+                6,
+                "turn/plan/updated",
+                json!({"turnId":"t","plan":[{"step":"Build","status":"inProgress"}]}),
+            ),
+            event(
+                7,
+                "item/started",
+                json!({"item":{"id":"m","type":"mcpToolCall","status":"inProgress"}}),
+            ),
+            event(
+                8,
+                "item/mcpToolCall/progress",
+                json!({"itemId":"m","message":"Reading files"}),
+            ),
+            event(
+                9,
+                "error",
+                json!({"error":{"message":"Connection interrupted"},"willRetry":true}),
+            ),
+            event(
+                10,
+                "turn/plan/updated",
+                json!({"turnId":"t","plan":[{"step":"Build","status":"completed"}]}),
+            ),
+        ];
+        let mut whole = Transcript::default();
+        whole.append(&events);
+        assert_eq!(whole.len, 5);
+        assert_eq!(
+            whole.chunks[0][0]["summary"],
+            json!(["First summary", "Second"])
+        );
+        assert_eq!(whole.chunks[0][1]["type"], "plan");
+        assert_eq!(whole.chunks[0][2]["plan"][0]["status"], "completed");
+        assert_eq!(whole.chunks[0][3]["_demodexProgress"], "Reading files");
+        assert_eq!(whole.chunks[0][4]["retrying"], true);
+        for size in [1, 3, 7] {
+            let mut paged = Transcript::default();
+            for page in events.chunks(size) {
+                paged.append(page);
+            }
+            assert_eq!(whole.chunks, paged.chunks);
+        }
+        whole.append(&[event(
+            11,
+            "item/completed",
+            json!({"item":{"id":"r","type":"reasoning","summary":["Final summary"]}}),
+        )]);
+        assert_eq!(whole.chunks[0][0]["summary"], json!(["Final summary"]));
+        whole.append(&[event(
+            12,
+            "turn/completed",
+            json!({"turn":{"id":"t","status":"failed","error":{"message":"Cannot continue"}}}),
+        )]);
+        assert_eq!(whole.chunks[0].last().unwrap()["text"], "Cannot continue");
+        assert_eq!(whole.chunks[0][3]["_demodexLifecycle"], "ended");
+        assert_eq!(whole.chunks[0][0]["_demodexLifecycle"], "completed");
+    }
+
     #[test]
     fn streaming_only_changes_its_chunk_and_deduplicates_delivery() {
         let mut transcript = Transcript::default();

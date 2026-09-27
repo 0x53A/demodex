@@ -109,23 +109,7 @@ Subsystem sftp internal-sftp
             api('/targets/ssh',dict(config,destination='-oProxyCommand=bad'),error='SSH config alias')
             (root/'empty_hosts').touch()
             api('/targets/ssh',dict(config,known_hosts_file=str(root/'empty_hosts')),error='host key verification failed')
-            # Add through the actual Yew settings form and authenticated actor mutation.
-            with sync_playwright() as playwright:
-                browser=playwright.chromium.launch(executable_path='/run/current-system/sw/bin/google-chrome',headless=True,args=['--no-sandbox'])
-                page=browser.new_page(viewport={'width':390,'height':844})
-                page.goto(f'http://127.0.0.1:{api_port}')
-                page.get_by_label('Access token').fill(token)
-                page.get_by_role('button',name='Connect host',exact=True).click()
-                expect(page.locator('header .indicator')).to_have_text('CONNECTED',timeout=20000)
-                page.get_by_role('button',name='Server settings',exact=True).click()
-                page.get_by_text('Add SSH target',exact=True).click()
-                for label,value in [('SSH target name',config['name']),('SSH destination',config['destination']),('SSH port (optional)',str(ssh_port)),('Identity file on this server (optional)',config['identity_file']),('Known hosts file on this server (optional)',config['known_hosts_file']),('Remote working directory',str(root))]:
-                    page.get_by_label(label,exact=True).fill(value)
-                page.get_by_role('button',name='Check and add SSH target',exact=True).click()
-                expect(page.locator('.target-registry h3').filter(has_text=config['name'])).to_have_text(config['name'],timeout=30000)
-                page.get_by_role('button',name='Check SSH connection',exact=True).click()
-                expect(page.get_by_text('SSH connection verified.',exact=True)).to_be_visible(timeout=30000)
-                browser.close()
+            api('/targets/ssh',config)
             target=next(t for t in api('/targets') if t['kind']=='ssh')
             assert next(t for t in api('/targets') if t['id']==target['id'])['kind']=='ssh'
             api('/targets/'+target['id']+'/check',{})
@@ -137,6 +121,29 @@ Subsystem sftp internal-sftp
             assert not direct_detail['targets_pending']
             assert not any(event['message'].get('method')=='demodex/promptAccepted' for event in api('/sessions/'+direct['id']+'/events'))
             api('/sessions/'+direct['id']+'/targets',{'targets':[]})
+
+            private=api('/runtime/sessions',{'name':'Private SSH','targets':[],'sandbox':'danger-full-access'})
+            with sync_playwright() as playwright:
+                browser=playwright.chromium.launch(executable_path='/run/current-system/sw/bin/google-chrome',headless=True,args=['--no-sandbox'])
+                page=browser.new_page(viewport={'width':390,'height':844})
+                page.goto(f'http://127.0.0.1:{api_port}')
+                page.get_by_label('Access token').fill(token)
+                page.get_by_role('button',name='Connect host',exact=True).click()
+                expect(page.locator('header .indicator')).to_have_text('CONNECTED',timeout=20000)
+                page.get_by_role('button',name='Private SSH',exact=False).click()
+                page.get_by_role('button',name='Session controls',exact=True).click()
+                dialog=page.get_by_role('dialog',name='Session controls',exact=True)
+                dialog.locator('.target-picker > summary').click()
+                dialog.get_by_text('Add SSH executor to this session',exact=True).click()
+                for label,value in [('SSH target name','Private machine'),('SSH destination',config['destination']),('SSH port (optional)',str(ssh_port)),('Identity file on this server (optional)',config['identity_file']),('Known hosts file on this server (optional)',config['known_hosts_file']),('Remote working directory',str(root))]:
+                    dialog.get_by_label(label,exact=True).fill(value)
+                dialog.get_by_role('button',name='Check and add SSH executor',exact=True).click()
+                expect(dialog.locator('.target-picker')).to_contain_text('Private machine',timeout=30000)
+                browser.close()
+            private_target=next(t for t in api('/targets') if t['name']=='Private machine')
+            assert private_target['owner']==private['id']
+            assert api('/sessions/'+private['id'])['target_selection']==[{'id':private_target['id'],'cwd':str(root)}]
+            api('/sessions/'+direct['id']+'/targets',{'targets':[{'id':private_target['id'],'cwd':str(root)}]},error='another session')
 
             session=api('/sessions',{'name':'SSH fixture','endpoint':f'ws://127.0.0.1:{codex_port}','targets':[]})
             sid=session['id']

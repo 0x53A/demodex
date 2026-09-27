@@ -81,10 +81,24 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         Targets => targets(app).await?,
         RegisterTarget { input } => register_target(app, input).await?,
         RegisterSshTarget { input } => register_ssh_target(app, input.into()).await?,
+        RegisterSessionSshTarget { id, input } => app.orchestrator.register_session_ssh_target(&id, input.into()).await?,
         CheckSshTarget { id } => check_ssh_target(app, id).await?,
         ReconnectSshTarget { id } => reconnect_ssh_target(app, id).await?,
         ForgetTarget { id } => forget_target(app, id).await?,
         SelectTargets { id, input } => select_targets(app, id, input).await?,
+        ChangeTargets { id, input, mode } => {
+            app.orchestrator.change_targets(&id, &input.targets, mode).await?;
+            json!({"ok":true,"applies_on_next_message":true})
+        }
+        CreateContainer { input } => app.orchestrator.create_container(input).await?,
+        StartContainer { id } => {
+            app.orchestrator.start_container(&id).await?;
+            json!({"ok":true})
+        }
+        StopContainer { id } => {
+            app.orchestrator.stop_container(&id).await?;
+            json!({"ok":true})
+        }
         CreateEnvironment { input } => {
             return Ok(Response::Environment(environment_create(app, input).await?));
         }

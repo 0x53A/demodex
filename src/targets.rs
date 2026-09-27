@@ -14,6 +14,18 @@ pub struct RegisteredTarget {
     pub cwd: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ContainerRecord {
+    pub id: String,
+    pub name: String,
+    pub engine: String,
+    pub image: String,
+    pub memory_mib: u32,
+    pub cpus: u16,
+    pub status: String,
+    pub error: Option<String>,
+}
+
 pub fn validate_selection(selection: &[Selection]) -> Result<()> {
     ensure!(selection.len() <= 32, "Select at most 32 targets");
     let mut ids = std::collections::HashSet::new();
@@ -36,6 +48,41 @@ pub fn validate_cwd(cwd: &str) -> Result<()> {
 }
 
 impl Store {
+    pub fn containers(&self) -> Result<Vec<ContainerRecord>> {
+        let db = self.lock()?;
+        let mut query = db.prepare("SELECT id,name,engine,image,memory_mib,cpus,status,error FROM containers ORDER BY rowid")?;
+        Ok(query.query_map([], |row| Ok(ContainerRecord {
+            id: row.get(0)?, name: row.get(1)?, engine: row.get(2)?, image: row.get(3)?,
+            memory_mib: row.get(4)?, cpus: row.get(5)?,
+            status: row.get(6)?, error: row.get(7)?,
+        }))?.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn container(&self, id: &str) -> Result<ContainerRecord> {
+        self.containers()?.into_iter().find(|container| container.id == id)
+            .context("Unknown container")
+    }
+
+    pub fn container_create(&self, name: &str, engine: &str, image: &str, memory_mib: u32, cpus: u16) -> Result<ContainerRecord> {
+        ensure!(!name.trim().is_empty() && name.len() <= 120, "Container name must be 1–120 characters");
+        ensure!(matches!(engine, "docker" | "podman"), "Choose Docker or Podman");
+        ensure!(!image.is_empty() && image.len() <= 256 && !image.starts_with('-')
+            && !image.chars().any(char::is_whitespace) && !image.contains('\0'),
+            "Enter a valid local container image reference");
+        ensure!((256..=65536).contains(&memory_mib) && (1..=32).contains(&cpus),
+            "Invalid container resource limits");
+        let id = uuid::Uuid::new_v4().to_string();
+        self.lock()?.execute("INSERT INTO containers(id,name,engine,image,memory_mib,cpus,status,error) VALUES(?1,?2,?3,?4,?5,?6,'stopped',NULL)",
+            params![id, name.trim(), engine, image, memory_mib, cpus])?;
+        self.container(&id)
+    }
+
+    pub fn container_status(&self, id: &str, status: &str, error: Option<&str>) -> Result<()> {
+        ensure!(self.lock()?.execute("UPDATE containers SET status=?2,error=?3 WHERE id=?1",
+            params![id,status,error])? == 1, "Unknown container");
+        Ok(())
+    }
+
     /// Idempotent migration, also used after legacy creation endpoints.
     pub fn ensure_target_selection(&self, id: &str) -> Result<()> {
         if self.target_selection(id)?.is_some() {
@@ -98,7 +145,7 @@ impl Store {
         let value: Option<String> = self
             .lock()?
             .query_row(
-                "SELECT selection FROM session_targets WHERE session_id=?1",
+                "SELECT COALESCE((SELECT selection FROM staged_session_targets WHERE session_id=?1), selection) FROM session_targets WHERE session_id=?1",
                 [id],
                 |r| r.get(0),
             )
@@ -120,11 +167,49 @@ impl Store {
             .unwrap_or(false))
     }
 
-    pub fn targets_applied(&self, id: &str) -> Result<()> {
-        self.lock()?.execute(
-            "UPDATE session_targets SET pending=0 WHERE session_id=?1",
+    pub fn staged_targets(&self, id: &str) -> Result<Option<Vec<Target>>> {
+        let value: Option<String> = self
+            .lock()?
+            .query_row(
+                "SELECT targets FROM staged_session_targets WHERE session_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        value
+            .map(|v| serde_json::from_str(&v).map_err(Into::into))
+            .transpose()
+    }
+
+    pub fn stage_target_selection(
+        &self,
+        id: &str,
+        selection: &[Selection],
+        targets: &[Target],
+    ) -> Result<()> {
+        validate_selection(selection)?;
+        let mut db = self.lock()?;
+        let tx = db.transaction()?;
+        tx.execute("INSERT INTO staged_session_targets VALUES(?1,?2,?3) ON CONFLICT(session_id) DO UPDATE SET selection=excluded.selection, targets=excluded.targets",
+            params![id,serde_json::to_string(selection)?,serde_json::to_string(targets)?])?;
+        tx.execute(
+            "UPDATE session_targets SET pending=1 WHERE session_id=?1",
             [id],
         )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn targets_applied(&self, id: &str) -> Result<()> {
+        let mut db = self.lock()?;
+        let tx = db.transaction()?;
+        tx.execute("UPDATE sessions SET targets=(SELECT targets FROM staged_session_targets WHERE session_id=?1) WHERE id=?1 AND EXISTS(SELECT 1 FROM staged_session_targets WHERE session_id=?1)",[id])?;
+        tx.execute("UPDATE session_targets SET selection=COALESCE((SELECT selection FROM staged_session_targets WHERE session_id=?1),selection),pending=0 WHERE session_id=?1",[id])?;
+        tx.execute(
+            "DELETE FROM staged_session_targets WHERE session_id=?1",
+            [id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -137,6 +222,10 @@ impl Store {
         validate_selection(selection)?;
         let mut db = self.lock()?;
         let tx = db.transaction()?;
+        tx.execute(
+            "DELETE FROM staged_session_targets WHERE session_id=?1",
+            [id],
+        )?;
         tx.execute("INSERT INTO session_targets VALUES(?1,?2,1) ON CONFLICT(session_id) DO UPDATE SET selection=excluded.selection,pending=1", params![id,serde_json::to_string(selection)?])?;
         tx.execute(
             "UPDATE sessions SET targets=?2 WHERE id=?1",
@@ -210,13 +299,29 @@ impl Store {
         Ok(id)
     }
 
+    pub fn own_ssh_target(&self, target_id: &str, session_id: &str) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO session_ssh_targets VALUES(?1,?2)",
+            params![target_id, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn ssh_target_owner(&self, target_id: &str) -> Result<Option<String>> {
+        Ok(self.lock()?.query_row(
+            "SELECT session_id FROM session_ssh_targets WHERE target_id=?1",
+            [target_id],
+            |row| row.get(0),
+        ).optional()?)
+    }
+
     pub fn target_users(&self, id: &str) -> Result<Vec<String>> {
         let db = self.lock()?;
-        let mut q = db.prepare("SELECT session_id,selection FROM session_targets")?;
+        let mut q = db.prepare("SELECT session_id,selection FROM session_targets UNION SELECT session_id,selection FROM staged_session_targets")?;
         let rows = q
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows.into_iter()
+        let users: std::collections::BTreeSet<String> = rows.into_iter()
             .filter_map(
                 |(session, value)| match serde_json::from_str::<Vec<Selection>>(&value) {
                     Ok(selection) if selection.iter().any(|t| t.id == id) => Some(Ok(session)),
@@ -224,7 +329,8 @@ impl Store {
                     Err(error) => Some(Err(error.into())),
                 },
             )
-            .collect()
+            .collect::<Result<_>>()?;
+        Ok(users.into_iter().collect())
     }
 
     pub fn forget_target(&self, id: &str) -> Result<()> {
@@ -254,6 +360,188 @@ mod tests {
     use serde_json::{Value, json};
     use std::sync::Arc;
     use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn reconnect_preserves_staged_and_active_targets_until_new_turn() -> Result<()> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("ws://{}", listener.local_addr()?);
+        let calls = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let log = calls.clone();
+        let server = tokio::spawn(async move {
+            for connection in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                while let Some(Ok(Message::Text(raw))) = ws.next().await {
+                    let req: Value = serde_json::from_str(&raw).unwrap();
+                    if req.get("id").is_none() { continue; }
+                    log.lock().await.push(req.clone());
+                    let result = match req["method"].as_str().unwrap() {
+                        "initialize" | "environment/add" => json!({}),
+                        "thread/resume" => json!({"thread":{"id":"thread","turns":if connection < 2 {json!([{"id":"active","status":"inProgress","items":[]}])}else{json!([])}}}),
+                        "turn/steer" => json!({"turnId":"active"}),
+                        "turn/start" => json!({"turn":{"id":"next"}}),
+                        other => panic!("unexpected {other}"),
+                    };
+                    ws.send(Message::Text(json!({"id":req["id"],"result":result}).to_string().into())).await.unwrap();
+                }
+            }
+        });
+        let root = tempfile::tempdir()?;
+        let store = Store::open(&root.path().join("db"))?;
+        let session = store.create("Reconnect", &endpoint, &[], None)?;
+        store.thread(&session.id, "thread")?;
+        let a = store.register_target("A", "ws://localhost:2", "/a")?;
+        let b = store.register_target("B", "ws://localhost:3", "/b")?;
+        let effective = vec![Target { id:a.id.clone(),url:a.url.clone(),cwd:a.cwd.clone() }];
+        let staged = vec![Target { id:b.id.clone(),url:b.url.clone(),cwd:b.cwd.clone() }];
+        let selection = vec![Selection { id:b.id.clone(),cwd:b.cwd.clone() }];
+        store.save_target_selection(&session.id, &[Selection { id:a.id.clone(),cwd:a.cwd.clone() }], &effective)?;
+        store.targets_applied(&session.id)?;
+        let manager = Manager::new(store);
+        let orchestrator = Orchestrator::new(manager.clone(), root.path().into(), None, None, None);
+        orchestrator.connect_session(&session.id).await?;
+        let effective = manager.store.get(&session.id)?.targets;
+        manager.store.stage_target_selection(&session.id, &selection, &staged)?;
+        manager.disconnect(&session.id, "fixture connection lost").await?;
+        calls.lock().await.clear();
+        orchestrator.connect_session(&session.id).await?;
+        assert_eq!(manager.store.get(&session.id)?.targets, effective);
+        let staged = manager.store.staged_targets(&session.id)?.expect("staging survives reconnect");
+        assert_eq!(staged.len(), 1);
+        assert!(staged[0].id.starts_with(&b.id));
+        assert_eq!(staged[0].url, b.url);
+        assert_eq!(staged[0].cwd, b.cwd);
+        assert_eq!(manager.store.target_selection(&session.id)?, Some(selection));
+        for id in [&a.id, &b.id] {
+            assert_eq!(manager.store.target_users(id)?, vec![session.id.clone()]);
+            assert!(manager.store.forget_target(id).is_err());
+        }
+        for target in effective.iter().chain(staged.iter()) {
+            assert!(calls.lock().await.iter().any(|c| c["method"]=="environment/add" && c["params"]["environmentId"]==target.id));
+        }
+        manager.prompt(&session.id, "Keep working").await?;
+        assert_eq!(manager.store.get(&session.id)?.targets, effective);
+        assert!(manager.store.targets_pending(&session.id)?);
+        assert_eq!(calls.lock().await.last().unwrap()["method"], "turn/steer");
+        *manager.runtime(&session.id).await?.turn.lock().await = None;
+        manager.prompt(&session.id, "Use the new target").await?;
+        assert_eq!(manager.store.get(&session.id)?.targets, staged);
+        assert!(manager.store.staged_targets(&session.id)?.is_none());
+        assert!(manager.store.target_users(&a.id)?.is_empty());
+        assert_eq!(calls.lock().await.last().unwrap()["params"]["environments"], json!([{"environmentId":staged[0].id,"cwd":"/b"}]));
+        // After a runtime restart, idle history needs no connection to the
+        // obsolete effective executor when the next selection removes it.
+        manager.store.stage_target_selection(&session.id, &[], &[])?;
+        manager.disconnect(&session.id, "fixture runtime restarted").await?;
+        calls.lock().await.clear();
+        orchestrator.connect_session(&session.id).await?;
+        assert!(!calls.lock().await.iter().any(|c| c["method"]=="environment/add"));
+        assert_eq!(manager.store.get(&session.id)?.targets, staged);
+        assert_eq!(manager.store.staged_targets(&session.id)?, Some(vec![]));
+        manager.prompt(&session.id, "Continue without targets").await?;
+        assert!(manager.store.get(&session.id)?.targets.is_empty());
+        assert!(manager.store.target_users(&b.id)?.is_empty());
+        server.abort();
+        Ok(())
+    }
+
+    #[test]
+    fn staged_selection_preserves_effective_targets_and_both_sets_of_users() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("db");
+        let store = Store::open(&path)?;
+        let session = store.create("Stage", "ws://localhost:1", &[], None)?;
+        store.ensure_target_selection(&session.id)?;
+        let a = store.register_target("A", "ws://localhost:2", "/a")?;
+        let b = store.register_target("B", "ws://localhost:3", "/b")?;
+        let target_a = Target {
+            id: a.id.clone(),
+            url: a.url.clone(),
+            cwd: a.cwd.clone(),
+        };
+        let target_b = Target {
+            id: b.id.clone(),
+            url: b.url.clone(),
+            cwd: b.cwd.clone(),
+        };
+        let first = vec![Selection {
+            id: a.id.clone(),
+            cwd: a.cwd.clone(),
+        }];
+        let next = vec![Selection {
+            id: b.id.clone(),
+            cwd: b.cwd.clone(),
+        }];
+        store.save_target_selection(&session.id, &first, std::slice::from_ref(&target_a))?;
+        store.targets_applied(&session.id)?;
+        store.stage_target_selection(&session.id, &next, std::slice::from_ref(&target_b))?;
+        assert_eq!(store.get(&session.id)?.targets, vec![target_a.clone()]);
+        assert_eq!(store.target_users(&a.id)?, vec![session.id.clone()]);
+        assert_eq!(store.target_users(&b.id)?, vec![session.id.clone()]);
+        assert!(store.forget_target(&a.id).is_err());
+        assert!(store.forget_target(&b.id).is_err());
+        drop(store);
+        let store = Store::open(&path)?;
+        assert!(store.targets_pending(&session.id)?);
+        assert_eq!(store.target_selection(&session.id)?, Some(next));
+        assert_eq!(store.get(&session.id)?.targets, vec![target_a]);
+        store.targets_applied(&session.id)?;
+        assert_eq!(store.get(&session.id)?.targets, vec![target_b]);
+        assert!(store.target_users(&a.id)?.is_empty());
+        assert!(!store.targets_pending(&session.id)?);
+        store.stage_target_selection(&session.id, &[], &[])?;
+        assert_eq!(store.get(&session.id)?.targets.len(), 1);
+        store.targets_applied(&session.id)?;
+        assert!(store.get(&session.id)?.targets.is_empty());
+        assert!(store.target_users(&b.id)?.is_empty());
+        // A later idle selection supersedes any saved next-turn selection.
+        store.stage_target_selection(&session.id, &first, &[])?;
+        store.save_target_selection(&session.id, &[], &[])?;
+        assert!(store.staged_targets(&session.id)?.is_none());
+        assert_eq!(store.target_selection(&session.id)?, Some(vec![]));
+        Ok(())
+    }
+
+    #[test]
+    fn container_engine_survives_restart_and_old_rows_default_to_docker() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("db");
+        {
+            let db = rusqlite::Connection::open(&path)?;
+            db.execute_batch("CREATE TABLE containers (id TEXT PRIMARY KEY, name TEXT NOT NULL, image TEXT NOT NULL, memory_mib INTEGER NOT NULL, cpus INTEGER NOT NULL, status TEXT NOT NULL, error TEXT);
+                INSERT INTO containers VALUES('old','Earlier','ubuntu:24.04',4096,2,'stopped',NULL);")?;
+        }
+        let store = Store::open(&path)?;
+        assert_eq!(store.container("old")?.engine, "docker");
+        let podman = store.container_create("Podman", "podman", "ubuntu:24.04", 4096, 2)?;
+        assert!(store.container_create("Invalid", "other", "ubuntu:24.04", 4096, 2).is_err());
+        drop(store);
+        let store = Store::open(&path)?;
+        assert_eq!(store.container(&podman.id)?.engine, "podman");
+        assert_eq!(store.container("old")?.engine, "docker");
+        Ok(())
+    }
+
+    #[test]
+    fn private_ssh_owner_survives_restart_and_is_removed_with_target() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("db");
+        let store = Store::open(&path)?;
+        let session = store.create("Owner", "ws://127.0.0.1:1", &[], None)?;
+        let target = store.register_ssh_target(&crate::ssh::Config {
+            name: "Private".into(), destination: "operator@host".into(), cwd: "/workspace".into(),
+            port: None, identity_file: None, known_hosts_file: None,
+        })?;
+        store.own_ssh_target(&target, &session.id)?;
+        drop(store);
+        let store = Store::open(&path)?;
+        assert_eq!(store.ssh_target_owner(&target)?, Some(session.id));
+        store.forget_target(&target)?;
+        assert_eq!(store.ssh_target_owner(&target)?, None);
+        Ok(())
+    }
 
     #[test]
     fn selected_session_keeps_runtime_ownership_separate_from_targets() -> Result<()> {
@@ -422,6 +710,7 @@ mod tests {
                     }
                     "environment/add" => json!({}),
                     "turn/start" => json!({"turn":{"id":"new-turn"}}),
+                    "turn/steer" => json!({"turnId":"new-turn"}),
                     other => panic!("unexpected {other}"),
                 };
                 ws.send(Message::Text(
@@ -474,6 +763,12 @@ mod tests {
                     .is_err()
             );
             assert!(manager.store.get(&session.id)?.targets.is_empty());
+            if key != "active" {
+                for mode in [demodex_protocol::TargetChangeMode::NextTurn,demodex_protocol::TargetChangeMode::Interrupt] {
+                    assert!(orchestrator.change_targets(&session.id,&selection,mode).await.is_err());
+                    assert!(manager.store.staged_targets(&session.id)?.is_none());
+                }
+            }
             *state.lock().await = json!({"active":false,"queue":[],"goal":null,"fail":false});
         }
         manager.store.request(
@@ -489,6 +784,10 @@ mod tests {
                     .await
                     .is_err()
             );
+            for mode in [demodex_protocol::TargetChangeMode::NextTurn,demodex_protocol::TargetChangeMode::Interrupt] {
+                assert!(orchestrator.change_targets(&session.id,&selection,mode).await.is_err());
+                assert!(manager.store.staged_targets(&session.id)?.is_none());
+            }
             assert_eq!(manager.store.pending(&session.id)?[0].state, status);
             assert!(manager.store.get(&session.id)?.targets.is_empty());
         }
@@ -517,6 +816,25 @@ mod tests {
         assert_eq!(turn["params"]["environments"].as_array().unwrap().len(), 2);
         assert_eq!(turn["params"]["environments"][1]["cwd"], "/b");
         assert!(!manager.store.targets_pending(&session.id)?);
+        drop(log);
+        state.lock().await["active"] = json!(true);
+        let next = vec![selection[1].clone()];
+        orchestrator.change_targets(&session.id,&next,demodex_protocol::TargetChangeMode::NextTurn).await?;
+        assert!(manager.store.targets_pending(&session.id)?);
+        assert_eq!(manager.store.get(&session.id)?.targets.len(),2);
+        assert_eq!(manager.store.target_selection(&session.id)?,Some(next));
+        manager.prompt(&session.id,"Still steering the existing turn").await?;
+        assert!(manager.store.targets_pending(&session.id)?);
+        assert_eq!(manager.store.get(&session.id)?.targets.len(),2);
+        assert!(!calls.lock().await.iter().any(|r|r["method"]=="turn/interrupt"));
+        state.lock().await["active"] = json!(false);
+        *manager.runtime(&session.id).await?.turn.lock().await = None;
+        manager.prompt(&session.id,"Now use the new selection").await?;
+        assert!(!manager.store.targets_pending(&session.id)?);
+        assert_eq!(manager.store.get(&session.id)?.targets.len(),1);
+        let log = calls.lock().await;
+        let turn = log.iter().rev().find(|r|r["method"]=="turn/start").unwrap();
+        assert_eq!(turn["params"]["environments"],json!([{"environmentId":manager.store.get(&session.id)?.targets[0].id,"cwd":"/b"}]));
         server.abort();
         Ok(())
     }

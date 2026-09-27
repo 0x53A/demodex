@@ -15,11 +15,10 @@ impl App {
             return Html::default();
         }
         let chosen = self.new_session_targets();
-        let ssh = chosen
+        let unrestricted = chosen
             .iter()
-            .any(|target| text(target, "id").starts_with("ssh-"));
-        let ready = !chosen.is_empty()
-            && chosen.iter().all(|target| {
+            .any(|target| matches!(text(target, "id").split('-').next(), Some("ssh" | "container")));
+        let ready = chosen.iter().all(|target| {
                 text(target, "cwd").starts_with('/')
                     && self
                         .targets
@@ -44,8 +43,8 @@ impl App {
             <form class="setup new-session-form" onsubmit={ctx.link().callback(move |event:SubmitEvent|{event.prevent_default();payload.clone().map(|input|Operation::CreateSession{input}).map_or_else(Msg::InvalidForm,Msg::Run)})}>
                 <fieldset disabled={self.busy||!self.connected}>
                     {self.field(ctx,"new_session_name","Session name","What are you working on?")}
-                    <h3>{"Execution targets"}</h3><p class="muted">{"Choose where this session can work. The first target is primary."}</p>
-                    {for self.targets.iter().map(|target|{
+                    <h3>{"Execution targets"}</h3><p class="muted">{"Choose where this session can work. You can start with no targets and add them later. The first selected target is primary."}</p>
+                    {for self.targets.iter().filter(|target|target["owner"].is_null()).map(|target|{
                         let id=text(target,"id");
                         let vm=self.environments.iter().find(|env|env["id"]==target["environment_id"]);
                         let enabled=chosen.iter().any(|value|text(value,"id")==id);
@@ -58,7 +57,7 @@ impl App {
                             {if target["kind"]=="vm" && target["available"]!=true && vm.is_some_and(|env|matches!(text(env,"status"),"stopped"|"error"|"created")){self.button(ctx,"Start VM",Operation::StartEnvironment{id:text(target,"environment_id").into()})}else{Html::default()}}
                         </div>}
                     })}
-                    {if self.targets.is_empty(){html!{<p>{"No executors registered. Add an SSH executor in Server Settings or create a VM below."}</p>}}else{Html::default()}}
+                    {if self.targets.iter().all(|target|!target["owner"].is_null()){html!{<p>{"No shared execution targets registered. You can create the session without one, then add SSH in Session controls or create a VM in Server settings."}</p>}}else{Html::default()}}
                     {for chosen.iter().enumerate().map(|(index,target)|{
                         let name=self.targets.iter().find(|known|known["id"]==target["id"]).map(|known|text(known,"name")).unwrap_or("Unavailable target");
                         let edited=chosen.clone();let mut removed=chosen.clone();removed.remove(index);let removed=json!(removed).to_string();
@@ -69,15 +68,14 @@ impl App {
                         </div>}
                     })}
                     {self.sandbox(ctx,"new_sandbox","Sandbox")}
-                    {if ssh{html!{<p class="muted">{"SSH executes with the remote account’s authority. Select danger-full-access to continue."}</p>}}else{Html::default()}}
-                    <button class="primary" type="submit" disabled={!ready||self.runtime["running"]!=true||self.runtime["account"].is_null()||self.saved.field("new_session_name").trim().is_empty()||(ssh&&sandbox!="danger-full-access")}>{"Create session"}</button>
+                    {if unrestricted{html!{<p class="muted">{"SSH and container executors require danger-full-access."}</p>}}else{Html::default()}}
+                    <button class="primary" type="submit" disabled={!ready||self.runtime["running"]!=true||self.runtime["account"].is_null()||self.saved.field("new_session_name").trim().is_empty()||(unrestricted&&sandbox!="danger-full-access")}>{"Create session"}</button>
                 </fieldset>
             </form>
-            <details class="create-vm"><summary>{"Create a VM"}</summary>{self.create_vm_form(ctx)}</details>
             {if text(&self.runtime,"mode")=="host"{html!{<details class="resume-session"><summary>{"Resume a saved session"}</summary>{self.resume_session_form(ctx)}</details>}}else{Html::default()}}
         </crate::modal::Modal>}
     }
-    fn create_vm_form(&self, ctx: &Context<Self>) -> Html {
+    pub(super) fn create_vm_form(&self, ctx: &Context<Self>) -> Html {
         let payload = demodex_protocol::NewEnvironment {
             name: self.saved.field("environment_name"),
             memory_mib: self.saved.field("memory").parse::<u32>().unwrap_or(4096),

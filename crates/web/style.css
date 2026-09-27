@@ -171,3 +171,8 @@ input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px soli
  .transcript-toolbar .background-toggle{min-width:0}
  .transcript-position{grid-column:1 / -1;grid-row:2;display:block}
 }
+
+/* Keep history actions separate from session navigation and touch accessible. */
+.tree-agent{position:relative}.tree-agent .session{padding-right:58px}.session-archive-action{position:absolute;right:5px;top:5px;min-width:44px;padding:8px;font:13px monospace}.archived-sessions .tree-agent .session{padding-right:88px}
+.item-status{margin-left:12px;color:#a3aa9e}.item-status.failed{color:#ff8075}.item-status.running{color:#91b88b}.tool-heading{overflow-wrap:anywhere}.tool-paths{padding-left:20px;overflow-wrap:anywhere}.activity.disconnected{color:#a3aa9e}.plan-steps{padding-left:24px}.plan-steps li{margin:8px 0}.plan-steps span{color:#a3aa9e;font:12px monospace;margin-right:10px}
+.chat-main>.error{flex-shrink:0;max-height:15dvh;overflow:auto;margin:6px 0}
