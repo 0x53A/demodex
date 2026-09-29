@@ -40,4 +40,7 @@ This is vibe-engineered, as such I'm happy to put it into public domain. My cont
 
 So, with all that out of the way, how do you actually use it? Here's a short video showing the main interface, and how you can change the available executors at runtime.
 
-<video src="./assets/README.mp4"></video>
+
+https://github.com/user-attachments/assets/a41295a3-a5f4-4556-9a33-7fcda0824082
+
+
