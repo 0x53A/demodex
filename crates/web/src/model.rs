@@ -23,6 +23,7 @@ pub struct Navigation {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Saved {
+    pub enter_sends: bool,
     pub host: String,
     pub selected: String,
     pub page: String,

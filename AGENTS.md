@@ -48,7 +48,76 @@ Exact transport dependency versions constrain consumers with separate lockfiles.
 
 ## Library and native clients
 
-Protocol v21 adds server-wide Codex feature overrides and explicit runtime restart
+Protocol v30 adds scoped Session and Runtime change notices. Session content notices
+invalidate only the selected session's event cursor; state notices also refresh
+session summaries and the matching detail. Periodic runtime notices refresh runtime
+and selected detail, not transcripts or target registries. Full Changed notices
+remain for broad mutations, initial watches and lag recovery. Browser reads run
+independently per resource, coalescing invalidations without losing scopes; session
+navigation and connection generations reject stale completions. Session summaries
+own current session metadata; slow detail replies cannot overwrite reconnect status.
+Event pages render incrementally. Native clients retain their coarse Changed wake API. Deploy matching
+daemon and frontend/native clients; receipt encoding remains v16.
+
+Protocol v29 adds read-only MessageFiles/ReadMessageFile for link widgets. Completed
+assistant messages capture executor identities and working directories once;
+metadata snapshots persist in message_files, with at most 10 distinct files,
+3 seconds per file across its executors and 10 seconds per message. Checks are
+bounded globally, never replayed on resume/reload/restart, and distinguish not
+found, timed out, failed and not checked. Interrupted checks stay explicit.
+File reads require the captured executor identity and endpoint still attached to
+a connected session, use its executor protocol without host fallback, accept only
+regular files, and cap complete downloads at 4 MiB. File bytes are not persisted.
+Deploy matching daemon and clients; receipt encoding remains v16.
+
+Protocol v27 adds authenticated PushSettings/RegisterPush/RemovePush/TestPush and the
+session-scoped `demodex.notify(message, title?)` tool for newly created Codex threads.
+Notifications commit a chat event, outbox entry and tool receipt atomically. A separate
+worker attempts encrypted Web Push at most once, with bounded delivery and uncertain
+outcomes after interruption; existing Codex threads retain their original tools.
+One daemon is bound per browser installation; other server connections still work.
+VAPID keys/subscriptions remain in the private daemon SQLite store. No automatic
+completion/question notifications are sent. Deploy matching daemon and clients.
+Receipt encoding remains v16. Run `uv run tests/notifications.py` for mocked browser
+push checks; actual provider/device delivery requires an explicit operator test.
+
+Protocol v26 adds atomic ReorderSessions within a star/project/archive group; stale
+orders are rejected. Runtime adds current restart-blocker counts and the latest
+reported active_subagents count per connected session. Subagent activity is scoped
+to the live Codex generation and rebuilt from resumed history. Deploy matching
+clients and daemon; receipt encoding remains v16.
+
+Protocol v25 adds receipted StarSession/MoveSession and durable per-session
+star/order metadata. Moves stay within a project group, archive state and star
+state; starred sessions render first. It also adds the session-scoped `demodex.set_session_identity` dynamic tool
+for partial title/name/icon updates and a title in `get_session_context` replies.
+Display updates and tool receipts commit atomically. It does not rename Codex
+threads or change UUIDs, execution settings or project context. New threads get
+the tool; older threads retain their saved Codex tool catalogue. Deploy matching
+clients and daemon; receipt encoding remains v16. Goal action `start` sets the
+objective and active status in one call; `save` remains paused. Both accept updates
+during active turns without interrupting or sending a hidden turn. Starting still
+requires applied target selections.
+
+Protocol v24 adds receipted RenameSession for the Demodex display name, including
+disconnected sessions. Blank import names use the saved Codex title; saved-session
+search accepts a complete Codex thread UUID. Deploy matching clients and daemon.
+Steering submission events keep messages visible until matched by Codex client ID.
+Receipt encoding remains v16.
+
+Protocol v23 adds read-only BrowseDirectories for configured host/VM/container/external/SSH targets, and goal state/error alongside Runtime.background_terminals counts. Directory browsing requires host mode for host paths; remote failures never fall back to host. Listings are bounded and picking a path only edits a form. Deploy matching clients and daemon. Receipt encoding remains v16.
+
+Protocol v22 adds all reported quota windows in Runtime.weekly_usage.all_windows
+while preserving its weekly-only windows list, plus Runtime.background_terminals
+with per-session counts (null when unavailable). Overview reads are bounded.
+Blank managed-session names become "Untitled session". Deploy matching daemon
+and clients together; receipt encoding remains v16.
+New Session can stage a private SSH executor: Create and SSH attachment are
+separate receipted operations, never retried automatically. A failed attachment
+leaves the created session and SSH draft available in Session controls.
+Server Settings also exposes explicit shared SSH registration.
+
+Protocol v21 added server-wide Codex feature overrides and explicit runtime restart
 (`SetRuntimeFeature`, `RestartRuntime`). Overrides live in Demodex SQLite, not the
 Codex profile, and become `--enable`/`--disable` app-server launch arguments.
 `Runtime.features` exposes saved/applied overrides and the startup catalogue from
@@ -58,7 +127,7 @@ decisions or background terminals; unknown loaded threads block it. It disconnec
 sessions and replaces the host executor. Reconnect explicitly; never replay work.
 Run `uv run tests/runtime_features.py` for disposable real-Codex checks without
 inference. Existing receipt response encoding stays v16. Deploy matching protocol
-v21 clients and daemon together.
+clients and daemon together.
 
 Protocol v17 added DefaultPrompt (read-only) and new-session prompt overrides through
 CreateSessionWithPrompt / HostSessionWithPrompt. DefaultPrompt resolves the runtime
@@ -148,6 +217,10 @@ Reject changes during active turns on both server and UI. Show the accepted
 effective policy; approval policy stays on-request. No override on a connected
 thread retains its current policy. Preserve existing SQLite data during changes.
 
+Protocol v28 makes saved-thread search case-insensitive substring matching over
+IDs, names and preview metadata. Search scans at most ten 50-row `thread/list`
+pages per request, preserving the cursor even for an empty batch; it never reads
+transcripts. Exact UUID lookup uses `thread/read` without turns.
 Saved threads use `thread/list` with search and pagination. Selecting one fills
 an explicit resume form. Stop its CLI controller before attaching; resume restores
 persisted history, not live CLI processes or shell jobs. Empty threads may lack a
@@ -180,8 +253,13 @@ Interrupt acknowledgement alone is not completion; a failed/unconfirmed interrup
 must leave the selection unchanged. Steering retains the current turn's targets. The current app-server API applies environments
 on the next `turn/start`, not through `thread/settings/update`; show that pending
 state and block goal/queue resumption until an explicit message applies it.
-Never send a hidden model turn to apply settings. The first selected target is
-the primary image-upload destination; unsupported external uploads fail without
+Never send a hidden model turn to apply settings.
+Directory-only edits use the same next-turn selection mechanism; no restart is
+needed, and steering keeps the old directory. Do not substitute a direct
+`thread/settings/update` cwd patch: a disposable Codex 0.157.1 check introduced
+a local environment alongside the selected executor. The explicit environment
+list on `turn/start` preserves Demodex's executor boundary. The first target is
+the primary execution directory and image-upload destination; unsupported external uploads fail without
 host fallback. Empty selection disables execution targets explicitly.
 
 Managed OCI containers are created in Server settings from images already local
@@ -204,8 +282,7 @@ Docker integration check without model inference. Set
 store to run the same check with Podman.
 
 SSH targets are configured in Session controls and persisted in `ssh_targets`.
-Legacy shared SSH targets remain available to existing sessions; newly created
-session SSH targets have an owner in `session_ssh_targets`.
+Legacy shared SSH targets remain available to existing sessions; SSH targets created through New Session or Session controls have an owner in `session_ssh_targets`.
 The adapter runs locally and speaks the Codex executor protocol. Foreground
 commands use standard OpenSSH; file operations use the server's existing SFTP v3
 subsystem. No Python, remote helper executable or custom server is installed.
@@ -298,10 +375,27 @@ Reload replaces the current history entry, and navigation must not trap the user
 at the app root or submit commands. Keep fixed header/composer, independent
 transcript scrolling, and conditional following that respects scrolling upward.
 
+Message rendering uses pulldown-cmark and math-core in WASM, with an allowlisted
+MathML tree. Never insert model-supplied HTML. Links render as numbered buttons with explicit destination lists. Only an
+operator-opened web popup may install a parsed HTTP(S) destination as a link;
+show the exact serialized URL with its hostname bold, reject invalid/control
+characters and credentials, and explain normalization/Punycode warnings. No web
+preview fetches occur. Images remain omitted. File metadata is the explicit
+exception to automatic content-derived I/O: bounded daemon checks run once on
+completed assistant messages through their captured executors. File contents
+require a Show/Download action. Never install arbitrary content URLs in src/style
+or other active attributes. Preserve original source in raw view/copy. Mermaid uses a pinned vendored
+browser bundle in an opaque-origin sandbox with networking disabled; include its
+assets and licenses in atomic frontend releases. Formatted messages retain exact
+source and provide Format Markdown / Copy raw controls. Run `uv run tests/rich_messages.py`
+for browser rendering, source preservation and isolation checks.
+
 The service worker caches verified static assets only, never API responses,
 credentials or conversations. Preserve drafts across updates. Do not force
 reloads of other open tabs or replay mutations on reconnect. There is no offline
-conversation cache or browser/OS push notification service.
+conversation cache. Explicit agent notifications use encrypted Web Push when the
+operator enables it on that browser installation. Service-worker push settings
+contain only daemon identity and navigation metadata, never tokens or transcripts.
 
 Image picker and clipboard uploads use authenticated actor calls and mutation
 receipts. Validate supported signatures (PNG/JPEG/GIF/WebP) and the 4 MiB limit;
@@ -454,3 +548,22 @@ sharing must not be assumed to share Services; a separate serving identity in
 the client's tailnet is one possible approach. Recheck upstream support and
 access policy before implementation. This option is not implemented.
 See the [Services documentation](https://tailscale.com/docs/features/tailscale-services).
+
+## Local SVG previews
+
+Fenced `svg` blocks and explicitly opened `.svg` files render through `crates/web/src/svg.rs`, which parses XML and
+constructs allowlisted Yew SVG nodes rather than inserting model HTML. Supported
+elements: svg (root only), g, rect, circle, ellipse, line, polyline, polygon, path,
+text, tspan, title and desc. Attributes are explicit geometry/presentation
+allowlists with bounded numeric values, local colors and generic font families.
+No href, CSS/style, images, definitions/references, scripts, animations or foreign
+content are supported. Reject the entire preview on unsupported input; retain the
+exact source and show a reason. Never strip unsupported content into a misleading
+partial drawing. DTDs and processing instructions are rejected.
+Bounds: 128 KiB input, 2,048 XML nodes, 32 nesting levels, 16 KiB per attribute,
+finite numeric magnitude <=1,000,000 and <=16 operations per transform attribute.
+Require a valid viewBox or positive numeric width/height. Thumbnail and expanded
+modal stay within bounded containers. The drawing itself has no interactive
+content; its enclosing button opens the larger preview. Preserve source controls,
+keyboard accessibility and modal close/outside-click behavior. Native tests live
+in svg.rs; rich-message browser checks cover actual SVG namespaces and preview UI.

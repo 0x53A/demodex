@@ -18,3 +18,5 @@ __pycache__/
 *.pyc
 *.qcow2
 *.img
+/web/.*-dist/
+TEMP_DIRECTORY

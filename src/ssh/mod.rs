@@ -1,5 +1,5 @@
 //! Foreground-only local exec-server adapter over SSH and the standard SFTP subsystem.
-mod sftp;
+pub(crate) mod sftp;
 pub const AGENT_INSTRUCTIONS: &str = "Demodex SSH targets (environment IDs starting with ssh-) support non-interactive foreground commands only, with no adapter-imposed runtime limit. If you explicitly want a deadline, check for the remote timeout utility and wrap the command with your chosen duration. Do not request PTYs, stdin pipes, background process handles or later stdin writes. Cancellation closes SSH; remote termination is best effort and an interrupted command may still be running. For background or longer-running work, you may first check whether tmux is installed on the remote host (for example, command -v tmux). If available, manage explicitly named tmux sessions with ordinary foreground commands, redirect output to remote files, and inspect completion separately. Tmux jobs belong to the remote host and are not tracked, resumed or cleaned up by Demodex. Do not assume tmux is installed or install it without authorization. Never automatically rerun a command with an uncertain outcome.";
 
 use anyhow::{Context, Result, bail, ensure};
@@ -156,8 +156,9 @@ impl Config {
     async fn probe_directory(&self, cwd: &str) -> Result<Value> {
         crate::targets::validate_cwd(cwd)?;
         let script = format!(
-            "cd {} || {{ printf '%s' 'Remote working directory does not exist' >&2; exit 1; }}; printf '%s\\0%s\\0%s\\0' \"$PWD\" \"$HOME\" \"${{SHELL:-/bin/sh}}\"; cat /proc/sys/kernel/random/boot_id",
-            quote(cwd)
+            "cd {} || {{ printf '%s' 'Remote working directory does not exist' >&2; exit 1; }}; {} printf '%s\\0%s\\0%s\\0' \"$PWD\" \"$HOME\" \"$demodex_shell\"; cat /proc/sys/kernel/random/boot_id",
+            quote(cwd),
+            REMOTE_SHELL_PROBE,
         );
         let bytes = self.output(&script).await?;
         let parts = bytes
@@ -183,6 +184,26 @@ impl Config {
         )
     }
 }
+
+// Codex recognizes bash, zsh and sh on Linux, but not login shells such as fish.
+// Resolve the fallback on the executor, never from the daemon's local PATH.
+const REMOTE_SHELL_PROBE: &str = r#"
+demodex_shell=${SHELL:-}
+case "$demodex_shell" in
+    /*/bash|/*/zsh|/*/sh) [ -x "$demodex_shell" ] || demodex_shell= ;;
+    *) demodex_shell= ;;
+esac
+if [ -z "$demodex_shell" ]; then
+    for demodex_candidate in bash sh; do
+        demodex_shell=$(command -v "$demodex_candidate") || continue
+        case "$demodex_shell" in
+            /*) [ -x "$demodex_shell" ] && break ;;
+        esac
+        demodex_shell=
+    done
+fi
+[ -n "$demodex_shell" ] || { printf '%s' 'No supported remote shell found' >&2; exit 1; }
+"#;
 
 pub struct Engine {
     pub target: crate::store::Target,

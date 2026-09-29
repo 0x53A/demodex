@@ -58,6 +58,24 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
+    pub async fn browse_directories(&self, target: &str, path: &str) -> Result<Value> {
+        crate::targets::validate_cwd(path)?;
+        if target == "host" {
+            ensure!(self.host_workspace.is_some(), "Host filesystem browsing is not enabled");
+            return crate::directories::local(path).await;
+        }
+        if target.starts_with("ssh-") {
+            let config = self.manager.store.ssh_targets()?.into_iter().find(|(id,_)|id==target).context("Unknown SSH target")?.1;
+            config.validate()?;
+            let mut sftp = crate::ssh::sftp::Sftp::connect(&config).await?;
+            let path = sftp.realpath(path).await?;
+            let listing = sftp.call("fs/readDirectory", &json!({"path":crate::ssh::sftp::path_uri(&path)})).await?;
+            return crate::directories::listing(&path, &listing);
+        }
+        let resolved = self.resolve_targets(&[crate::targets::Selection { id:target.into(), cwd:path.into() }]).await?;
+        crate::directories::remote(&resolved[0].url, path).await
+    }
+
     pub async fn targets(&self) -> Result<Value> {
         for session in self.manager.store.list()? {
             self.manager.store.ensure_target_selection(&session.id)?;
@@ -918,6 +936,11 @@ impl Orchestrator {
         Ok(json!({"saved":true}))
     }
 
+    pub async fn restart_session_ids(&self) -> Result<Vec<String>> {
+        let (_, endpoint) = self.runtime_rpc().await?;
+        Ok(self.manager.store.list()?.into_iter().filter(|s| s.endpoint == endpoint).map(|s|s.id).collect())
+    }
+
     pub async fn restart_runtime(&self) -> Result<Value> {
         let _lifecycle = self.jobs.lock().await;
         let _settings = self.manager.connecting.lock().await;
@@ -1053,8 +1076,32 @@ impl Orchestrator {
             "saved-thread discovery is available in host mode"
         );
         let (rpc, _) = self.runtime_rpc().await?;
-        let search = (!search.trim().is_empty()).then(|| search.trim().to_owned());
-        rpc.call("thread/list", json!({"cursor":cursor,"limit":50,"sortKey":"updated_at","searchTerm":search,"modelProviders":[]})).await
+        let search = search.trim();
+        if let Ok(id) = uuid::Uuid::parse_str(search) {
+            let snapshot = rpc.call("thread/read", json!({"threadId":id.to_string(),"includeTurns":false})).await?;
+            return Ok(json!({"data":[snapshot["thread"]],"nextCursor":null}));
+        }
+        let needle = search.to_lowercase();
+        let mut cursor = cursor;
+        // Upstream search does not provide substring semantics. Scan metadata
+        // pages ourselves; bound each request and preserve the continuation even
+        // when this batch contains no matches. Never load transcript turns.
+        for page in 0..10 {
+            let mut result = rpc.call("thread/list", json!({"cursor":cursor,"limit":50,"sortKey":"updated_at","modelProviders":[]})).await?;
+            let rows = result["data"].as_array_mut().context("Invalid saved-thread list")?;
+            if !needle.is_empty() {
+                rows.retain(|thread| ["id", "name", "preview"].iter().any(|field| {
+                    thread[*field].as_str().is_some_and(|text| text.to_lowercase().contains(&needle))
+                }));
+            }
+            if !rows.is_empty() || result["nextCursor"].is_null() || page == 9 {
+                return Ok(result);
+            }
+            let next = result["nextCursor"].as_str().context("Invalid saved-thread cursor")?.to_owned();
+            ensure!(cursor.as_ref() != Some(&next), "Saved-thread cursor did not advance");
+            cursor = Some(next);
+        }
+        unreachable!("bounded saved-thread scan always returns its last page")
     }
 
     pub fn create(
@@ -1492,10 +1539,8 @@ impl Orchestrator {
         prompt: Option<&str>,
     ) -> Result<Session> {
         validate_prompt(prompt)?;
-        ensure!(
-            !name.trim().is_empty() && name.len() <= 120,
-            "session name must be 1–120 characters"
-        );
+        let name = if name.trim().is_empty() { "Untitled session" } else { name };
+        ensure!(name.len() <= 120, "session name must be at most 120 characters");
         crate::targets::validate_selection(selection)?;
         for target in selection {
             ensure!(self.manager.store.ssh_target_owner(&target.id)?.is_none(), "SSH target belongs to another session");
@@ -1554,10 +1599,7 @@ impl Orchestrator {
         validate_prompt(prompt)?;
         ensure!(prompt.is_none() || thread_id.is_none(), "Prompt overrides require a new thread");
         ensure!(self.is_host_mode(), "host execution is not configured");
-        ensure!(
-            !name.trim().is_empty() && name.len() <= 120,
-            "session name must be 1–120 characters"
-        );
+        ensure!(name.trim().chars().count() <= 120, "session name must be at most 120 characters");
         let (rpc, endpoint) = self.runtime_rpc().await?;
         let requested_cwd = cwd
             .map(|path| -> Result<String> {
@@ -1604,15 +1646,17 @@ impl Orchestrator {
             .as_ref()
             .and_then(|r| r.host_target.clone())
             .context("host execution is not configured")?;
+        let snapshot = if let Some(thread) = thread_id {
+            Some(rpc.call("thread/read", json!({"threadId":thread,"includeTurns":false})).await?)
+        } else {
+            None
+        };
+        let saved_name = snapshot.as_ref().and_then(|s| s["thread"]["name"].as_str()).unwrap_or("");
+        let name = if name.trim().is_empty() { saved_name } else { name }.trim();
+        let name: String = if name.is_empty() { "Untitled session" } else { name }.chars().take(120).collect();
         if let Some(cwd) = requested_cwd {
             target.cwd = cwd;
-        } else if let Some(thread) = thread_id {
-            let snapshot = rpc
-                .call(
-                    "thread/read",
-                    json!({"threadId":thread,"includeTurns":false}),
-                )
-                .await?;
+        } else if let Some(snapshot) = &snapshot {
             let cwd = snapshot["thread"]["cwd"]
                 .as_str()
                 .context("saved thread has no working directory")?;

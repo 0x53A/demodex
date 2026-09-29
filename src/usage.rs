@@ -16,22 +16,23 @@ fn now() -> u64 {
 
 pub fn weekly(response: &Value) -> Value {
     let mut windows = Vec::new();
+    let mut all_windows = Vec::new();
     let mut add = |id: &str, bucket: &Value| {
         for name in ["primary", "secondary"] {
             let window = &bucket[name];
-            if window["windowDurationMins"].as_i64() != Some(7 * 24 * 60) {
+            let Some(duration) = window["windowDurationMins"].as_i64().filter(|v| *v > 0) else {
                 continue;
-            }
+            };
             let Some(used) = window["usedPercent"]
                 .as_i64()
                 .filter(|v| (0..=100).contains(v))
             else {
                 continue;
             };
-            windows.push(
-                json!({"id":id,"name":bucket["limitName"].as_str().unwrap_or(id),
-                "used_percent":used,"resets_at":window["resetsAt"]}),
-            );
+            let entry = json!({"id":id,"name":bucket["limitName"].as_str().unwrap_or(id),
+                "used_percent":used,"resets_at":window["resetsAt"],"duration_minutes":duration});
+            all_windows.push(entry.clone());
+            if duration == 7 * 24 * 60 { windows.push(entry); }
         }
     };
     if let Some(buckets) = response["rateLimitsByLimitId"]
@@ -54,7 +55,7 @@ pub fn weekly(response: &Value) -> Value {
             &response["rateLimits"],
         );
     }
-    json!({"windows":windows,"checked_at":now(),"error":if windows.is_empty(){Some("No weekly usage window reported by Codex")}else{None}})
+    json!({"windows":windows,"all_windows":all_windows,"checked_at":now(),"error":if windows.is_empty(){Some("No weekly usage window reported by Codex")}else{None}})
 }
 
 struct Cached {
@@ -205,6 +206,9 @@ mod tests {
             "rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":17,"windowDurationMins":10080,"resetsAt":1900000000},"secondary":{"usedPercent":88,"windowDurationMins":300}}}});
         let result = weekly(&data);
         assert_eq!(result["windows"].as_array().unwrap().len(), 1);
+        assert_eq!(result["all_windows"].as_array().unwrap().len(), 2);
+        assert_eq!(result["all_windows"][1]["duration_minutes"], 300);
+        assert_eq!(result["all_windows"][1]["used_percent"], 88);
         assert_eq!(result["windows"][0]["used_percent"], 17);
         assert_eq!(result["windows"][0]["resets_at"], 1900000000);
         let multiple = weekly(&json!({"rateLimitsByLimitId":{

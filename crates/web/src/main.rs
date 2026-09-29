@@ -1,13 +1,23 @@
 mod app;
 mod client;
+mod sync;
 mod controls;
 mod conversation;
+mod diff;
+mod directory_picker;
 mod modal;
 mod model;
+mod notifications;
 mod overview;
+mod reorder;
+mod rich_messages;
+mod links;
+mod svg;
 mod runtime_features;
 mod transcript;
+mod timestamps;
 mod usage;
+mod ui;
 
 fn main() {
     console_error_panic_hook::set_once();

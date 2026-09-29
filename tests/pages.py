@@ -46,7 +46,8 @@ with tempfile.TemporaryDirectory(prefix="demodex-pages-") as temporary:
             page.on("response", lambda response: failures.append(response.url) if response.status >= 400 else None)
             page.on("websocket", lambda socket: sockets.append(socket.url))
             page.goto(url)
-            expect(page.get_by_role("heading", name="Your connections")).to_be_visible()
+            expect(page.get_by_role("heading", name="Connections", exact=True)).to_be_visible()
+            page.get_by_role("button", name="+ connection", exact=True).click()
             expect(page.get_by_label("Host URL")).to_have_value(origin if args.same_origin_host else "")
             assert page.locator("a.brand").evaluate("a => a.href") == url
             page.evaluate("navigator.serviceWorker.ready")
@@ -63,7 +64,7 @@ with tempfile.TemporaryDirectory(prefix="demodex-pages-") as temporary:
             assert any(asset.endswith(".wasm") for asset in cached)
             context.set_offline(True)
             page.reload()
-            expect(page.get_by_role("heading", name="Your connections")).to_be_visible()
+            expect(page.get_by_role("heading", name="Connections", exact=True)).to_be_visible()
             assert not sockets, sockets
             assert not errors, errors
             assert not failures, failures

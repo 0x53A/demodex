@@ -12,12 +12,13 @@ pub fn context_numbers(session: &Value) -> Option<(i64, i64, f64)> {
 pub fn context(session: &Value, detailed: bool) -> Html {
     match context_numbers(session) {
         Some((used, window, percent)) => {
-            let label = format!("Context {:.0}% used", percent);
+            let remaining = (100.0-percent).clamp(0.0,100.0);
+            let label = format!("Context {remaining:.0}% remaining");
             let title = format!(
                 "Last reported context: {used} / {window} tokens. Updated when Codex reports usage; not cumulative session tokens."
             );
             html! {<span class="context-usage" title={title.clone()} aria-label={title}>
-                <span>{label}</span><meter min="0" max="100" value={percent.clamp(0.0,100.0).to_string()} aria-label="Context window used"/>
+                <span>{label}</span><meter min="0" max="100" value={remaining.to_string()} aria-label="Context window remaining"/>
                 {if detailed{html!{<small>{format!("{used} / {window} tokens · last reported")}</small>}}else{Html::default()}}
             </span>}
         }
@@ -40,35 +41,39 @@ fn timestamp(seconds: &Value) -> String {
         .unwrap_or_else(|| "not reported".into())
 }
 
+fn remaining(window: &Value) -> Option<i64> {
+    window["used_percent"].as_i64().filter(|n| (0..=100).contains(n)).map(|n| 100-n)
+}
+fn reset_in(window: &Value) -> String {
+    let Some(reset) = window["resets_at"].as_f64() else { return "reset time unavailable".into(); };
+    let minutes = ((reset - js_sys::Date::now()/1000.0).max(0.0)/60.0).ceil() as u64;
+    format!("resets in {}d {}h {}m", minutes/1440, minutes%1440/60, minutes%60)
+}
 pub fn weekly(runtime: &Value, connected: bool) -> Html {
     let usage = &runtime["weekly_usage"];
-    let windows = array(&usage["windows"]);
-    let summary = if !connected {
-        "Weekly usage · disconnected".into()
-    } else if let Some(first) = windows.first() {
-        let suffix = if windows.len() > 1 {
-            format!(" · {} limits", windows.len())
-        } else {
-            String::new()
-        };
-        format!(
-            "Weekly usage · {}% used{}",
-            first["used_percent"].as_i64().unwrap_or(0),
-            suffix
-        )
-    } else {
-        "Weekly usage unavailable".into()
-    };
-    html! {<details class="weekly-usage" aria-label="Server weekly usage">
+    let weekly = array(&usage["windows"]);
+    let windows = if usage["all_windows"].is_array() { array(&usage["all_windows"]) } else { weekly.clone() };
+    let summary = if !connected { "Weekly: disconnected".into() }
+        else if let Some(first) = weekly.first() {
+            match remaining(first) {
+                Some(left) => format!("Weekly: {left}% remaining, {}",reset_in(first)),
+                None => "Weekly: unavailable".into(),
+            }
+        } else { "Weekly: unavailable".into() };
+    html! {<details class="weekly-usage" aria-label="Server usage">
         <summary>{summary}</summary>
-        <div class="weekly-details"><p class="muted">{"Reported for this server’s Codex account. Servers using the same account share its limits."}</p>
-            {for windows.iter().map(|window|html!{<div class="weekly-window">
-                <strong>{format!("{} · {}% used",text(window,"name"),window["used_percent"])}</strong>
-                <meter min="0" max="100" value={window["used_percent"].to_string()} aria-label={format!("Weekly usage for {}",text(window,"name"))}/>
-                <small>{format!("Resets {}",timestamp(&window["resets_at"]))}</small>
-            </div>})}
-            {if windows.is_empty(){html!{<p class="muted">{usage["error"].as_str().unwrap_or("Start the Codex runtime and sign in to see weekly usage.")}</p>}}else{Html::default()}}
-            {if usage["checked_at"].is_number(){html!{<small>{format!("Checked {} · refreshes about once a minute",timestamp(&usage["checked_at"]))}</small>}}else{Html::default()}}
+        <div class="weekly-details">
+            {for windows.iter().map(|window|{
+                let duration=window["duration_minutes"].as_i64().unwrap_or(10080);
+                let period=match duration {10080=>"Weekly".into(),n if n%60==0=>format!("{}h",n/60),n=>format!("{n}m")};
+                html!{<div class="weekly-window">
+                    <strong>{format!("{} · {} · {}",text(window,"name"),period,remaining(window).map(|v|format!("{v}% remaining")).unwrap_or_else(||"unavailable".into()))}</strong>
+                    {if let Some(left)=remaining(window){html!{<meter min="0" max="100" value={left.to_string()} aria-label={format!("Remaining {} capacity for {}",period,text(window,"name"))}/>}}else{Html::default()}}
+                    <small title={timestamp(&window["resets_at"])}>{reset_in(window)}</small>
+                </div>}
+            })}
+            {if windows.is_empty(){html!{<p class="muted">{usage["error"].as_str().unwrap_or("Usage unavailable")}</p>}}else{Html::default()}}
+            {if usage["checked_at"].is_number(){html!{<small>{format!("Last updated: {}",timestamp(&usage["checked_at"]))}</small>}}else{Html::default()}}
         </div>
     </details>}
 }

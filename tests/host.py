@@ -187,16 +187,16 @@ with tempfile.TemporaryDirectory(prefix='demodex-host-') as temporary:
             else:
                 raise AssertionError(('fixture was not indexed',listed))
         with sync_playwright() as playwright:
-            browser=playwright.chromium.launch(executable_path='/run/current-system/sw/bin/google-chrome',headless=True,args=['--no-sandbox'])
+            browser=playwright.chromium.launch(executable_path=os.environ.get('CHROME','/run/current-system/sw/bin/google-chrome'),headless=True,args=['--no-sandbox'])
             page=browser.new_page()
             page.goto(f'http://127.0.0.1:{port}')
+            page.get_by_role('button', name='+ connection', exact=True).click()
             page.get_by_label('Access token').fill(token)
-            page.get_by_role('button',name='Connect host',exact=True).click()
-            expect(page.locator('header .indicator')).to_have_text('CONNECTED',timeout=20000)
+            page.get_by_role('button',name='Save and connect',exact=True).click()
+            expect(page.locator('header .indicator')).to_have_text('connected to',timeout=20000)
             # Upload through the real browser transport, without submitting a prompt.
-            page.get_by_role('button', name='Host persistence test', exact=False).click()
+            page.locator('aside .session').filter(has_text='Host persistence test').click()
             page.get_by_role('button',name='Session controls',exact=True).click()
-            page.locator('.session-settings summary').click()
             sandbox = page.get_by_label('Session sandbox', exact=True)
             expect(sandbox).to_have_value('workspace-write')
             sandbox.select_option('danger-full-access')
@@ -207,7 +207,6 @@ with tempfile.TemporaryDirectory(prefix='demodex-host-') as temporary:
             expect(page.locator('.sandbox-pending')).to_have_count(0)
             page.reload()
             page.get_by_role('button',name='Session controls',exact=True).click()
-            page.locator('.session-settings summary').click()
             expect(sandbox).to_have_value('danger-full-access',timeout=20000)
             # A different client changes the policy while this select has an unsaved choice.
             sandbox.select_option('workspace-write')
@@ -254,10 +253,10 @@ with tempfile.TemporaryDirectory(prefix='demodex-host-') as temporary:
             assert len(list((data/'uploads').iterdir())) == 2
             assert not any(e['message'].get('method') == 'demodex/promptAccepted' for e in api('/sessions/'+session['id']+'/events'))
             page.get_by_role('button',name='+ New Session',exact=True).click()
-            page.get_by_text('Resume a saved session',exact=True).click()
-            page.get_by_role('button',name='Find saved sessions').click()
+            page.get_by_label('Resume existing session',exact=True).check()
+            page.get_by_role('button',name='🔍 Search sessions',exact=True).click()
             try:
-                expect(page.locator('.saved-threads .session').filter(has_text=session['thread_id'])).to_be_visible(timeout=10000)
+                expect(page.locator('.saved-thread').filter(has_text=session['thread_id'])).to_be_visible(timeout=10000)
             except AssertionError:
                 print('Saved-thread UI:',page.locator('main').inner_text())
                 with unix_connect(session['endpoint'].removeprefix('unix://'), compression=None) as diagnostic:
@@ -265,9 +264,9 @@ with tempfile.TemporaryDirectory(prefix='demodex-host-') as temporary:
                     diagnostic.send(json.dumps({'method': 'initialized', 'params': {}}))
                     print('Thread list:',rpc(diagnostic,'thread/list',{'limit':50,'modelProviders':[]},2))
                 raise
-            page.locator('.saved-threads .session').filter(has_text=session['thread_id']).click()
+            page.locator('.saved-thread').filter(has_text=session['thread_id']).click()
             expect(page.get_by_label('Existing Codex thread ID', exact=True)).to_have_value(session['thread_id'])
-            expect(page.get_by_label('Working directory (optional)')).to_have_value('')
+            expect(page.get_by_label('Working directory (optional)')).to_have_value(str(chosen_workspace))
             browser.close()
         print('PASS: image picker and clipboard uploads, private persistent files, draft recovery, invalid-image rejection and no prompt submission')
         print('PASS: saved-thread discovery through Wormhole; native host runtime, empty dedicated login, real host executor, durable thread resume, fresh target and cleanup')

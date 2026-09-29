@@ -32,6 +32,9 @@ hyper-util = { version = "0.1.20", features = ["tokio"] }
 hyper = { version = "1.11.1", features = ["server", "http1"] }
 demodex-client = { version = "0.1.0", path = "crates/client" }
 tokio-util = { version = "0.7.19", features = ["rt"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
+ece = "2.4"
 
 [dev-dependencies]
 tempfile = "3.27.0"

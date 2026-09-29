@@ -1,5 +1,6 @@
 { pkgs ? import <nixpkgs> {}, hostOnly ? false }:
 pkgs.mkShell {
+  buildInputs = [ pkgs.openssl ];
   packages = with pkgs; [ cargo rustc rustfmt clippy pkg-config uv openssh trunk rustup llvmPackages.lld ]
     ++ lib.optionals (!hostOnly) [ qemu virtiofsd ];
   DEMODEX_DYNAMIC_LINKER = pkgs.stdenv.cc.bintools.dynamicLinker;

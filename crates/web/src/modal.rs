@@ -5,6 +5,12 @@ use yew::prelude::*;
 #[derive(Properties, PartialEq)]
 pub struct Props {
     pub title: String,
+    #[prop_or_default]
+    pub compact: bool,
+    #[prop_or_default]
+    pub dismiss_outside: bool,
+    #[prop_or_default]
+    pub icon_close: bool,
     pub onclose: Callback<()>,
     pub children: Children,
 }
@@ -83,9 +89,23 @@ impl Component for Modal {
                 }
             }
         });
-        html! {<dialog class="session-modal" ref={self.dialog.clone()} aria-labelledby="session-modal-title" onkeydown={trap_focus}
-            oncancel={ctx.link().callback(|e:Event|{e.prevent_default();})}>
-            <div class="modal-heading"><h2 id="session-modal-title">{&ctx.props().title}</h2><button type="button" autofocus=true onclick={ctx.link().callback(|_|())}>{"Close"}</button></div>
+        let reference = self.dialog.clone();
+        let close = ctx.props().onclose.clone();
+        let dismiss = ctx.props().dismiss_outside;
+        let outside = Callback::from(move |event: MouseEvent| {
+            if !dismiss { return; }
+            if let Some(dialog) = reference.cast::<HtmlDialogElement>() {
+                // Nested preview dialogs bubble clicks through this dialog too.
+                // Only this dialog's own backdrop is an outside-click target.
+                if event.target().is_none_or(|target| target != dialog.clone().unchecked_into::<web_sys::EventTarget>()) { return; }
+                let r = dialog.get_bounding_client_rect();
+                let (x,y) = (event.client_x() as f64,event.client_y() as f64);
+                if x < r.left() || x > r.right() || y < r.top() || y > r.bottom() { close.emit(()); }
+            }
+        });
+        html! {<dialog class={classes!("session-modal", ctx.props().compact.then_some("content-sized"))} ref={self.dialog.clone()} aria-label={ctx.props().title.clone()} onkeydown={trap_focus}
+            onclick={outside} oncancel={ctx.link().callback(|e:Event|{e.prevent_default();})}>
+            <div class="modal-heading"><h2>{&ctx.props().title}</h2><button type="button" aria-label="Close" autofocus=true onclick={ctx.link().callback(|_|())}>{if ctx.props().icon_close {"×"} else {"Close"}}</button></div>
             <div class="modal-body">{ctx.props().children.clone()}</div>
         </dialog>}
     }

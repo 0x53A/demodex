@@ -736,6 +736,7 @@ mod tests {
                 generation: "fixture".into(),
                 thread: "thread".into(),
                 turn: Mutex::new(None),
+                subagents: Default::default(),
             }),
         );
         let orchestrator = Orchestrator::new(manager.clone(), root.path().into(), None, None, None);
@@ -835,6 +836,23 @@ mod tests {
         let log = calls.lock().await;
         let turn = log.iter().rev().find(|r|r["method"]=="turn/start").unwrap();
         assert_eq!(turn["params"]["environments"],json!([{"environmentId":manager.store.get(&session.id)?.targets[0].id,"cwd":"/b"}]));
+        drop(log);
+        // A directory-only edit uses the same next-turn boundary, without
+        // restarting the session or changing a running turn's directory.
+        state.lock().await["active"] = json!(true);
+        let directory_only = vec![Selection { id: b.id.clone(), cwd: "/b/next-project".into() }];
+        orchestrator.change_targets(&session.id, &directory_only, demodex_protocol::TargetChangeMode::NextTurn).await?;
+        assert_eq!(manager.store.get(&session.id)?.targets[0].cwd, "/b");
+        manager.prompt(&session.id, "Steer before the directory changes").await?;
+        assert_eq!(manager.store.get(&session.id)?.targets[0].cwd, "/b");
+        state.lock().await["active"] = json!(false);
+        *manager.runtime(&session.id).await?.turn.lock().await = None;
+        manager.prompt(&session.id, "Use the next project directory").await?;
+        assert_eq!(manager.store.get(&session.id)?.targets[0].cwd, "/b/next-project");
+        let log = calls.lock().await;
+        let turn = log.iter().rev().find(|r| r["method"] == "turn/start").unwrap();
+        assert_eq!(turn["params"]["environments"][0]["cwd"], "/b/next-project");
+        assert!(!log.iter().any(|r| matches!(r["method"].as_str(), Some("thread/settings/update" | "thread/resume" | "turn/interrupt"))));
         server.abort();
         Ok(())
     }

@@ -63,3 +63,34 @@ self.addEventListener('fetch', event => {
 self.addEventListener('message', event => {
   if (event.data?.type === 'ACTIVATE_UPDATE') event.waitUntil(self.skipWaiting());
 });
+
+// Push settings are separate from the static asset cache; no transcript or token
+// enters worker storage. A subscription is bound to one daemon identity.
+async function pushBinding() {
+  const db=await new Promise((resolve,reject)=>{const r=indexedDB.open(`demodex-push:${new URL(self.registration.scope).pathname}`,1);r.onupgradeneeded=()=>r.result.createObjectStore('settings');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
+  try{return await new Promise((resolve,reject)=>{const r=db.transaction('settings').objectStore('settings').get('binding');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});}finally{db.close();}
+}
+self.addEventListener('push',event=>event.waitUntil((async()=>{
+  let data;try{data=event.data?.json();}catch{return;}
+  const binding=await pushBinding();
+  if(!binding || data?.server_id!==binding.server_id || data?.server_url!==binding.server_url)return;
+  if(typeof data.title!=='string'||typeof data.message!=='string'||typeof data.id!=='string')return;
+  const url=new URL(self.registration.scope);
+  url.searchParams.set('notify_server',binding.server_url);
+  url.searchParams.set('notify_session',typeof data.session_id==='string'?data.session_id:'');
+  await self.registration.showNotification(data.title.slice(0,240),{
+    body:data.message.slice(0,1500),tag:`demodex:${data.server_id}:${data.id}`,renotify:false,
+    icon:new URL('./icon-192.png',self.registration.scope).href,
+    data:{url:url.href},
+  });
+})()));
+self.addEventListener('notificationclick',event=>{
+  event.notification.close();
+  event.waitUntil((async()=>{
+    const url=new URL(event.notification.data?.url||self.registration.scope);
+    const scope=new URL(self.registration.scope);
+    if(url.origin!==scope.origin||url.pathname!==scope.pathname)return;
+    // A new client keeps an already-open conversation and its unsent draft intact.
+    await self.clients.openWindow(url.href);
+  })());
+});

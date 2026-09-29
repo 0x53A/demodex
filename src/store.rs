@@ -17,6 +17,15 @@ pub use demodex_protocol::Pending;
 
 pub struct Store(Mutex<Connection>);
 
+// Match the overview's normalized folder grouping, independent of executor IDs.
+fn session_group(session: &Session) -> String {
+    let path = session.presentation.context.as_ref()
+        .filter(|c| c.path.starts_with('/') && session.targets.iter().any(|t| t.id == c.environment_id))
+        .map(|c| c.path.as_str())
+        .or_else(|| session.targets.first().map(|t| t.cwd.as_str())).unwrap_or("");
+    path.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("/")
+}
+
 impl Store {
     pub fn runtime_features(&self) -> Result<std::collections::BTreeMap<String, bool>> {
         let connection = self.0.lock().unwrap();
@@ -59,6 +68,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS execution_targets (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, cwd TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS session_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id), selection TEXT NOT NULL, pending INTEGER NOT NULL DEFAULT 0);
              CREATE TABLE IF NOT EXISTS staged_session_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id), selection TEXT NOT NULL, targets TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS message_files (session_id TEXT NOT NULL REFERENCES sessions(id), item_id TEXT NOT NULL, targets TEXT NOT NULL, files TEXT NOT NULL, PRIMARY KEY(session_id,item_id));
              CREATE TABLE IF NOT EXISTS events (
                seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id),
                at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), message TEXT NOT NULL);
@@ -84,6 +94,8 @@ impl Store {
                session_id TEXT PRIMARY KEY REFERENCES sessions(id), value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS session_usage (
                session_id TEXT PRIMARY KEY REFERENCES sessions(id), value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS session_order (
+               session_id TEXT PRIMARY KEY REFERENCES sessions(id), starred INTEGER NOT NULL DEFAULT 0, position INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS session_archive (
                session_id TEXT PRIMARY KEY REFERENCES sessions(id));
              CREATE TABLE IF NOT EXISTS session_model (
@@ -99,6 +111,8 @@ impl Store {
              UPDATE sessions SET status='disconnected', error=NULL;
              UPDATE pending SET state='unavailable' WHERE state IN ('pending','responding','delivered');",
         )?;
+        crate::notifications::initialize(&connection)?;
+        connection.execute("INSERT INTO session_order(session_id,position) SELECT id, (SELECT COALESCE(MAX(position),0) FROM session_order) + ROW_NUMBER() OVER (ORDER BY created,id) FROM sessions WHERE id NOT IN (SELECT session_id FROM session_order)", [])?;
         let has_engine = connection.prepare("PRAGMA table_info(containers)")?
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|column| column == "engine");
@@ -139,6 +153,17 @@ impl Store {
             }
         }
         let store = Self(Mutex::new(connection));
+        // Interrupted checks are durable unknown outcomes, never replayed.
+        let interrupted = store.lock()?.prepare("SELECT session_id,item_id,files FROM message_files WHERE files LIKE '%\"pending\"%'")?
+            .query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id,item,encoded) in interrupted {
+            let mut files: Vec<demodex_protocol::MessageFile> = serde_json::from_str(&encoded)?;
+            for file in &mut files { for check in &mut file.checks {
+                if check.state == "pending" { check.state="not-checked".into(); check.error=Some("Check interrupted by daemon restart; not retried".into()); }
+            }}
+            store.finish_message_files(&id,&item,&files)?;
+        }
         for session in store.list()? {
             store.ensure_target_selection(&session.id)?;
         }
@@ -324,6 +349,7 @@ impl Store {
         let tx = db.transaction()?;
         tx.execute("INSERT INTO sessions(id,name,endpoint,targets,thread_id,status) VALUES(?1,?2,?3,?4,?5,'disconnected')",
             params![id, name, endpoint, serde_json::to_string(targets)?, thread_id])?;
+        tx.execute("INSERT INTO session_order(session_id,position) VALUES(?1,(SELECT COALESCE(MAX(position),0)+1 FROM session_order))", [&id])?;
         tx.execute(
             "INSERT INTO session_presentation VALUES(?1,?2)",
             params![
@@ -381,7 +407,11 @@ impl Store {
 
     pub fn list(&self) -> Result<Vec<Session>> {
         let db = self.lock()?;
-        let mut query = db.prepare("SELECT id,name,endpoint,thread_id,targets,status,error,sandbox,effective_sandbox,session_presentation.value, EXISTS(SELECT 1 FROM session_archive WHERE session_id=sessions.id), (SELECT value FROM session_usage WHERE session_id=sessions.id) FROM sessions LEFT JOIN session_settings ON sessions.id=session_settings.session_id JOIN session_presentation ON sessions.id=session_presentation.session_id ORDER BY created,id")?;
+        Self::list_from(&db)
+    }
+
+    fn list_from(db: &Connection) -> Result<Vec<Session>> {
+        let mut query = db.prepare("SELECT id,name,endpoint,thread_id,targets,status,error,sandbox,effective_sandbox,session_presentation.value, EXISTS(SELECT 1 FROM session_archive WHERE session_id=sessions.id), (SELECT value FROM session_usage WHERE session_id=sessions.id), session_order.starred, session_order.position FROM sessions LEFT JOIN session_settings ON sessions.id=session_settings.session_id JOIN session_presentation ON sessions.id=session_presentation.session_id JOIN session_order ON sessions.id=session_order.session_id ORDER BY session_order.position,created,id")?;
         let rows = query.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -396,6 +426,8 @@ impl Store {
                 row.get::<_, String>(9)?,
                 row.get::<_, bool>(10)?,
                 row.get::<_, Option<String>>(11)?,
+                row.get::<_, bool>(12)?,
+                row.get::<_, i64>(13)?,
             ))
         })?;
         rows.map(|row| {
@@ -412,9 +444,13 @@ impl Store {
                 presentation,
                 archived,
                 context_usage,
+                starred,
+                sort_order,
             ) = row?;
             Ok(Session {
                 archived,
+                starred,
+                sort_order,
                 context_usage: context_usage
                     .as_deref()
                     .map(serde_json::from_str)
@@ -441,6 +477,54 @@ impl Store {
     pub fn context_usage(&self, id: &str, usage: &Value) -> Result<()> {
         self.lock()?.execute("INSERT INTO session_usage VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET value=excluded.value",
             params![id, crate::usage::context(usage).to_string()])?;
+        Ok(())
+    }
+
+    pub fn star(&self, id: &str, starred: bool) -> Result<()> {
+        anyhow::ensure!(self.lock()?.execute("UPDATE session_order SET starred=?2 WHERE session_id=?1", params![id,starred])? == 1, "session not found");
+        Ok(())
+    }
+
+    pub fn reorder_sessions(&self, expected: &[String], ids: &[String]) -> Result<()> {
+        use std::collections::BTreeSet;
+        anyhow::ensure!(!expected.is_empty() && expected.len() == ids.len(), "invalid session order");
+        let unique: BTreeSet<_> = ids.iter().collect();
+        anyhow::ensure!(unique.len() == ids.len() && unique == expected.iter().collect(), "session order must contain each session exactly once");
+        let mut db = self.lock()?;
+        let tx = db.transaction()?;
+        let sessions = Self::list_from(&tx)?;
+        let first = sessions.iter().find(|s| s.id == expected[0]).context("session not found")?;
+        let group = session_group(first);
+        let siblings: Vec<_> = sessions.iter().filter(|s| s.archived == first.archived && s.starred == first.starred && session_group(s) == group).collect();
+        anyhow::ensure!(siblings.iter().map(|s| &s.id).eq(expected.iter()), "session group or order changed; refresh before reordering");
+        for (id, previous) in ids.iter().zip(siblings) {
+            tx.execute("UPDATE session_order SET position=?2 WHERE session_id=?1", params![id,previous.sort_order])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn move_session(&self, id: &str, neighbor: &str) -> Result<()> {
+        let mut db = self.lock()?;
+        let tx = db.transaction()?;
+        let sessions = Self::list_from(&tx)?;
+        let session = sessions.iter().find(|s| s.id == id).context("session not found")?;
+        let group = session_group(session);
+        let siblings: Vec<_> = sessions.iter().filter(|s| s.archived == session.archived && s.starred == session.starred && session_group(s) == group).collect();
+        let index = siblings.iter().position(|s| s.id == id).unwrap();
+        let other = siblings.iter().position(|s| s.id == neighbor).context("sessions must be in the same project group and have the same star state")?;
+        anyhow::ensure!(index.abs_diff(other) == 1, "session order changed; refresh before moving again");
+        tx.execute("UPDATE session_order SET position=?2 WHERE session_id=?1",params![id,siblings[other].sort_order])?;
+        tx.execute("UPDATE session_order SET position=?2 WHERE session_id=?1",params![neighbor,session.sort_order])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn rename(&self, id: &str, name: &str) -> Result<()> {
+        let name = name.trim();
+        anyhow::ensure!(!name.is_empty() && name.chars().count() <= 120, "session name must be 1–120 characters");
+        self.get(id)?;
+        self.lock()?.execute("UPDATE sessions SET name=?2 WHERE id=?1", params![id, name])?;
         Ok(())
     }
 
@@ -522,6 +606,14 @@ impl Store {
             );
             return Ok(serde_json::from_str(&response)?);
         }
+        // Read display fields under the same transaction that writes them, so
+        // concurrent identity/context updates cannot overwrite each other.
+        let (title, presentation): (String, String) = tx.query_row(
+            "SELECT sessions.name,session_presentation.value FROM sessions JOIN session_presentation ON sessions.id=session_presentation.session_id WHERE sessions.id=?1",
+            [id], |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        session.name = title;
+        session.presentation = serde_json::from_str(&presentation)?;
         let result = (|| -> Result<Value> {
             anyhow::ensure!(
                 session.presentation.context_reporting,
@@ -539,6 +631,19 @@ impl Store {
                     session.presentation.context = Some(context);
                     Ok(serde_json::to_value(&session.presentation)?)
                 }
+                "notify" => {
+                    let input: crate::notifications::NotificationInput = serde_json::from_value(request["arguments"].clone())?;
+                    crate::notifications::record(&tx, &session, input)
+                }
+                "set_session_identity" => {
+                    let mut update: session_context::IdentityUpdate =
+                        serde_json::from_value(request["arguments"].clone())?;
+                    update.validate()?;
+                    if let Some(title) = update.title { session.name = title; }
+                    if let Some(name) = update.name { session.presentation.name = name; }
+                    if let Some(icon) = update.icon { session.presentation.icon = icon; }
+                    Ok(serde_json::json!({"session_id":session.id,"title":session.name,"presentation":session.presentation}))
+                }
                 "get_session_context" => {
                     anyhow::ensure!(
                         request["arguments"]
@@ -547,7 +652,7 @@ impl Store {
                         "get_session_context takes no arguments"
                     );
                     Ok(
-                        serde_json::json!({"session_id":session.id,"thread_id":session.thread_id,"presentation":session.presentation,"environments":session.targets.iter().map(|t| serde_json::json!({"environment_id":t.id,"execution_directory":t.cwd,"executor_guidance":if t.id.starts_with("ssh-"){Some(crate::ssh::AGENT_INSTRUCTIONS)}else{None}})).collect::<Vec<_>>()}),
+                        serde_json::json!({"session_id":session.id,"thread_id":session.thread_id,"title":session.name,"presentation":session.presentation,"environments":session.targets.iter().map(|t| serde_json::json!({"environment_id":t.id,"execution_directory":t.cwd,"executor_guidance":if t.id.starts_with("ssh-"){Some(crate::ssh::AGENT_INSTRUCTIONS)}else{None}})).collect::<Vec<_>>()}),
                     )
                 }
                 _ => anyhow::bail!("unsupported Demodex tool"),
@@ -565,7 +670,10 @@ impl Store {
                 response.to_string()
             ],
         )?;
-        if response["success"] == true && request["tool"] == "set_user_visible_session_context" {
+        if response["success"] == true && matches!(request["tool"].as_str(), Some("set_user_visible_session_context" | "set_session_identity")) {
+            if request["tool"] == "set_session_identity" {
+                tx.execute("UPDATE sessions SET name=?2 WHERE id=?1", params![id, session.name])?;
+            }
             tx.execute(
                 "UPDATE session_presentation SET value=?2 WHERE session_id=?1",
                 params![id, serde_json::to_string(&session.presentation)?],
@@ -588,6 +696,34 @@ impl Store {
             "UPDATE sessions SET status=?2,error=?3 WHERE id=?1",
             params![id, status, error],
         )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn claim_message_files(&self, id: &str, item: &str, targets: &[Target], files: &[demodex_protocol::MessageFile]) -> Result<bool> {
+        let db = self.lock()?;
+        Ok(db.execute("INSERT OR IGNORE INTO message_files VALUES(?1,?2,?3,?4)", params![id,item,serde_json::to_string(targets)?,serde_json::to_string(files)?])? == 1)
+    }
+    pub fn completed_message_files(&self, id: &str, item: &str, targets: &[Target], files: &[demodex_protocol::MessageFile], message: &Value) -> Result<bool> {
+        let mut db = self.lock()?;
+        let tx = db.transaction()?;
+        tx.execute("INSERT INTO events(session_id,message) VALUES(?1,?2)", params![id,serde_json::to_string(message)?])?;
+        let claimed = tx.execute("INSERT OR IGNORE INTO message_files VALUES(?1,?2,?3,?4)", params![id,item,serde_json::to_string(targets)?,serde_json::to_string(files)?])? == 1;
+        tx.commit()?;
+        Ok(claimed)
+    }
+    pub fn message_files(&self, id: &str, item: &str) -> Result<Option<(Vec<Target>, Vec<demodex_protocol::MessageFile>)>> {
+        let db = self.lock()?;
+        let row: Option<(String,String)> = db.query_row("SELECT targets,files FROM message_files WHERE session_id=?1 AND item_id=?2", params![id,item], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+        row.map(|(targets,files)| Ok((serde_json::from_str(&targets)?,serde_json::from_str(&files)?))).transpose()
+    }
+    pub fn finish_message_files(&self, id: &str, item: &str, files: &[demodex_protocol::MessageFile]) -> Result<()> {
+        let mut db = self.lock()?;
+        let tx = db.transaction()?;
+        tx.execute("UPDATE message_files SET files=?3 WHERE session_id=?1 AND item_id=?2", params![id,item,serde_json::to_string(files)?])?;
+        let message=serde_json::json!({"method":"demodex/messageFiles","params":{"itemId":item,"files":files}});
+        tx.execute("INSERT INTO events(session_id,message) VALUES(?1,?2)", params![id,serde_json::to_string(&message)?])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -676,6 +812,77 @@ impl Store {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn stars_and_order_stay_within_groups_and_survive_restart() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("order.db");
+        let store = Store::open(&path)?;
+        let a = store.create("A","ws://localhost:1",&[],Some("a"))?;
+        let b = store.create("B","ws://localhost:1",&[],Some("b"))?;
+        let c = store.create("C","ws://localhost:1",&[],Some("c"))?;
+        let d = store.create("D","ws://localhost:1",&[Target{id:"host".into(),url:"ws://localhost:2".into(),cwd:"/other".into()}],Some("d"))?;
+        assert!(store.move_session(&a.id,&c.id).is_err());
+        store.move_session(&b.id,&a.id)?;
+        assert_eq!(store.list()?[0].id,b.id);
+        store.star(&a.id,true)?;
+        assert!(store.move_session(&b.id,&a.id).is_err());
+        assert!(store.move_session(&b.id,&d.id).is_err());
+        store.star(&c.id,true)?;
+        store.move_session(&c.id,&a.id)?;
+        assert!(store.get(&c.id)?.sort_order < store.get(&a.id)?.sort_order);
+        store.archive(&c.id,true)?;
+        assert!(store.move_session(&c.id,&a.id).is_err());
+        store.archive(&c.id,false)?;
+        drop(store);
+        let store = Store::open(&path)?;
+        assert!(store.get(&a.id)?.starred);
+        assert!(store.get(&c.id)?.starred);
+        assert!(!store.get(&b.id)?.starred);
+        assert!(store.get(&c.id)?.sort_order < store.get(&a.id)?.sort_order);
+        assert_eq!(store.get(&b.id)?.thread_id.as_deref(),Some("b"));
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_reorder_rejects_stale_partial_and_cross_group_lists() -> Result<()> {
+        let store = Store::open(std::path::Path::new(":memory:"))?;
+        let a=store.create("A","ws://localhost:1",&[],Some("a"))?.id;
+        let b=store.create("B","ws://localhost:1",&[],Some("b"))?.id;
+        let c=store.create("C","ws://localhost:1",&[],Some("c"))?.id;
+        let original=vec![a.clone(),b.clone(),c.clone()];
+        let reordered=vec![c.clone(),a.clone(),b.clone()];
+        store.reorder_sessions(&original,&reordered)?;
+        assert_eq!(store.list()?.iter().map(|s|s.id.clone()).collect::<Vec<_>>(),reordered);
+        assert!(store.reorder_sessions(&original,&reordered).is_err());
+        assert!(store.reorder_sessions(&reordered,&[a.clone(),a.clone(),b.clone()]).is_err());
+        assert!(store.reorder_sessions(&[a.clone(),b.clone()],&[b.clone(),a.clone()]).is_err());
+        store.star(&a,true)?;
+        assert!(store.reorder_sessions(&reordered,&original).is_err());
+        store.reorder_sessions(&[c.clone(),b.clone()],&[b.clone(),c.clone()])?;
+        store.archive(&c,true)?;
+        assert!(store.reorder_sessions(&[b.clone(),c.clone()],&[c,b]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rename_validates_and_preserves_identity_across_restart() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("rename.db");
+        let id;
+        {
+            let store = Store::open(&path)?;
+            let session = store.create("Before", "ws://localhost:1", &[], Some("thread"))?;
+            id = session.id;
+            assert!(store.rename(&id, "   ").is_err());
+            assert!(store.rename(&id, &"a".repeat(121)).is_err());
+            store.rename(&id, "  After 🦆  ")?;
+        }
+        let session = Store::open(&path)?.get(&id)?;
+        assert_eq!(session.name,"After 🦆");
+        assert_eq!(session.thread_id.as_deref(),Some("thread"));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn archive_requires_stopped_state_and_survives_restart_without_losing_history()
     -> Result<()> {

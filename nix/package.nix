@@ -12,5 +12,6 @@ rustPlatform.buildRustPackage {
   };
   cargoBuildFlags = [ "--package" "demodex" ];
   cargoTestFlags = [ "--package" "demodex" "--lib" "--bins" ];
-  nativeBuildInputs = [ pkgs.cmake ];
+  nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config ];
+  buildInputs = [ pkgs.openssl ];
 }

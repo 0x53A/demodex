@@ -132,7 +132,7 @@ impl Client {
         let (tx, updates) = watch::channel(Wake::Changed);
         let changed = tx.clone();
         let (sink, _) = FnActor::<Notice>::start_fn(async move |mut ctx| {
-            while let Some(Notice::Changed) = ctx.rx.recv().await {
+            while let Some(_notice) = ctx.rx.recv().await {
                 changed.send_replace(Wake::Changed);
             }
         })

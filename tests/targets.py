@@ -3,6 +3,7 @@
 # ///
 """Shared target picker through real Yew/Wormhole, using a no-inference Codex fixture."""
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -82,7 +83,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-targets-') as temporary:
     threading.Thread(target=server.serve_forever, daemon=True).start()
     origin = f'http://127.0.0.1:{daemon_port}'
     with (root/'daemon.log').open('w+') as log:
-        daemon = subprocess.Popen([str(ROOT/'target/rust-pwa/debug/demodex'), '--bind', f'127.0.0.1:{daemon_port}', '--data-dir', str(root/'state'), '--web-dir', str(ROOT/'web/.rust-dist')], stdout=log, stderr=log)
+        daemon = subprocess.Popen([os.environ.get('DEMODEX_BIN',str(ROOT/'target/rust-pwa/debug/demodex')), '--bind', f'127.0.0.1:{daemon_port}', '--data-dir', str(root/'state'), '--web-dir', str(ROOT/'web/.rust-dist')], stdout=log, stderr=log)
         try:
             for _ in range(100):
                 try:
@@ -97,34 +98,38 @@ with tempfile.TemporaryDirectory(prefix='demodex-targets-') as temporary:
             session = api('/sessions', {'name':'Target fixture','endpoint':f'ws://127.0.0.1:{codex_port}','targets':[{'id':'First','url':'ws://127.0.0.1:5011','cwd':'/first'}]})
             api('/sessions/'+session['id']+'/connect', {})
             with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(executable_path='/run/current-system/sw/bin/google-chrome',headless=True,args=['--no-sandbox'])
+                browser = playwright.chromium.launch(executable_path=os.environ.get('CHROME','/run/current-system/sw/bin/google-chrome'),headless=True,args=['--no-sandbox'])
                 page = browser.new_page(viewport={'width':390,'height':844})
                 errors=[]
                 page.on('pageerror',lambda error:errors.append(str(error)))
                 page.goto(origin)
+                page.get_by_role('button',name='+ connection',exact=True).click()
                 page.get_by_label('Access token').fill(token)
-                page.get_by_role('button',name='Connect host',exact=True).click()
-                expect(page.locator('header .indicator')).to_have_text('CONNECTED',timeout=20000)
+                page.get_by_role('button',name='Save and connect',exact=True).click()
+                expect(page.locator('header .indicator')).to_have_text('connected to',timeout=20000)
                 page.get_by_role('button',name='Server settings',exact=True).click()
-                page.get_by_text('Register an external executor',exact=True).click()
-                page.get_by_label('Target name',exact=True).fill('Second')
+                page.get_by_role('button',name='+ Register external executor',exact=True).click()
+                page.get_by_label('Executor name',exact=True).fill('Second')
                 page.get_by_label('Executor WebSocket URL',exact=True).fill('ws://127.0.0.1:5012')
                 page.get_by_label('Default working directory',exact=True).fill('/second')
-                page.get_by_role('button',name='Register target',exact=True).click()
+                page.get_by_role('button',name='Register executor',exact=True).click()
                 expect(page.locator('.target-registry')).to_contain_text('Second')
+                page.get_by_role('dialog',name='Server settings',exact=True).get_by_role('button',name='Close',exact=True).click()
                 # On mobile the session tree may be hidden; return through the header.
                 page.set_viewport_size({'width':1200,'height':850})
-                page.get_by_role('button',name='Target fixture',exact=False).click()
+                page.locator('.session').filter(has_text='Target fixture').click()
                 page.get_by_label('Message',exact=True).fill('Draft kept while changing targets')
                 page.get_by_role('button',name='Session controls',exact=True).click()
                 dialog=page.get_by_role('dialog',name='Session controls',exact=True)
-                dialog.locator('.target-picker > summary').click()
                 dialog.get_by_label('Second · external',exact=True).check()
                 dialog.get_by_label('Second working directory',exact=True).fill('/second/project')
                 dialog.get_by_role('button',name='Make primary',exact=True).click()
-                dialog.get_by_role('button',name='Save targets',exact=True).click()
-                expect(dialog.locator('.target-picker')).to_contain_text('Targets saved. Send a message')
+                dialog.get_by_role('button',name='Save executors and directories',exact=True).click()
+                expect(dialog.locator('.target-picker')).to_contain_text('Executors and directories saved. Send a message')
                 expect(dialog.get_by_role('button',name='Start / resume goal',exact=True)).to_be_disabled()
+                expect(dialog.get_by_role('button',name='Start goal',exact=True)).to_have_count(0)
+                dialog.get_by_label('Goal objective',exact=True).fill('Replacement goal')
+                expect(dialog.get_by_role('button',name='Start goal',exact=True)).to_be_disabled()
                 detail=api('/sessions/'+session['id'])
                 assert [t['cwd'] for t in detail['target_selection']]==['/second/project','/first'],detail
                 assert len(detail['session']['targets'])==2 and detail['targets_pending']
@@ -137,7 +142,6 @@ with tempfile.TemporaryDirectory(prefix='demodex-targets-') as temporary:
                 assert [t['cwd'] for t in turn['params']['environments']]==['/second/project','/first']
                 assert turn['params']['threadId']=='fixture-thread'
                 page.get_by_role('button',name='Session controls',exact=True).click()
-                dialog.locator('.target-picker > summary').click()
                 expect(dialog.get_by_role('button',name='Save for next turn',exact=True)).to_be_enabled()
                 expect(dialog.get_by_role('button',name='Interrupt and save',exact=True)).to_be_enabled()
                 page.set_viewport_size({'width':390,'height':844})
@@ -146,6 +150,19 @@ with tempfile.TemporaryDirectory(prefix='demodex-targets-') as temporary:
                 page.set_viewport_size({'width':1200,'height':850})
                 starts=sum(c['method']=='turn/start' for c in calls)
                 interrupts=sum(c['method']=='turn/interrupt' for c in calls)
+                # Directory-only edits are visible in Session Controls and can
+                # be staged while work continues, without a session restart.
+                expect(dialog.get_by_role('heading',name='Working directories',exact=True)).to_be_visible()
+                dialog.get_by_label('Second (primary) working directory',exact=True).fill('/second/next-project')
+                dialog.get_by_role('button',name='Save for next turn',exact=True).click()
+                expect(dialog.locator('.effective-targets')).to_contain_text('/second/project')
+                detail=api('/sessions/'+session['id'])
+                assert detail['target_selection'][0]['cwd']=='/second/next-project',detail
+                assert detail['session']['targets'][0]['cwd']=='/second/project',detail
+                assert detail['session']['thread_id']=='fixture-thread'
+                assert sum(c['method']=='turn/start' for c in calls)==starts
+                assert sum(c['method']=='turn/interrupt' for c in calls)==interrupts
+                assert not any(c['method']=='thread/settings/update' and 'cwd' in c['params'] for c in calls)
                 # Save a reduction without changing the running turn or its users.
                 dialog.get_by_label('Second · external',exact=True).click()
                 expect(dialog.get_by_label('Second · external',exact=True)).not_to_be_checked()
@@ -167,7 +184,6 @@ with tempfile.TemporaryDirectory(prefix='demodex-targets-') as temporary:
                 assert calls[-1]['method'] != 'turn/start'
                 assert api('/sessions/'+session['id'])['targets_pending']
                 page.get_by_role('button',name='Session controls',exact=True).click()
-                dialog.locator('.target-picker > summary').click()
                 expect(dialog.get_by_label('Second · external',exact=True)).not_to_be_checked()
                 # A rejected interrupt leaves both saved and effective selections alone.
                 dialog.get_by_label('First · external',exact=True).click()
@@ -189,7 +205,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-targets-') as temporary:
                 interrupt_release.set()
                 interrupt_gate=False
                 expect(page.locator('.session-heading .status')).to_have_text('idle')
-                expect(dialog.get_by_role('button',name='Save targets',exact=True)).to_be_enabled()
+                expect(dialog.get_by_role('button',name='Save executors and directories',exact=True)).to_be_enabled()
                 detail=api('/sessions/'+session['id'])
                 assert detail['target_selection']==[] and detail['targets_pending']
                 assert len(detail['session']['targets'])==2, 'saving claimed immediate revocation'

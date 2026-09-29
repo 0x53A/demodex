@@ -1,5 +1,9 @@
 mod background;
+mod notifications;
+mod subagents;
 mod controls;
+mod directories;
+mod message_files;
 pub mod daemon;
 mod http;
 mod manager;
@@ -51,6 +55,7 @@ pub struct Runtime {
     service: Service,
     stop: tokio_util::sync::CancellationToken,
     worker: Option<tokio::task::JoinHandle<()>>,
+    push_worker: Option<tokio::task::JoinHandle<()>>,
 }
 impl Runtime {
     pub async fn start(config: Config) -> anyhow::Result<Self> {
@@ -60,6 +65,21 @@ impl Runtime {
             return Err(error);
         }
         let stop = tokio_util::sync::CancellationToken::new();
+        let push_stop = stop.clone();
+        let push_manager = service.manager.clone();
+        let push_worker = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = push_stop.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                        if let Err(error) = crate::notifications::drain(&push_manager).await {
+                            tracing::warn!("notification delivery: {error:#}");
+                        }
+                    }
+                }
+            }
+        });
         let stopped = stop.clone();
         let app = service.clone();
         let worker = tokio::spawn(async move {
@@ -80,6 +100,7 @@ impl Runtime {
             service,
             stop,
             worker: Some(worker),
+            push_worker: Some(push_worker),
         })
     }
     pub fn service(&self) -> Service {
@@ -88,6 +109,9 @@ impl Runtime {
     pub async fn shutdown(mut self) -> anyhow::Result<()> {
         self.service.lifecycle.close();
         self.stop.cancel();
+        if let Some(worker) = self.push_worker.take() {
+            worker.await?;
+        }
         if let Some(worker) = self.worker.take() {
             worker.await?;
         }
@@ -173,6 +197,11 @@ impl Service {
     async fn shutdown(&self) {
         self.lifecycle.close();
         let _drained = self.lifecycle.calls.write().await;
+        {
+            let _sessions = self.manager.live.lock().await;
+            self.manager.file_jobs.close();
+        }
+        self.manager.file_jobs.wait().await;
         self.orchestrator.shutdown().await;
     }
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<()> {

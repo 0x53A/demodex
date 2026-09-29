@@ -48,50 +48,58 @@ with tempfile.TemporaryDirectory(prefix='demodex-pwa-') as directory:
     origin = f'http://127.0.0.1:{server.server_port}/'
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(executable_path='/run/current-system/sw/bin/google-chrome', headless=True, args=['--no-sandbox'])
+            browser = p.chromium.launch(executable_path=os.environ.get('CHROME','/run/current-system/sw/bin/google-chrome'), headless=True, args=['--no-sandbox'])
             context = browser.new_context(viewport={'width': 390, 'height': 844})
             page = context.new_page()
-            # Restore a previously opened form. A fresh unauthenticated window
-            # correctly starts at the connection picker; this static-only fixture
-            # has no daemon with which to complete login and navigate there.
+            # Drafts live in Saved, not in the offline shell's conversation data.
+            # Seed a real host/session-scoped draft, then exercise the app's normal
+            # deserialize/persist/update path. A static origin cannot provide a
+            # session snapshot, so it correctly has no Message composer.
             page.add_init_script('''if (!sessionStorage.getItem('pwa-fixture-seeded')) {
                 sessionStorage.setItem('pwa-fixture-seeded', '1');
-                sessionStorage.setItem('demodex-rust-view', JSON.stringify({host:location.origin,page:'environments'}));
-                history.replaceState(JSON.stringify({host:location.origin,selected:'',page:'environments',connections:false}), '');
+                sessionStorage.setItem('demodex-rust-view', JSON.stringify({
+                    host:location.origin,selected:'',page:'',
+                    drafts:{[location.origin+':pwa-fixture']:'Unsubmitted chat draft\\nSecond line · λ'},
+                    fixtureUnknownField:'must disappear after app serialization'
+                }));
+                history.replaceState(JSON.stringify({host:location.origin,selected:'',page:'',connections:true}), '');
             }''')
+            def assert_draft():
+                saved = page.evaluate("JSON.parse(sessionStorage.getItem('demodex-rust-view'))")
+                assert saved['drafts'][origin.rstrip('/') + ':pwa-fixture'] == 'Unsubmitted chat draft\nSecond line · λ', saved
+                assert 'fixtureUnknownField' not in saved, 'app never deserialized and persisted the seeded view'
+                assert 'new_session_name' in saved['fields'], saved
             errors = []
             page.on('pageerror', lambda error: errors.append(str(error)))
             page.goto(origin)
-            page.get_by_role('heading', name='Server settings', exact=True).wait_for()
-            page.get_by_text('Create a VM', exact=True).click()
-            page.get_by_label('Environment name', exact=True).fill('Unsubmitted VM')
+            page.get_by_role('dialog', name='Connections', exact=True).get_by_role('button', name='Close', exact=True).click()
+            assert_draft()
             page.evaluate('navigator.serviceWorker.ready')
             page.wait_for_function('navigator.serviceWorker.controller !== null')
             page.evaluate("window.marker=1; caches.open('unrelated-app')")
             other = context.new_page()
             other.goto(origin)
-            other.get_by_label('Access token').wait_for()
+            other.get_by_role('dialog', name='Connections', exact=True).wait_for()
             other.evaluate('window.marker=2')
             release(root, 'two')
             page.evaluate("window.dispatchEvent(new Event('pageshow'))")
             page.get_by_role('button', name='Update now', exact=True).wait_for(timeout=20_000)
             assert page.locator('body').get_attribute('data-version') == 'one'
             assert page.evaluate('window.marker') == 1
-            assert page.get_by_label('Environment name', exact=True).input_value() == 'Unsubmitted VM'
+            assert_draft()
             assert page.evaluate('document.documentElement.scrollHeight <= innerHeight')
             with page.expect_navigation():
                 page.get_by_role('button', name='Update now', exact=True).click()
-            page.get_by_role('heading', name='Server settings', exact=True).wait_for()
-            page.get_by_text('Create a VM', exact=True).click()
+            page.get_by_role('button', name='Connections', exact=True).wait_for()
             assert page.locator('body').get_attribute('data-version') == 'two'
-            assert page.get_by_label('Environment name', exact=True).input_value() == 'Unsubmitted VM'
+            assert_draft()
             assert other.evaluate('window.marker') == 2, 'another tab was forcibly reloaded'
             other.get_by_role('button', name='Update now', exact=True).wait_for()
             release(root, 'three')
             launched = context.new_page()
             launched.goto(origin)
             launched.wait_for_function('document.body.dataset.version === "three"', timeout=20_000)
-            launched.get_by_label('Access token').wait_for()
+            launched.get_by_role('dialog', name='Connections', exact=True).wait_for()
             assert other.evaluate('window.marker') == 2
             # A corrupt/partial release must never replace the working shell.
             release(root, 'broken')
@@ -120,14 +128,14 @@ with tempfile.TemporaryDirectory(prefix='demodex-pwa-') as directory:
             # Offline reload serves only the shell; API data must not masquerade as live.
             context.set_offline(True)
             launched.reload()
-            launched.get_by_label('Access token').wait_for(timeout=15_000)
+            launched.get_by_role('dialog', name='Connections', exact=True).wait_for(timeout=15_000)
             assert launched.locator('body').get_attribute('data-version') == 'three'
             assert launched.get_by_role('heading', name='PWA fixture', exact=True).count() == 0
             context.set_offline(False)
-            assert page.get_by_label('Environment name', exact=True).input_value() == 'Unsubmitted VM'
+            assert_draft()
             assert errors == [], errors
             browser.close()
-            print('PASS: update notice, explicit reload, launch update, other tabs preserved, form recovery, partial release rejected, offline shell, static-only cache')
+            print('PASS: update notice, explicit reload, launch update, other tabs preserved, draft recovery, partial release rejected, offline shell, static-only cache')
     finally:
         server.shutdown()
         server.server_close()

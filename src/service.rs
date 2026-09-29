@@ -23,6 +23,10 @@ impl crate::Service {
 pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response> {
     use Operation::*;
     let value = match operation {
+        PushSettings { device_id } => crate::notifications::settings(&app.manager.store, &device_id)?,
+        RegisterPush { input } => crate::notifications::register(&app.manager.store, input)?,
+        RemovePush { device_id } => crate::notifications::remove(&app.manager.store, &device_id)?,
+        TestPush { device_id } => crate::notifications::test(&app.manager.store, &device_id).await?,
         Sessions => return Ok(Response::Sessions(list(app).await?)),
         Detail { id } => return Ok(Response::Detail(detail(app, id).await?)),
         Events { id, after } => return Ok(Response::Events(app.manager.store.events(&id, after)?)),
@@ -46,6 +50,22 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         HostSession { input } => return Ok(Response::Session(host_session(app, input).await?)),
         ExternalSession { input } => return Ok(Response::Session(create(app, input).await?)),
         Connect { id } => connect(app, id).await?,
+        StarSession { id, starred } => {
+            app.manager.store.star(&id, starred)?;
+            json!({"ok":true})
+        }
+        ReorderSessions { expected, ids } => {
+            app.manager.store.reorder_sessions(&expected, &ids)?;
+            json!({"ok":true})
+        }
+        MoveSession { id, neighbor } => {
+            app.manager.store.move_session(&id, &neighbor)?;
+            json!({"ok":true})
+        }
+        RenameSession { id, name } => {
+            app.manager.store.rename(&id, &name)?;
+            json!({"ok":true})
+        }
         Archive { id, archived } => archive(app, id, ArchiveChoice { archived }).await?,
         Sandbox { id, input } => change_sandbox(app, id, input).await?,
         Models { id } => models(app, id).await?,
@@ -64,6 +84,8 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
                 .stop_background(&id, &generation, &processes)
                 .await?
         }
+        MessageFiles { id, item } => crate::message_files::listing(&app.manager, &id, &item).await?,
+        ReadMessageFile { id, item, destination, executor } => crate::message_files::read(&app.manager, &id, &item, &destination, &executor).await?,
         UploadImage { id, bytes } => {
             json!({"path":app.orchestrator.upload_image(&id, &bytes).await?})
         }
@@ -81,6 +103,7 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         }
         Environments => return Ok(Response::Environments(environments(app).await?)),
         Targets => targets(app).await?,
+        BrowseDirectories { target, path } => tokio::time::timeout(std::time::Duration::from_secs(15), app.orchestrator.browse_directories(&target, &path)).await.context("Directory listing timed out")??,
         RegisterTarget { input } => register_target(app, input).await?,
         RegisterSshTarget { input } => register_ssh_target(app, input.into()).await?,
         RegisterSessionSshTarget { id, input } => app.orchestrator.register_session_ssh_target(&id, input.into()).await?,
@@ -177,6 +200,10 @@ pub async fn execute(app: &App, request_id: &str, operation: Operation) -> Resul
     }
     app.manager.store.begin_command(request_id, &encoded)?;
     drop(_lock);
+    let prompt_session = match &operation {
+        Operation::Prompt { id, .. } => Some(id.clone()),
+        _ => None,
+    };
     let result = dispatch(app, operation).await.map_err(|e| format!("{e:#}"));
     app.manager.store.finish_command(
         request_id,
@@ -185,7 +212,8 @@ pub async fn execute(app: &App, request_id: &str, operation: Operation) -> Resul
             result: result.clone(),
         })?,
     )?;
-    app.manager.changed();
+    if let Some(id) = prompt_session { app.manager.session_changed(&id, true); }
+    else { app.manager.changed(); }
     result.map_err(anyhow::Error::msg)
 }
 
@@ -381,7 +409,41 @@ async fn change_goal(app: &App, id: String, input: controls::GoalAction) -> Resu
 }
 
 async fn runtime_status(app: &App) -> Result<Value> {
-    app.orchestrator.runtime_status().await
+    use futures_util::StreamExt;
+    let mut status = app.orchestrator.runtime_status().await?;
+    let sessions = app.manager.store.list()?;
+    let managed = app.orchestrator.restart_session_ids().await.unwrap_or_default();
+    let mut counts = serde_json::Map::new();
+    let reads = futures_util::stream::iter(sessions.clone().into_iter().filter(|s| !s.archived).map(|session| async move {
+        let (snapshot, controls, queue) = tokio::join!(app.manager.background_snapshot(&session.id), app.manager.control_snapshot(&session.id), app.manager.queued(&session.id));
+        let controls = controls.unwrap_or_else(|error|json!({"goal":null,"goalError":error.to_string()}));
+        let count = snapshot["data"].as_array().map(Vec::len);
+        let subagents = match app.manager.runtime(&session.id).await { Ok(live)=>Some(live.subagents.lock().await.active()), Err(_)=>None };
+        (session.id.clone(), json!({"count":count,"active_subagents":subagents,"error":snapshot["error"],"goal":controls["goal"],"goal_error":controls["goalError"],"queued_count":queue.ok().and_then(|q|q.as_array().map(Vec::len)),"pending_count":app.manager.store.pending(&session.id).ok().map(|items|items.iter().filter(|p|matches!(p.state.as_str(),"pending"|"responding"|"delivered")).count())}))
+    })).buffer_unordered(4);
+    tokio::pin!(reads);
+    // Keep an unresponsive runtime from blocking the entire overview.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(6), async {
+        while let Some((id, value)) = reads.next().await { counts.insert(id, value); }
+    }).await;
+    let mut active = 0;
+    let mut goals = 0;
+    let mut queued = 0;
+    let mut pending = 0;
+    let mut background = 0;
+    let mut unknown = 0;
+    for session in sessions.iter().filter(|s| managed.contains(&s.id) && s.status != "disconnected") {
+        if !matches!(session.status.as_str(),"idle"|"connected") { active += 1; }
+        let activity = counts.get(&session.id).cloned().unwrap_or(Value::Null);
+        if activity["goal"]["status"] == "active" { goals += 1; }
+        queued += activity["queued_count"].as_u64().unwrap_or(0);
+        pending += activity["pending_count"].as_u64().unwrap_or(0);
+        background += activity["count"].as_u64().unwrap_or(0);
+        if activity["count"].is_null() || activity["queued_count"].is_null() || activity["pending_count"].is_null() || !activity["goal_error"].is_null() { unknown += 1; }
+    }
+    status["restart_blockers"] = json!({"active_sessions":active,"active_goals":goals,"queued_messages":queued,"pending_decisions":pending,"background_terminals":background,"unavailable_sessions":unknown});
+    status["background_terminals"] = json!(counts);
+    Ok(status)
 }
 async fn runtime_start(app: &App) -> Result<Value> {
     app.orchestrator.start_runtime().await

@@ -3,6 +3,7 @@
 # ///
 """Large imported history over real Wormhole; disposable state, no Codex calls."""
 import json
+import os
 from pathlib import Path
 import socket
 import sqlite3
@@ -40,20 +41,21 @@ with tempfile.TemporaryDirectory(prefix='demodex-large-history-') as temporary:
             with sqlite3.connect(data/'state.sqlite') as db:
                 db.execute('INSERT INTO events(session_id,message) VALUES(?,?)',(session['id'],json.dumps(message)))
             with sync_playwright() as playwright:
-                browser=playwright.chromium.launch(executable_path='/run/current-system/sw/bin/google-chrome',headless=True,args=['--no-sandbox'])
+                browser=playwright.chromium.launch(executable_path=os.environ.get('CHROME','/run/current-system/sw/bin/google-chrome'),headless=True,args=['--no-sandbox'])
                 context=browser.new_context(service_workers='block')
                 context.add_init_script('sessionStorage.setItem('+json.dumps('demodex-token:'+origin)+','+json.dumps(token)+');')
                 page=context.new_page()
                 errors=[]
                 page.on('pageerror',lambda error: errors.append(str(error)))
                 page.goto(origin)
-                expect(page.locator('header .indicator')).to_have_text('CONNECTED',timeout=20000)
+                expect(page.locator('header .indicator')).to_have_text('connected to',timeout=20000)
                 page.locator('button.session').filter(has_text='Large imported history').click()
                 expect(page.get_by_text('Large history successfully restored',exact=True)).to_be_visible(timeout=30000)
                 expect(page.get_by_role('alert')).to_have_count(0)
                 expect(page.locator('.conversation article')).to_have_count(len(items))
                 transcript = page.locator('.transcript')
                 transcript.evaluate('e=>{e.scrollTop=0;e.dispatchEvent(new Event("scroll"));}')
+                page.locator('.tool-group[data-group-id="old-tool"] > summary').click()
                 old_tool = page.locator('[data-item-id="old-tool"] details')
                 old_tool.locator('summary').click()
                 page.evaluate('''() => {
@@ -71,9 +73,10 @@ with tempfile.TemporaryDirectory(prefix='demodex-large-history-') as temporary:
                         db.executemany('INSERT INTO events(session_id,message) VALUES(?,?)',
                             [(session['id'],json.dumps(message)) for message in messages])
                     page.evaluate("window.dispatchEvent(new Event('online'))")
-                append([{'method':'item/agentMessage/delta','params':{'itemId':'live','delta':'stream '}} for _ in range(100)])
+                # Cross multiple 500-event pages without losing or duplicating deltas.
+                append([{'method':'item/agentMessage/delta','params':{'itemId':'live','delta':'stream '}} for _ in range(1200)])
                 live = page.locator('[data-item-id="live"] pre')
-                expect(live).to_have_text('stream '*100,timeout=30000)
+                expect(live).to_have_text('stream '*1200,timeout=30000)
                 assert transcript.evaluate('e=>Math.abs(e.scrollTop-'+str(before)+')<2')
                 assert old_tool.evaluate('e=>e.open')
                 assert page.evaluate("""oldArticle===document.querySelector('[data-item-id="old-answer"]') && oldChanges.length===0""")
@@ -88,7 +91,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-large-history-') as temporary:
                         {'id':'next-day','type':'agentMessage','text':'Work after another compaction'}
                     ]}]}}}
                 ])
-                expect(page.locator('[data-item-id="next-day"]')).to_have_text('agentMessageWork after another compaction',timeout=30000)
+                expect(page.locator('[data-item-id="next-day"] .rich-message')).to_have_text('Work after another compaction',timeout=30000)
                 expect(live).to_have_text('Final streamed answer')
                 expect(page.locator('.conversation article')).to_have_count(len(items)+3)
                 assert page.evaluate('oldChanges.length===0')

@@ -30,6 +30,9 @@ Small, deliberate, slightly odd. A session console, not a decorative dashboard.
 - PWA releases download automatically. A bounded launch-time check may apply an
   update before interaction begins; an active page shows a persistent update
   notice and reloads only on request. Other tabs keep running.
+- A Close session view action returns to the unselected overview without changing
+  the session or its drafts. The unselected state persists across reloads, even
+  when archived sessions exist; browser back/forward restores navigation.
 - Persist unsent drafts, question answers, and selected session in tab-scoped
   sessionStorage across reloads. Never submit or replay them automatically.
 - Offline cache contains only the verified static app shell. Session/API data
@@ -54,7 +57,11 @@ Small, deliberate, slightly odd. A session console, not a decorative dashboard.
   reports display metadata for the calling session. Use an absolute project root
   in an attached environment, with an optional one-line description. It never
   changes execution directories, sandbox settings, identity, or another session.
-- `demodex.get_session_context()` supplies identity, current display metadata,
+- `demodex.set_session_identity(title?, name?, icon?)` updates only the calling
+  session's Demodex title and display identity. Omitted fields stay unchanged.
+  Validate the entire patch before committing it with its receipt; preserve UUIDs,
+  Codex thread names, reported context, and execution settings.
+- `demodex.get_session_context()` supplies title, identity, current display metadata,
   and attached environment IDs/directories without transport endpoints or secrets.
 - Agent-reported locations take precedence for tree placement. Without a report
   for a currently attached environment, label the location as the executor
@@ -82,7 +89,8 @@ resume without editing the Codex profile. Unconfirmed changes remain visible.
 
 Goals are Codex's own thread goals, read with `thread/goal/get` and changed with
 `thread/goal/set` or `thread/goal/clear`. Show state, token usage, elapsed time and
-budget. Save stores a paused goal; starting/resuming is explicit. Pause remains
+budget. Start goal saves and activates in one call; Save paused is a secondary
+action. Setting or replacing an objective is allowed during a turn. Pause remains
 available during a turn and prevents subsequent goal turns, without pretending
 to interrupt the current turn. Blank budget leaves the current budget unchanged.
 Do not invent a budget. Display unsupported API errors without breaking chat.
@@ -109,10 +117,13 @@ This is a mapping of capabilities, not a promise that raw TUI command text is
 accepted by app-server. Terminal-local commands (theme, editor, keybindings,
 screen clearing) need browser-specific designs.
 
-- Enter inserts a newline in the message composer; Shift+Enter sends. Composition
+- By default, Enter inserts a newline and Shift+Enter sends. The “Enter sends”
+  checkbox below the composer reverses these keys; its preference survives reload
+  in the current tab and follows host switches. The action row wraps on narrow
+  screens. Composition
   events and repeated keydown events never send. The shortcut and Send button share
   eligibility checks and preserve drafts when delivery fails.
-- Send and Shift+Enter remain available during agent work and pending questions.
+- Send and the selected send shortcut remain available during agent work and pending questions.
   Send starts a turn when idle and uses `turn/steer` with `expectedTurnId` during
   active work. Steering adds input to that turn at Codex's next processing boundary.
   If Codex explicitly rejects steering because no active turn remains, verify
@@ -150,7 +161,10 @@ or active goal. During a turn, show “Save for next turn” and “Interrupt an
 The former preserves the current turn; the latter waits for confirmed interruption
 and idle state before saving. Acknowledgement alone is insufficient, and errors
 or timeouts never trigger a replay or silently save the change. Idle sessions
-retain “Save targets”. Adding a new private SSH executor still requires idle.
+retain “Save executors and directories”. Working-directory inputs and the directory
+browser are grouped under a visible “Working directories” heading in Session Controls.
+Directory-only edits follow the same next-turn boundary, without a session restart.
+Adding a new private SSH executor still requires idle.
 
 Saving does not start a turn or terminate background jobs. Keep pending selection
 separate from effective targets, and show the current turn's targets when a change
@@ -171,7 +185,7 @@ Protocol diagnostics open separately and are serialized only when requested.
 Group session behavior (model and goal), execution (targets and sandbox),
 context/identity, and history actions in that order. Keep archive/restore apart
 from routine execution settings. Server Settings starts with account access,
-then shared targets, container and VM lifecycle, with device installation last.
+then shared targets, container and VM lifecycle.
 
 Pending questions/approvals and queued messages occupy a bounded independently
 scrolling panel above the composer. They remain reachable regardless of history
@@ -198,12 +212,13 @@ indicators report Codex events, never infer success from silence or elapsed time
 
 ## Usage indicators
 
-The server usage strip shows the weekly quota reported by its Codex runtime
-account via `account/rateLimits/read`. It displays only windows explicitly
+The header usage summary shows weekly remaining quota reported by its Codex runtime
+account via `account/rateLimits/read`. The collapsed summary uses only windows explicitly
 reported as 10,080 minutes; it never guesses from primary/secondary position
 or substitutes a five-hour window. The Codex bucket comes first; additional
-weekly buckets remain separate in the expanded details. Each includes percent
-used and its reported reset time. Usage belongs to the account, so servers
+weekly buckets remain separate in the expanded details. The expanded view also includes all other reported windows. Each uses a square,
+green meter of remaining capacity and a relative reset countdown; show Last updated
+at the bottom. Usage belongs to the account, so servers
 using one account can display the same quota. Reads are cached for 60 seconds,
 keyed by runtime connection and account. Errors and missing windows display
 unavailable, never zero. The UI shows the check time and handles disconnection.
@@ -228,9 +243,13 @@ started outside Codex. Unavailable/unsupported lists must not display zero.
 
 ## Navigation and session creation
 
-The fixed header owns Current Server, Connections and Target host. Connection
-management opens a modal from the header. The sidebar contains Server Settings,
-then Sessions, New Session, and the folder tree. There is no External Session UI.
+The fixed header owns Current Server, Connections, weekly usage and Server Settings
+(visible while connected). Connection management opens a compact list modal:
+each row connects when selected, with Edit and Delete actions on the right.
+A dashed + connection row opens a second modal, as does Edit. Closing the editor
+returns to the list; saving connects and persists the entry after success.
+The sidebar contains Sessions, New Session, and the folder tree.
+There is no External Session UI.
 
 New Session opens its own widget without navigating away from the conversation.
 It selects registered host, SSH, container, VM or external executors, with explicit
@@ -243,8 +262,168 @@ Creation and resume have independent name and sandbox drafts; completing either
 form leaves the other intact. Setup and session-control drafts survive switching
 servers and remain scoped to their original server. Goal status actions preserve
 unsaved objective and budget edits.
-Server Settings retains account/login, target registration and VM/container lifecycle.
+Server Settings opens a content-sized modal over the current session or overview.
+Closing it preserves the selected session, transcript position and form drafts.
+It does not reopen automatically on reload. It retains account/login, target
+registration and VM/container lifecycle.
+Use the DDU egui console's density: 10 px section padding, 6–8 px row gaps,
+small monospace headings with an orange tick, and thin rectangular borders.
+Account status fits one wrapping row. Feature flags expand into a striped list
+within the settings dialog scroll area, leaving 32px above and below the dialog.
+Descriptions stay visible; restart details and the explicit action expand separately.
+Global executors have individual borders, with container and VM management side by side on
+wide screens and stacked on mobile. Preserve larger controls for touch.
 
 New sessions persist daemon runtime ownership separately from execution targets.
 Creating or reconnecting an SSH-only session does not attach a host or VM target.
 The existing diagnostic external app-server API remains available.
+
+## Compact session workflow
+The header reads // DEMODEX, Connections, connection status and server name,
+usage, and Server settings. Keep descriptive account prose out of usage.
+Session tree entries lead with the actual title, then generated agent identity,
+status and executors, context usage, and a blue background-terminal count when
+nonzero. Unknown counts remain explicit. Archive is a red × with an accessible
+label. Session headings keep title, agent name, thread UUID and status in a
+compact wrapping line. Controls and background-terminal actions live beside
+composer buttons. Jump to latest is anchored at the transcript's bottom right
+and exists only while scrolled away from the bottom.
+New Session accepts an optional name. Resume is a checkbox switching the single
+bottom submit action. Search opens a separate picker and selecting a thread
+fills its ID, name and prior directory without submitting anything.
+VM and container provisioning opens nested editors from the target list and
+selects the result in the draft. SSH can be staged privately and attached after
+creation; failures leave a session with an explicit retry form. Shared SSH is
+registered separately in Server Settings.
+Session controls use compact framed sections and aligned labels, matching
+Server Settings while retaining touch-sized buttons.
+
+## Compact activity and directory navigation
+
+Adjacent tool/reasoning items form a collapsed activity group between messages.
+Keep stable group/item IDs, original order, and expansion across streaming updates;
+unreported outcomes and failures remain visible in the summary. Commands preview
+five lines with full output expandable. Unified diffs use escaped text, coloured
+additions/deletions and old/new line numbers. Preserve all raw output.
+
+Working-directory fields for registered targets offer a nested directory picker.
+It browses that executor only, permits typed paths, and requires explicit selection.
+Selection edits the draft; submitting session/target changes remains separate.
+Goals appear beside background activity in the overview and composer controls.
+
+## Shared setup components
+
+`ui::AddButton` opens creation/editing overlays; all add affordances share the
+8px dash / 5px gap CSS tokens, including Connections and executor setup. Submit
+buttons inside those overlays remain solid. `ui::SectionTitle` supplies the
+orange section accent; `ui::FieldAction` aligns directory inputs and Browse.
+Use these components instead of local dashed borders or ad-hoc form rows.
+Creation overlays are content-sized, preserve cancelled drafts, and close on
+success. Resume starts with an empty thread ID; an empty resume form cannot
+submit. Navigation closes nested setup overlays without submitting them.
+
+- Stars are saved on the server and sort first within each project folder.
+  Reorder mode exposes left drag handles (mouse, touch, or arrow keys). Drops
+  reorder only siblings with the same star and archive state; stale orders fail.
+  The pencil button opens that session’s controls; all corner actions have
+  independent keyboard focus and hover feedback.
+- Session cards reserve three activity lines for goal, background terminals and subagents, even
+  when empty. Titles use the labelled status colour. Archive/restore occupies a
+  separately focusable upper-right segment with a shared outline and thin divider.
+- Steering messages remain in the transcript labelled “Waiting for the next tool
+  call” until Codex reports the matching user message; never infer consumption
+  merely from unrelated tool activity.
+
+Goal setup defaults to explicit Start goal; Save paused is a secondary action.
+Both can update objectives during active turns through Codex's goal API without
+interrupting work or sending a hidden turn. Starting is blocked while execution
+target changes await an explicit message. Show blocking conditions as yellow,
+bold warnings at the normal text size only while they apply.
+
+Execution targets and sandbox settings are always expanded inside Session controls.
+Keep operation-specific blockers visible only while they apply; sandbox changes
+remain idle-only and paused saved goals do not need to be cleared.
+
+Context and quota meters show remaining capacity, anchored to the right. UUIDs
+remain visible in Context and identity. Restart warnings list current blocker
+counts; background terminals use compact command/cwd rows with IDs in Diagnostics.
+
+Rich messages render Markdown tables, headings, lists, task lists, code and link labels,
+plus LaTeX as native MathML. Formatted messages expose a checked Format Markdown
+control and Copy raw below their content; disabling formatting shows the exact
+original source. Preserve that choice as new messages arrive. Keep keyed message
+chunks in a stable list container so unrelated updates do not remount them.
+
+Never insert model HTML into the app document. Links are numbered inline buttons
+with icon, index and title, plus a destination list at the end of each message.
+An operator-opened HTTP(S) popup exposes the full parsed URL with its hostname
+bold before navigation. Reject malformed/control characters and embedded
+credentials; explain normalization and Punycode. Unsupported schemes remain
+inert. Images remain omitted; MathML and Mermaid supply no active destinations.
+Raw view/copy preserves exact source. Rendering never fetches web previews.
+
+Completed assistant messages trigger bounded metadata checks against the executors
+attached at completion: 10 distinct file destinations, 3 seconds per file and
+10 seconds overall. Persist results and exact executor identities once, never
+recheck on browser reconnect, duplicate completion or daemon restart. File popups
+show each executor, resolved path, creation/modification time, byte size, and
+Checked timestamp with a live relative age. Distinguish not found, timeout, error,
+and not checked. Unavailable/replaced executors are greyed out with an explanation.
+Icon-only Show/Download controls have accessible names and tooltips. Both fetch
+current contents explicitly; previews support text and raw/pretty JSON, while
+binary files can be downloaded. HTML files are inert source text; SVG files use the same bounded local SVG widget as fenced drawings. Complete
+reads are limited to 4 MiB; long previews are shortened visibly. Download within
+a preview uses its already-fetched bytes. File contents are never cached or added
+to the conversation. Popups close via ×, Escape or outside click. Math uses a bounded,
+allowlisted MathML tree and retains unsupported source. Mermaid fenced blocks
+render with a pinned local bundle inside an opaque-origin sandbox with no network
+access; retain source and a readable fallback. The PWA caches the renderer assets
+with the release so diagrams work without a CDN.
+
+Each message header shows its first durable Demodex recording time in the browser's
+local timezone, with full date/time on hover. Keep that time through streaming,
+completion, steering confirmation and reconnects. Codex's imported message items
+lack original timestamps: label their snapshot time Imported, rather than showing
+it as the original send time. Missing timestamps remain explicitly unknown.
+
+
+## Explicit notifications
+
+Agents may call `demodex.notify(message, title?)` deliberately. Every call records a
+standalone chat notification, even with push disabled or unavailable; never infer
+notifications from completion, questions, errors, or subagent events. Duplicate tool
+calls return the original receipt without repeating the chat event or push attempt.
+
+Server settings offers Enable push on this device, Disable push, Send test notification,
+and Hide message previews. Permission and subscription require an explicit gesture.
+The first version binds one daemon to each PWA installation, clearly labelled; users
+can disable that subscription before enabling another server. Switching ordinary
+connections does not change the notification binding. Distinct server origins can
+have their own installations. iOS/iPadOS requires Home Screen installation.
+
+VAPID identity and subscriptions persist in the private daemon database. ECE encrypts
+payloads and ES256 signs VAPID claims; HTTPS requests go only to supported browser push
+providers, with redirects disabled. Attempts are bounded and never replayed after an
+uncertain outcome; 404/410 removes an expired subscription. Delivery status distinguishes
+push-service acceptance from unavailable or failed delivery, never claims device display
+or user receipt. Notifications click through to the correct server/session without
+credentials in URLs. Notification routing preserves other-server drafts. Hidden previews
+omit session identity and message content from the OS notification.
+
+`demodex.notify` is registered for new Codex threads; the current Codex resume API
+preserves older threads' original tool catalogue. Real push-provider/device acceptance
+is an explicit deployment smoke test, not performed by fixture tests.
+
+SVG fenced blocks and explicitly opened SVG files use a deliberately small local drawing subset. Geometry, groups,
+text, title and description elements become an allowlisted Yew SVG tree; raw HTML
+insertion is never used. Source CSS, resource references, images, links, definitions,
+animations and foreign content are unsupported. Any unsupported element or attribute
+rejects the whole preview, with a readable reason and exact source available.
+Accepted drawings appear in a bounded thumbnail button; clicking opens a larger
+modal with Close, Escape and outside-click dismissal. Preview rendering never fetches
+resources. Limit input to 128 KiB, 2,048 XML nodes, 32 nesting levels and 16 KiB per
+attribute; numeric values must be finite and at most 1,000,000 in magnitude. A
+transform attribute accepts at most 16 operations. Require a valid viewBox or positive
+numeric width and height. Fill/stroke accept hex and a limited set of color names;
+fonts are generic serif, sans-serif or monospace. Raw source remains independently
+expandable for both supported and unsupported drawings.

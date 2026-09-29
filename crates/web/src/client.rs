@@ -8,7 +8,7 @@ use ractor_wormhole::{
     util::{ActorRef_Ask, FnActor},
 };
 use serde_json::Value;
-use std::{rc::Rc, time::Duration};
+use std::{rc::Rc, sync::{Arc, Mutex}, time::Duration};
 use tokio::sync::mpsc;
 
 pub enum Wake {
@@ -17,6 +17,7 @@ pub enum Wake {
 }
 pub struct Client {
     api: ActorRef<Api>,
+    notices: Arc<Mutex<crate::sync::Notices>>,
     actors: Vec<ActorCell>,
 }
 impl Drop for Client {
@@ -177,8 +178,11 @@ impl Client {
             .map_err(anyhow::Error::msg)?;
         let (tx, rx) = mpsc::channel(1);
         let tx_changed = tx.clone();
+        let notices = Arc::new(Mutex::new(crate::sync::Notices::default()));
+        let pending_notices = notices.clone();
         let (sink, _) = FnActor::<Notice>::start_fn(async move |mut ctx| {
-            while let Some(Notice::Changed) = ctx.rx.recv().await {
+            while let Some(notice) = ctx.rx.recv().await {
+                pending_notices.lock().unwrap().push(notice);
                 let _ = tx_changed.try_send(Wake::Changed);
             }
         })
@@ -196,6 +200,7 @@ impl Client {
         Ok((
             Rc::new(Self {
                 api,
+                notices,
                 actors: std::mem::take(&mut guard.0),
             }),
             rx,
@@ -213,61 +218,7 @@ impl Client {
         self.call(operation, String::new()).await
     }
 
-    pub async fn snapshot(&self, selected: String, after: i64) -> Result<Snapshot> {
-        let (sessions, runtime, environments, targets) = futures_util::try_join!(
-            self.read(Operation::Sessions),
-            self.read(Operation::Runtime),
-            self.read(Operation::Environments),
-            self.read(Operation::Targets)
-        )?;
-        let mut snapshot = Snapshot {
-            sessions,
-            runtime,
-            environments,
-            targets,
-            selected: selected.clone(),
-            detail: Value::Null,
-            events: vec![],
-        };
-        if !selected.is_empty()
-            && snapshot
-                .sessions
-                .as_array()
-                .is_some_and(|sessions| sessions.iter().any(|s| s["id"] == selected))
-        {
-            snapshot.detail = self
-                .read(Operation::Detail {
-                    id: selected.clone(),
-                })
-                .await?;
-            let mut cursor = after;
-            loop {
-                let batch = self
-                    .read(Operation::Events {
-                        id: selected.clone(),
-                        after: cursor,
-                    })
-                    .await?;
-                let batch = batch.as_array().context("Invalid event response")?;
-                if let Some(event) = batch.last() {
-                    cursor = event["seq"].as_i64().context("Invalid event cursor")?;
-                }
-                snapshot.events.extend(batch.iter().cloned());
-                if batch.len() < 500 {
-                    break;
-                }
-            }
-        }
-        Ok(snapshot)
+    pub fn take_notices(&self) -> Vec<Notice> {
+        self.notices.lock().unwrap().take()
     }
-}
-
-pub struct Snapshot {
-    pub sessions: Value,
-    pub runtime: Value,
-    pub environments: Value,
-    pub targets: Value,
-    pub selected: String,
-    pub detail: Value,
-    pub events: Vec<Value>,
 }

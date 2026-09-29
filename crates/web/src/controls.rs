@@ -141,7 +141,7 @@ impl Component for SessionControls {
                 run.emit(Operation::Goal {
                     id: id.clone(),
                     input: demodex_protocol::GoalAction {
-                        action: "save".into(),
+                        action: if e.submitter().is_some_and(|button|button.get_attribute("data-goal-action").as_deref()==Some("save")) { "save" } else { "start" }.into(),
                         objective: Some(objective.clone()),
                         token_budget: if budget.trim().is_empty() {
                             None
@@ -177,8 +177,8 @@ impl Component for SessionControls {
             Callback::from(move |_| cb.emit(()))
         };
         html! {<section class="session-controls" aria-label="Session controls">
-            <h2>{"Session controls"}</h2><p class="muted">{"Use these controls directly, or type /model, /goal, /status, or /help to open them. Commands are not sent to the model."}</p>
-            <form onsubmit={model_submit} class="model-controls"><h3>{"Model · /model"}</h3>
+
+            <form onsubmit={model_submit} class="model-controls"><crate::ui::SectionTitle>{"Model"}</crate::ui::SectionTitle>
                 <p class="accepted-model">{if effective.is_null(){"Accepted model: unconfirmed".into()}else{format!("{}: {} · {}{}",if props.state["connected"]==true{"Accepted model"}else{"Last known model"},text(effective,"model"),text(effective,"effort"),if text(effective,"serviceTier").is_empty(){String::new()}else{format!(" · {}",text(effective,"serviceTier"))})}}</p>
                 {if !props.model_error.is_empty(){html!{<p role="status" class="error">{props.model_error.clone()}</p>}}else{Html::default()}}
                 <label>{"Model"}<select ref={self.model_ref.clone()} aria-label="Model" disabled={model_disabled} onchange={change_select("model")}>
@@ -186,25 +186,26 @@ impl Component for SessionControls {
                     {if !selected.is_empty() && model.is_null(){html!{<option value={selected.clone()} selected=true>{format!("{} (not in catalog)",selected)}</option>}}else{Html::default()}}
                     {for models.iter().map(|m|html!{<option value={text(m,"model").to_owned()} selected={text(m,"model")==selected}>{text(m,"displayName")}</option>})}
                 </select></label>
-                <p class="muted">{text(&model,"description")}</p>
+                <p class="muted model-description">{text(&model,"description")}</p>
                 <div class="control-fields"><label>{"Reasoning effort"}<select ref={self.effort_ref.clone()} aria-label="Reasoning effort" disabled={model_disabled} onchange={change_select("effort")}><option value="" selected={effort.is_empty()}>{"Select reasoning effort"}</option>{for array(&model["supportedReasoningEfforts"]).iter().map(|v|html!{<option value={text(v,"reasoningEffort").to_owned()} selected={text(v,"reasoningEffort")==effort}>{text(v,"reasoningEffort")}</option>})}</select></label>
                 <label>{"Service tier"}<select ref={self.tier_ref.clone()} aria-label="Service tier" disabled={model_disabled} onchange={change_select("tier")}><option value="" selected={tier.is_empty()}>{"Default"}</option>{for array(&model["serviceTiers"]).iter().map(|v|html!{<option value={text(v,"id").to_owned()} selected={text(v,"id")==tier}>{text(v,"name")}</option>})}</select></label></div>
                 <button disabled={model_disabled||selected.is_empty()||effort.is_empty()}>{"Apply model"}</button><button type="button" disabled={props.disabled} onclick={refresh}>{"Refresh models"}</button>
-                {if props.working{html!{<p class="muted">{"Model changes are available when the session is idle."}</p>}}else{html!{<p class="muted">{"Selections take effect only after Apply model. The accepted model above is reported by Codex."}</p>}}}
+                {if props.working{html!{<p class="muted control-warning" role="status">{"Session active — wait until idle to change the model."}</p>}}else{Html::default()}}
             </form>
-            <form onsubmit={goal_submit} class="goal-controls"><h3>{"Goal · /goal"}</h3>
+            <form onsubmit={goal_submit} class="goal-controls"><crate::ui::SectionTitle>{"Goal"}</crate::ui::SectionTitle>
                 {if let Some(error)=props.state["goalError"].as_str(){html!{<p class="error" role="status">{error}</p>}}else if goal.is_null(){html!{<p class="goal-status">{"No goal set"}</p>}}else{html!{<div class="goal-state"><p class="goal-status">{format!("Goal: {}",text(goal,"status"))}</p><p>{text(goal,"objective")}</p><p class="muted">{format!("{} tokens used · {} seconds · {}",goal["tokensUsed"].as_i64().unwrap_or(0),goal["timeUsedSeconds"].as_i64().unwrap_or(0),goal["tokenBudget"].as_i64().map(|v|format!("{v} token budget")).unwrap_or_else(||"No token budget".into()))}</p></div>}}}
-                <label>{"Goal objective"}<textarea disabled={goal_disabled||props.working} maxlength="4000" value={objective.clone()} oninput={objective_change}/></label>
-                <label>{"Token budget (optional; blank keeps current budget)"}<input type="number" min="1" step="1" disabled={goal_disabled||props.working} value={budget} oninput={budget_change}/></label>
-                <button disabled={goal_disabled||props.working||objective.trim().is_empty()}>{"Save goal paused"}</button>
-                {if props.targets_pending{html!{<p class="muted">{"Send a message to apply the selected execution targets before resuming a goal."}</p>}}else{Html::default()}}
-                <div class="goal-actions">
-                    {action("pause","Pause goal",goal_disabled||goal.is_null()||text(goal,"status")!="active")}
-                    {action("resume","Start / resume goal",goal_disabled||props.targets_pending||props.working||goal.is_null()||matches!(text(goal,"status"),"active"|"complete"))}
-                    {action("complete","Mark goal complete",goal_disabled||props.working||goal.is_null()||text(goal,"status")=="complete")}
-                    {action("clear","Clear goal",goal_disabled||props.working||goal.is_null())}
-                </div>
-                <p class="muted">{"Save stores the goal paused. Start / resume allows Codex to keep working and use tokens. Pause prevents further goal turns; use Interrupt to stop the current turn. Replacing the objective resets its usage accounting."}</p>
+                <label>{"Goal objective"}<textarea disabled={goal_disabled} maxlength="4000" value={objective.clone()} oninput={objective_change}/></label>
+                <label>{"Token budget (optional)"}<input type="number" min="1" step="1" placeholder="Keep current budget" disabled={goal_disabled} value={budget.clone()} oninput={budget_change}/></label>
+                <div class="goal-edit-actions">{if goal.is_null() || text(goal,"status")=="complete" || objective.trim()!=text(goal,"objective").trim() || !budget.is_empty() {html!{<><button class="primary" type="submit" disabled={goal_disabled||props.targets_pending||objective.trim().is_empty()}>{"Start goal"}</button><button type="submit" data-goal-action="save" disabled={goal_disabled||objective.trim().is_empty()}>{"Save paused"}</button></>}}else{Html::default()}}</div>
+                {if props.working{html!{<p class="muted control-warning" role="status">{"Session active — completing, clearing, or resuming an existing goal requires idle. You can set a new objective or pause the goal now."}</p>}}else{Html::default()}}
+                {if props.targets_pending{html!{<p class="muted control-warning" role="status">{"Send a message to apply the selected execution targets before resuming a goal."}</p>}}else{Html::default()}}
+                {if !goal.is_null(){html!{<div class="goal-actions">
+                    {if text(goal,"status")=="active"{action("pause","Pause goal",goal_disabled)}else{Html::default()}}
+                    {if !matches!(text(goal,"status"),"active"|"complete"){action("resume","Start / resume goal",goal_disabled||props.targets_pending||props.working)}else{Html::default()}}
+                    {if !props.working && text(goal,"status")!="complete"{action("complete","Mark goal complete",goal_disabled)}else{Html::default()}}
+                    {if !props.working{action("clear","Clear goal",goal_disabled)}else{Html::default()}}
+                </div>}}else{Html::default()}}
+                {if goal.is_object() && !objective.trim().is_empty() && objective.trim()!=text(goal,"objective").trim(){html!{<p class="muted control-warning" role="status">{"Replacing the objective resets goal usage accounting."}</p>}}else{Html::default()}}
             </form>
 
         </section>}

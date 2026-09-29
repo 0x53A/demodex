@@ -12,14 +12,19 @@ pub struct Live {
     pub generation: String,
     pub thread: String,
     pub turn: Mutex<Option<String>>,
+    pub(crate) subagents: Mutex<crate::subagents::Activity>,
 }
 
 pub struct Manager {
     pub store: Store,
+    pub(crate) file_slots: tokio::sync::Semaphore,
+    pub(crate) file_jobs: tokio_util::task::TaskTracker,
+    file_messages: Arc<tokio::sync::Semaphore>,
     pub live: Mutex<HashMap<String, Arc<Live>>>,
     // Serializes connection creation; no database lock is held across network awaits.
     pub(crate) connecting: Mutex<()>,
     pub updates: broadcast::Sender<()>,
+    pub(crate) notices: broadcast::Sender<demodex_protocol::Notice>,
     settings_updates: broadcast::Sender<(String, String, Value)>,
     pub(crate) model_updates: broadcast::Sender<(String, String, Value)>,
 }
@@ -28,15 +33,24 @@ impl Manager {
     pub fn new(store: Store) -> Arc<Self> {
         Arc::new(Self {
             store,
+            file_slots: tokio::sync::Semaphore::new(8),
+            file_jobs: tokio_util::task::TaskTracker::new(),
+            file_messages: Arc::new(tokio::sync::Semaphore::new(8)),
             live: Mutex::new(HashMap::new()),
             connecting: Mutex::new(()),
             updates: broadcast::channel(64).0,
+            notices: broadcast::channel(64).0,
             settings_updates: broadcast::channel(64).0,
             model_updates: broadcast::channel(64).0,
         })
     }
     pub fn changed(&self) {
         let _ = self.updates.send(());
+        let _ = self.notices.send(demodex_protocol::Notice::Changed);
+    }
+    pub(crate) fn session_changed(&self, id: &str, state: bool) {
+        let _ = self.updates.send(());
+        let _ = self.notices.send(demodex_protocol::Notice::Session { id: id.into(), state });
     }
     pub async fn runtime(&self, id: &str) -> Result<Arc<Live>> {
         self.live
@@ -161,6 +175,7 @@ impl Manager {
                 params["developerInstructions"] = json!(format!("{existing}\n\n{}\n\n{}", crate::session_context::INSTRUCTIONS, crate::ssh::AGENT_INSTRUCTIONS));
             }
             let mut active_turn=None;
+            let mut subagents=crate::subagents::Activity::default();
             let thread=if let Some(thread)=&session.thread_id {
                 params["threadId"] = json!(thread);
                 let result=rpc.call("thread/resume",params).await?;
@@ -168,6 +183,8 @@ impl Manager {
                 self.store.effective_sandbox(id, &result["sandbox"])?;
                 // Preserve the snapshot so a newly imported conversation has its existing history.
                 self.store.event(id,&json!({"method":"demodex/threadSnapshot","params":result}))?;
+                subagents.snapshot(&result["thread"]);
+                subagents.reconcile(&rpc).await;
                 active_turn=result["thread"]["turns"].as_array().and_then(|turns|turns.iter().rev().find(|t|t["status"]=="inProgress")).and_then(|t|t["id"].as_str()).map(str::to_string);
                 // Only a surviving active turn needs the old executor IDs. An
                 // idle resume after daemon restart must not reconnect stale
@@ -189,7 +206,7 @@ impl Manager {
                 self.store.enable_context_reporting(id)?;
                 thread
             };
-            let live=Arc::new(Live {rpc,generation:generation.clone(),thread,turn:Mutex::new(active_turn)});
+            let live=Arc::new(Live {rpc,generation:generation.clone(),thread,turn:Mutex::new(active_turn),subagents:Mutex::new(subagents)});
             self.live.lock().await.insert(id.into(),live.clone());
             self.store.status(id,"connected",None)?; self.changed();
             let manager=self.clone(); let id=id.to_string();
@@ -222,7 +239,7 @@ impl Manager {
         outcome
     }
 
-    async fn ingest(&self, id: &str, live: &Live, message: &Value) -> Result<()> {
+    async fn ingest(self: &Arc<Self>, id: &str, live: &Live, message: &Value) -> Result<()> {
         let method = message["method"].as_str().unwrap_or("");
         // A prompt holds this lock while awaiting its RPC. Do not hold the
         // daemon-wide live map while waiting for that one session's turn.
@@ -238,9 +255,9 @@ impl Manager {
         // overwrite a replacement's status. Hold the generation guard while
         // applying state so disconnect cannot invalidate it halfway through.
         let sessions = self.live.lock().await;
-        if !sessions
+        if sessions
             .get(id)
-            .is_some_and(|s| s.generation == live.generation)
+            .is_none_or(|s| s.generation != live.generation)
         {
             return Ok(());
         }
@@ -250,7 +267,42 @@ impl Manager {
         {
             return Ok(());
         }
-        self.store.event(id, message)?;
+        let mut recorded = false;
+        if method == "item/completed" && message["params"]["item"]["type"] == "agentMessage" {
+            let item = &message["params"]["item"];
+            if let (Some(item_id), Some(source)) = (item["id"].as_str(), item["text"].as_str()) {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                let targets = self.store.get(id)?.targets;
+                let mut files = crate::message_files::prepare(source, &targets);
+                if !files.is_empty() {
+                    crate::message_files::name_executors(&self.store, &mut files)?;
+                    recorded = true;
+                }
+                if recorded && self.store.completed_message_files(id, item_id, &targets, &files, message)? {
+                    if let Some(permit) = self.file_messages.clone().try_acquire_owned().ok().filter(|_| !self.file_jobs.is_closed()) {
+                        let manager = self.clone(); let id = id.to_owned(); let item = item_id.to_owned();
+                        self.file_jobs.spawn(async move {
+                            let _permit = permit;
+                            crate::message_files::check(manager, id, item, targets, files, deadline).await;
+                        });
+                    } else {
+                        for file in &mut files { for check in &mut file.checks { check.state="not-checked".into(); check.error=Some("Metadata checker busy or shutting down".into()); } }
+                        self.store.finish_message_files(id, item_id, &files)?;
+                    }
+                }
+            }
+        }
+
+        if !recorded { self.store.event(id, message)?; }
+        let mut runtime_changed = matches!(method, "turn/started" | "turn/completed" |
+            "thread/status/changed" | "thread/goal/updated" | "thread/goal/cleared" |
+            "thread/queue/changed");
+        if matches!(method, "item/started" | "item/completed") {
+            let mut subagents = live.subagents.lock().await;
+            let before = subagents.active();
+            subagents.item(&message["params"]["item"]);
+            runtime_changed |= before != subagents.active();
+        }
         if method == "item/tool/call" && message.get("id").is_some() {
             // Never execute a tool delivered by a superseded RPC generation.
             let result = self
@@ -258,7 +310,7 @@ impl Manager {
                 .context_tool(id, &live.thread, &message["params"])
                 .unwrap_or_else(|error| crate::session_context::response(Err(error)));
             drop(sessions);
-            self.changed();
+            self.session_changed(id, true);
             live.rpc
                 .send(json!({"id":message["id"],"result":result}))
                 .await?;
@@ -297,15 +349,10 @@ impl Manager {
                         self.store.status(id, status, None)?;
                     }
                 }
-                "thread/tokenUsage/updated" => {
+                "thread/tokenUsage/updated"
                     if message["params"]["threadId"].as_str() == Some(live.thread.as_str())
-                        && sessions
-                            .get(id)
-                            .is_some_and(|s| s.generation == live.generation)
-                    {
-                        self.store
-                            .context_usage(id, &message["params"]["tokenUsage"])?;
-                    }
+                        && sessions.get(id).is_some_and(|s| s.generation == live.generation) => {
+                    self.store.context_usage(id, &message["params"]["tokenUsage"])?;
                 }
                 "thread/settings/updated" => {
                     let settings = &message["params"]["threadSettings"];
@@ -329,7 +376,13 @@ impl Manager {
                 _ => {}
             }
         }
-        self.changed();
+        // Content-only events never require account, controls or registry reads.
+        let content_only = matches!(method,
+            "item/agentMessage/delta" | "item/reasoning/summaryTextDelta" |
+            "item/reasoning/textDelta" | "item/commandExecution/outputDelta" |
+            "item/plan/delta");
+        self.session_changed(id, !content_only);
+        if runtime_changed { let _ = self.notices.send(demodex_protocol::Notice::Runtime); }
         Ok(())
     }
 
@@ -349,7 +402,9 @@ impl Manager {
         let mut turn = live.turn.lock().await;
         let client_message_id = uuid::Uuid::new_v4().to_string();
         let steered = if let Some(active_turn) = turn.as_ref() {
-            match live
+            self.store.event(id, &json!({"method":"demodex/promptSteering","params":{"text":text,"turnId":active_turn,"clientUserMessageId":client_message_id}}))?;
+            self.session_changed(id, true);
+            let response = live
                 .rpc
                 .call(
                     "turn/steer",
@@ -357,8 +412,12 @@ impl Manager {
                 "expectedTurnId":active_turn,"input":[{"type":"text","text":text}],
                 "clientUserMessageId":client_message_id}),
                 )
-                .await
-            {
+                .await;
+            if let Err(error) = &response {
+                self.store.event(id, &json!({"method":"demodex/promptSteeringFailed","params":{"clientUserMessageId":client_message_id,"error":error.to_string()}}))?;
+                self.session_changed(id, true);
+            }
+            match response {
                 Ok(result) => Some(result),
                 Err(error) if crate::rpc::no_active_turn(&error) => {
                     // Codex explicitly confirmed non-delivery. Verify idle, since
@@ -373,6 +432,8 @@ impl Manager {
                     if state["thread"]["status"]["type"] != "idle" {
                         return Err(error);
                     }
+                    self.store.event(id, &json!({"method":"demodex/promptSteeringDiscarded","params":{"clientUserMessageId":client_message_id}}))?;
+                    self.session_changed(id, true);
                     None
                 }
                 Err(error) => return Err(error),
@@ -402,7 +463,7 @@ impl Manager {
         };
         drop(turn);
         self.store.event(id,&json!({"method":method,"params":{"text":text,"turnId":result.get("turnId").unwrap_or(&result["turn"]["id"]),"queuedSubmission":result["queuedSubmission"]}}))?;
-        self.changed();
+        self.session_changed(id, true);
         Ok(result)
     }
 
@@ -690,6 +751,44 @@ fn environment_params(targets: &[Target]) -> Value {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn persisted_events_emit_scoped_notices_and_unknown_events_refresh_state() -> Result<()> {
+        use demodex_protocol::Notice;
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("ws://{}", listener.local_addr()?);
+        let fake = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(raw))) = ws.next().await {
+                let request: Value = serde_json::from_str(&raw).unwrap();
+                if request.get("id").is_some() {
+                    ws.send(Message::Text(json!({"id":request["id"],"result":{}}).to_string().into())).await.unwrap();
+                }
+            }
+        });
+        let manager = Manager::new(Store::open(std::path::Path::new(":memory:"))?);
+        let session = manager.store.create("test", &endpoint, &[], Some("thread"))?;
+        let (rpc, _events) = Rpc::connect(&endpoint).await?;
+        let live = Arc::new(Live {
+            rpc, generation:"generation".into(), thread:"thread".into(),
+            turn:Mutex::new(None), subagents:Default::default(),
+        });
+        manager.live.lock().await.insert(session.id.clone(), live.clone());
+        let mut notices = manager.notices.subscribe();
+        let mut legacy = manager.updates.subscribe();
+        for (method, state) in [("item/agentMessage/delta", false), ("item/commandExecution/outputDelta", false), ("future/event", true)] {
+            let event = json!({"method":method,"params":{"threadId":"thread","itemId":"item","delta":"text"}});
+            manager.ingest(&session.id, &live, &event).await?;
+            assert_eq!(notices.try_recv()?, Notice::Session { id:session.id.clone(), state });
+            legacy.try_recv()?;
+            assert_eq!(manager.store.events(&session.id,0)?.last().unwrap().message, event);
+            assert!(notices.try_recv().is_err());
+        }
+        fake.abort();
+        Ok(())
+    }
+    #[tokio::test]
     async fn old_completion_cannot_clear_the_fallback_turn() -> Result<()> {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
@@ -721,6 +820,7 @@ mod tests {
             generation: "generation".into(),
             thread: "thread".into(),
             turn: Mutex::new(Some("new".into())),
+            subagents: Default::default(),
         });
         manager
             .live
@@ -790,6 +890,7 @@ mod tests {
                 generation: "fixture".into(),
                 thread: "thread".into(),
                 turn: Mutex::new(None),
+                subagents: Default::default(),
             }),
         );
         let error = tokio::time::timeout(
@@ -844,6 +945,7 @@ mod tests {
                 generation: "fixture".into(),
                 thread: "thread".into(),
                 turn: Mutex::new(None),
+                subagents: Default::default(),
             }),
         );
         manager

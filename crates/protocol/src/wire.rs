@@ -17,6 +17,10 @@ pub struct Session {
     pub status: String,
     pub error: Option<String>,
     pub archived: bool,
+    #[serde(default)]
+    pub starred: bool,
+    #[serde(default)]
+    pub sort_order: i64,
     pub sandbox: Option<Sandbox>,
     pub effective_sandbox: Option<serde_json::Value>,
     pub context_usage: serde_json::Value,
@@ -165,15 +169,24 @@ pub enum Api {
     },
 }
 
-#[derive(Debug, WormholeTransmaterializable)]
+#[derive(Clone, Debug, PartialEq, WormholeTransmaterializable)]
 pub enum Notice {
+    /// Full invalidation, including recovery after lost notices.
     Changed,
+    /// Periodic account/runtime refresh; no transcript or registry invalidation.
+    Runtime,
+    /// New session events; state also invalidates its detail and session summaries.
+    Session { id: String, state: bool },
 }
 
 /// Commands use shared domain types; JSON is confined to extensible Codex records.
 /// The transport itself is Wormhole: typed actor calls/reply ports and callbacks.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, WormholeTransmaterializable)]
 pub enum Operation {
+    PushSettings { device_id: String },
+    RegisterPush { input: PushRegistration },
+    RemovePush { device_id: String },
+    TestPush { device_id: String },
     Sessions,
     StopBackground {
         id: String,
@@ -211,6 +224,13 @@ pub enum Operation {
     Connect {
         id: String,
     },
+    StarSession { id: String, starred: bool },
+    MoveSession { id: String, neighbor: String },
+    ReorderSessions { expected: Vec<String>, ids: Vec<String> },
+    RenameSession {
+        id: String,
+        name: String,
+    },
     Archive {
         id: String,
         archived: bool,
@@ -245,6 +265,8 @@ pub enum Operation {
     ResumeQueue {
         id: String,
     },
+    MessageFiles { id: String, item: String },
+    ReadMessageFile { id: String, item: String, destination: String, executor: String },
     UploadImage {
         id: String,
         bytes: Vec<u8>,
@@ -259,6 +281,7 @@ pub enum Operation {
     },
     Environments,
     Targets,
+    BrowseDirectories { target: String, path: String },
     RegisterTarget {
         input: RegisterTarget,
     },
@@ -443,4 +466,50 @@ pub struct NewContainer {
     pub image: String,
     pub memory_mib: u32,
     pub cpus: u16,
+}
+
+/// One browser installation's encrypted push subscription. Never returned by reads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, WormholeTransmaterializable)]
+pub struct PushRegistration {
+    pub device_id: String,
+    pub endpoint: String,
+    pub p256dh: String,
+    pub auth: String,
+    pub frontend_url: String,
+    pub server_url: String,
+    pub hide_preview: bool,
+}
+
+/// Parsed destinations are shared by the daemon and browser; only explicit user
+/// actions may install an approved web URL into an active attribute.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum LinkDestination {
+    Web { url: String, host: String, warnings: Vec<String> },
+    File { path: String },
+    Unsupported { reason: String },
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct MessageLink {
+    pub destination: String,
+    pub title: String,
+    pub kind: LinkDestination,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct FileCheck {
+    pub executor: String,
+    #[serde(default)]
+    pub executor_name: String,
+    pub path: String,
+    pub state: String,
+    pub checked_at_ms: Option<u64>,
+    pub metadata: Option<serde_json::Value>,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub available: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct MessageFile {
+    pub destination: String,
+    pub checks: Vec<FileCheck>,
+    pub note: Option<String>,
 }

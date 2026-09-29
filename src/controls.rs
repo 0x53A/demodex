@@ -54,7 +54,7 @@ fn same_model_settings(accepted: &Value, requested: &Value) -> bool {
 fn goal_params(thread: &str, input: &GoalAction) -> Result<(&'static str, Value)> {
     let mut params = json!({"threadId":thread});
     match input.action.as_str() {
-        "save" => {
+        "save" | "start" => {
             let objective = input
                 .objective
                 .as_deref()
@@ -66,7 +66,7 @@ fn goal_params(thread: &str, input: &GoalAction) -> Result<(&'static str, Value)
                 "goal objective must be at most 4000 characters"
             );
             params["objective"] = json!(objective);
-            params["status"] = json!("paused");
+            params["status"] = json!(if input.action == "start" { "active" } else { "paused" });
             if let Some(budget) = input.token_budget {
                 ensure!(budget > 0, "token budget must be positive");
                 params["tokenBudget"] = json!(budget);
@@ -218,15 +218,15 @@ impl Manager {
         );
         let live = self.runtime(id).await?;
         let (method, params) = goal_params(&live.thread, &action)?;
-        if action.action == "resume" {
+        if matches!(action.action.as_str(), "resume" | "start") {
             ensure!(
                 !self.store.targets_pending(id)?,
                 "Send a message to apply the selected targets before resuming the goal"
             );
         }
-        // Pausing prevents further autonomous turns, and remains available while
-        // the current turn is running. It does not implicitly interrupt that turn.
-        if action.action != "pause" {
+        // Goal updates and pause are supported during a turn. Codex owns when
+        // the goal takes effect; never interrupt or submit a hidden model turn.
+        if !matches!(action.action.as_str(), "pause" | "save" | "start") {
             Self::require_idle(&live).await?;
         }
         let result = live.rpc.call(method, params).await?;
@@ -272,6 +272,16 @@ mod tests {
         };
         assert!(goal_params("thread", &input).is_err());
     }
+    #[test]
+    fn starting_a_goal_sets_objective_and_active_status_in_one_call() {
+        let (method, params) = goal_params("thread", &GoalAction {
+            action:"start".into(), objective:Some("  Finish it  ".into()), token_budget:Some(5000),
+        }).unwrap();
+        assert_eq!(method,"thread/goal/set");
+        assert_eq!(params,json!({"threadId":"thread","objective":"Finish it","status":"active","tokenBudget":5000}));
+        assert!(goal_params("thread", &GoalAction{action:"start".into(),objective:Some("".into()),token_budget:None}).is_err());
+    }
+
     #[test]
     fn default_tier_confirmation_is_equivalent_but_other_changes_are_not() {
         let requested = json!({"model":"fixture","effort":"high","serviceTier":null});

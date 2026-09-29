@@ -11,13 +11,92 @@ pub type Chunks = Rc<Vec<Chunk>>;
 #[derive(Default)]
 pub struct Transcript {
     pub chunks: Chunks,
+    pub groups: Chunks,
+    group_positions: BTreeMap<String, (usize, usize)>,
     positions: BTreeMap<String, usize>,
     len: usize,
     cursor: i64,
+    event_at: String,
+    event_imported: bool,
+}
+
+pub fn is_activity(item: &Value) -> bool {
+    matches!(text(item,"type"), "reasoning" | "commandExecution" | "fileChange" | "webSearch" | "mcpToolCall" | "dynamicToolCall" | "collabAgentToolCall" | "subAgentActivity" | "imageView" | "imageGeneration" | "sleep")
+}
+
+fn steering_text(item: &Value) -> String {
+    item["content"].as_array().map(|content| content.iter().filter(|part| part["type"] == "text").map(|part| text(part,"text")).collect::<Vec<_>>().join("\n")).unwrap_or_default()
 }
 
 impl Transcript {
+    fn group_item(&mut self, item: Rc<Value>) {
+        let id = text(&item, "id").to_owned();
+        if let Some(&(group, index)) = self.group_positions.get(&id) {
+            let old = &self.groups[group][index];
+            if is_activity(old) != is_activity(&item) || old["_demodexTurnId"] != item["_demodexTurnId"] {
+                self.groups = Rc::default();
+                self.group_positions.clear();
+                let items: Vec<_> = self.chunks.iter().flat_map(|c| c.iter().cloned()).collect();
+                for item in items { self.group_item(item); }
+            } else {
+                Rc::make_mut(&mut Rc::make_mut(&mut self.groups)[group])[index] = item;
+            }
+            return;
+        }
+        let groups = Rc::make_mut(&mut self.groups);
+        let append = groups.last().and_then(|g| g.last()).is_some_and(|last|
+            is_activity(last) && is_activity(&item) && last["_demodexTurnId"] == item["_demodexTurnId"]);
+        if !append { groups.push(Rc::new(Vec::new())); }
+        let group = groups.len()-1;
+        let items = Rc::make_mut(&mut groups[group]);
+        self.group_positions.insert(id, (group, items.len()));
+        items.push(item);
+    }
+
+    fn remove(&mut self, id: &str) {
+        if !self.positions.contains_key(id) { return; }
+        let items: Vec<_> = self.chunks.iter().flat_map(|c| c.iter()).filter(|item| text(item, "id") != id).cloned().collect();
+        self.chunks = Rc::default();
+        self.groups = Rc::default();
+        self.positions.clear();
+        self.group_positions.clear();
+        self.len = 0;
+        for item in items { self.put(&item); }
+    }
+
+    fn consume_steering(&mut self, item: &Value, turn_id: &str) {
+        if item["type"] != "userMessage" { return; }
+        if self.positions.get(text(item,"id")).is_some_and(|&i| self.chunks[i / CHUNK_SIZE][i % CHUNK_SIZE]["_demodexSteering"].is_null()) { return; }
+        let pending = self.chunks.iter().flat_map(|c| c.iter()).find(|pending| {
+            pending["_demodexSteering"].is_string()
+                && (text(pending, "id") == text(item, "id")
+                    || text(pending, "id") == text(item, "clientId")
+                    || (pending["_demodexSteering"] == "waiting" && text(item,"clientId").is_empty() && text(pending, "_demodexTurnId") == turn_id && steering_text(pending) == steering_text(item)))
+        }).map(|pending| (text(pending, "id").to_owned(), pending["_demodexAt"].clone(), pending["_demodexTimeSource"].clone()));
+        if let Some((id, at, source)) = pending {
+            self.remove(&id);
+            let mut confirmed = item.clone();
+            confirmed["_demodexAt"] = at;
+            confirmed["_demodexTimeSource"] = source;
+            self.put(&confirmed);
+        }
+    }
+
     fn put(&mut self, item: &Value) {
+        let mut item = item.clone();
+        // Preserve the first recorded time through streaming, completion and
+        // later resume snapshots. Imported history has no per-item Codex time.
+        if let Some(&index) = self.positions.get(text(&item,"id")) {
+            let old = &self.chunks[index / CHUNK_SIZE][index % CHUNK_SIZE];
+            for field in ["_demodexAt", "_demodexTimeSource", "_demodexFilesRevision"] {
+                if !old[field].is_null() && (field != "_demodexFilesRevision" || item[field].is_null()) { item[field] = old[field].clone(); }
+            }
+        }
+        if item["_demodexAt"].is_null() && !self.event_at.is_empty() && item.is_object() {
+            item["_demodexAt"] = json!(self.event_at);
+            item["_demodexTimeSource"] = json!(if self.event_imported {"imported"}else{"recorded"});
+        }
+        let item = &item;
         let id = text(item, "id");
         if id.is_empty() {
             return;
@@ -38,6 +117,8 @@ impl Transcript {
             Rc::make_mut(chunks.last_mut().unwrap()).push(Rc::new(item.clone()));
             self.len += 1;
         }
+        let index = self.positions[id];
+        self.group_item(self.chunks[index / CHUNK_SIZE][index % CHUNK_SIZE].clone());
     }
 
     fn finish_turn(&mut self, turn_id: &str) {
@@ -48,13 +129,16 @@ impl Transcript {
             .iter()
             .flat_map(|chunk| chunk.iter())
             .filter(|item| {
-                item["_demodexLifecycle"] == "running"
+                (item["_demodexLifecycle"] == "running" || item["_demodexSteering"] == "waiting")
                     && (text(item, "_demodexTurnId").is_empty()
                         || text(item, "_demodexTurnId") == turn_id)
             })
             .map(|item| {
                 let mut item = item.as_ref().clone();
                 item["_demodexLifecycle"] = json!("ended");
+                if item["_demodexSteering"] == "waiting" {
+                    item["_demodexSteering"] = json!("unconfirmed");
+                }
                 item
             })
             .collect();
@@ -72,13 +156,47 @@ impl Transcript {
                 self.cursor = seq;
             }
             let message = &event["message"];
+            self.event_at = text(event,"at").to_owned();
+            self.event_imported = text(message,"method") == "demodex/threadSnapshot";
             let params = &message["params"];
             match text(message, "method") {
+                "demodex/messageFiles" => {
+                    if let Some(&i) = self.positions.get(text(params,"itemId")) {
+                        let mut item=self.chunks[i/CHUNK_SIZE][i%CHUNK_SIZE].as_ref().clone();
+                        item["_demodexFilesRevision"] = json!(self.cursor);
+                        self.put(&item);
+                    }
+                }
+                "demodex/notification" => {
+                    self.put(&json!({"id":format!("demodex:notification:{}",text(params,"id")),"type":"demodexNotification","title":params["title"],"text":params["message"]}));
+                }
+                "demodex/notificationDelivery" => {
+                    let id=format!("demodex:notification:{}",text(params,"id"));
+                    if let Some(&i)=self.positions.get(&id) {
+                        let mut item=self.chunks[i/CHUNK_SIZE][i%CHUNK_SIZE].as_ref().clone();
+                        item["delivery"]=params.clone();
+                        self.put(&item);
+                    }
+                }
+                "demodex/promptSteering" => {
+                    self.put(&json!({"id":params["clientUserMessageId"],"type":"userMessage","content":[{"type":"text","text":params["text"]}],"_demodexTurnId":params["turnId"],"_demodexSteering":"waiting"}));
+                }
+                "demodex/promptSteeringDiscarded" => {
+                    self.remove(text(params, "clientUserMessageId"));
+                }
+                "demodex/promptSteeringFailed" => {
+                    if let Some(&i) = self.positions.get(text(params, "clientUserMessageId")) {
+                        let mut item = self.chunks[i / CHUNK_SIZE][i % CHUNK_SIZE].as_ref().clone();
+                        item["_demodexSteering"] = json!("failed");
+                        self.put(&item);
+                    }
+                }
                 "demodex/threadSnapshot" => {
                     if let Some(turns) = params["thread"]["turns"].as_array() {
                         for turn in turns {
                             if let Some(items) = turn["items"].as_array() {
                                 for item in items {
+                                    self.consume_steering(item, text(turn, "id"));
                                     let mut item = item.clone();
                                     if item.is_object()
                                         && let Some(&i) = self.positions.get(text(&item, "id"))
@@ -103,6 +221,7 @@ impl Transcript {
                 "item/started" | "item/completed" => {
                     let mut item = params["item"].clone();
                     if item.is_object() {
+                        self.consume_steering(&item, text(params, "turnId"));
                         if !text(params, "turnId").is_empty() {
                             item["_demodexTurnId"] = params["turnId"].clone();
                         }
@@ -191,6 +310,8 @@ impl Transcript {
                     if let Value::String(value) = &mut item[field] {
                         value.push_str(delta);
                     }
+                    let updated = chunk[index % CHUNK_SIZE].clone();
+                    self.group_item(updated);
                 }
                 _ => {}
             }
@@ -200,7 +321,130 @@ impl Transcript {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn streamed_deltas_update_the_render_groups_without_touching_old_groups() {
+        let mut transcript=Transcript::default();
+        transcript.append(&[event(1,"item/completed",json!({"item":{"id":"old","type":"agentMessage","text":"Earlier"}}))]);
+        let old=transcript.groups[0].clone();
+        transcript.append(&[
+            event(2,"item/agentMessage/delta",json!({"itemId":"live","delta":"Hello "})),
+            event(3,"item/agentMessage/delta",json!({"itemId":"live","delta":"world"})),
+            event(4,"item/commandExecution/outputDelta",json!({"itemId":"command","delta":"output"})),
+        ]);
+        assert_eq!(transcript.groups[1][0]["text"],"Hello world");
+        assert_eq!(transcript.groups[2][0]["aggregatedOutput"],"output");
+        assert!(Rc::ptr_eq(&old,&transcript.groups[0]));
+    }
+
+    #[test]
+    fn notifications_stay_visible_and_delivery_updates_the_same_item() {
+        let mut transcript=Transcript::default();
+        transcript.append(&[event(1,"demodex/notification",json!({"id":"n","title":"Ready","message":"Please review"}))]);
+        assert_eq!(transcript.groups.len(),1);
+        assert!(!is_activity(&transcript.groups[0][0]));
+        transcript.append(&[event(2,"demodex/notificationDelivery",json!({"id":"n","accepted":1,"failed":0,"state":"complete"}))]);
+        assert_eq!(transcript.len,1);
+        assert_eq!(transcript.groups[0][0]["text"],"Please review");
+        assert_eq!(transcript.groups[0][0]["delivery"]["accepted"],1);
+    }
+
+    #[test]
+    fn activity_groups_cross_chunks_and_preserve_unmodified_identity() {
+        let mut transcript=super::Transcript::default();
+        transcript.put(&serde_json::json!({"id":"text","type":"agentMessage","text":"Working"}));
+        for n in 0..130 { transcript.put(&serde_json::json!({"id":format!("tool-{n}"),"type":"commandExecution","status":"inProgress"})); }
+        assert_eq!(transcript.groups.len(),2);
+        assert_eq!(transcript.groups[1].len(),130);
+        let first=transcript.groups[0].clone();
+        let first_tool=transcript.groups[1][0].clone();
+        transcript.put(&serde_json::json!({"id":"tool-129","type":"commandExecution","status":"completed"}));
+        assert!(std::rc::Rc::ptr_eq(&first,&transcript.groups[0]));
+        assert!(std::rc::Rc::ptr_eq(&first_tool,&transcript.groups[1][0]));
+        transcript.put(&serde_json::json!({"id":"after","type":"agentMessage","text":"Done"}));
+        transcript.put(&serde_json::json!({"id":"last","type":"fileChange"}));
+        assert_eq!(transcript.groups.len(),4);
+        transcript.put(&serde_json::json!({"id":"last","type":"agentMessage","text":"Corrected snapshot"}));
+        assert!(!super::is_activity(&transcript.groups[3][0]));
+    }
+
     use super::*;
+    #[test]
+    fn message_time_survives_deltas_completion_and_resume_and_labels_imports() {
+        let mut transcript=Transcript::default();
+        transcript.append(&[
+            json!({"seq":1,"at":"2026-09-28T10:00:00Z","message":{"method":"item/started","params":{"item":{"id":"live","type":"agentMessage","text":""}}}}),
+            json!({"seq":2,"at":"2026-09-28T10:01:00Z","message":{"method":"item/agentMessage/delta","params":{"itemId":"live","delta":"Hello"}}}),
+            json!({"seq":3,"at":"2026-09-28T10:02:00Z","message":{"method":"item/completed","params":{"item":{"id":"live","type":"agentMessage","text":"Hello"}}}}),
+            json!({"seq":4,"at":"2026-09-28T10:03:00Z","message":{"method":"demodex/threadSnapshot","params":{"thread":{"turns":[{"items":[{"id":"live","type":"agentMessage","text":"Hello"},{"id":"old","type":"agentMessage","text":"History"}]}]}}}}),
+        ]);
+        assert_eq!(transcript.chunks[0][0]["_demodexAt"],"2026-09-28T10:00:00Z");
+        assert_eq!(transcript.chunks[0][0]["_demodexTimeSource"],"recorded");
+        assert_eq!(transcript.chunks[0][1]["_demodexTimeSource"],"imported");
+        assert_eq!(transcript.chunks[0][1]["_demodexAt"],"2026-09-28T10:03:00Z");
+    }
+
+    #[test]
+    fn confirmed_steering_preserves_submission_time_under_codex_item_id() {
+        let mut transcript=Transcript::default();
+        transcript.append(&[
+            json!({"seq":1,"at":"2026-09-28T10:00:00Z","message":{"method":"demodex/promptSteering","params":{"clientUserMessageId":"client","turnId":"turn","text":"Steer"}}}),
+            json!({"seq":2,"at":"2026-09-28T10:02:00Z","message":{"method":"item/started","params":{"turnId":"turn","item":{"id":"codex","clientId":"client","type":"userMessage","content":[{"type":"text","text":"Steer"}]}}}}),
+        ]);
+        assert_eq!(transcript.len,1);
+        assert_eq!(transcript.chunks[0][0]["id"],"codex");
+        assert_eq!(transcript.chunks[0][0]["_demodexAt"],"2026-09-28T10:00:00Z");
+    }
+
+    #[test]
+    fn steering_stays_visible_until_consumed_and_survives_event_pages() {
+        let mut transcript = Transcript::default();
+        let pending = event(1,"demodex/promptSteering",json!({"clientUserMessageId":"client","text":"Please adjust","turnId":"turn"}));
+        transcript.append(&[pending.clone()]);
+        assert_eq!(transcript.chunks[0][0]["_demodexSteering"], "waiting");
+        transcript.append(&[event(2,"item/started",json!({"turnId":"turn","item":{"id":"tool","type":"commandExecution"}}))]);
+        assert_eq!(transcript.chunks[0][0]["_demodexSteering"], "waiting");
+        let consumed = event(3,"item/started",json!({"turnId":"turn","item":{"id":"server","type":"userMessage","content":[{"type":"text","text":"Please adjust","text_elements":[]}]}}));
+        transcript.append(&[consumed.clone()]);
+        assert_eq!(transcript.len, 2);
+        assert!(!transcript.positions.contains_key("client"));
+        assert!(transcript.positions.contains_key("server"));
+        let mut replay = Transcript::default();
+        replay.append(&[pending, consumed]);
+        assert_eq!(replay.len,1);
+        assert!(replay.chunks[0][0]["_demodexSteering"].is_null());
+    }
+
+    #[test]
+    fn steering_client_ids_distinguish_identical_messages_and_late_confirmation() {
+        let mut transcript = Transcript::default();
+        transcript.append(&[
+            event(1,"demodex/promptSteering",json!({"clientUserMessageId":"one","text":"Same","turnId":"turn"})),
+            event(2,"demodex/promptSteering",json!({"clientUserMessageId":"two","text":"Same","turnId":"turn"})),
+            event(3,"item/started",json!({"turnId":"turn","item":{"id":"server","clientId":"two","type":"userMessage","content":[{"type":"text","text":"Same"}]}})),
+            event(4,"item/completed",json!({"turnId":"turn","item":{"id":"server","clientId":"two","type":"userMessage","content":[{"type":"text","text":"Same"}]}})),
+        ]);
+        assert!(transcript.positions.contains_key("one"));
+        assert!(!transcript.positions.contains_key("two"));
+        assert_eq!(transcript.len,2);
+        transcript.append(&[event(5,"turn/completed",json!({"turn":{"id":"turn","status":"completed"}}))]);
+        assert_eq!(transcript.chunks[0][0]["_demodexSteering"],"unconfirmed");
+        transcript.append(&[event(6,"demodex/threadSnapshot",json!({"thread":{"turns":[{"id":"turn","items":[{"id":"late","clientId":"one","type":"userMessage","content":[{"type":"text","text":"Same"}]}]}]}}))]);
+        assert!(!transcript.positions.contains_key("one"));
+        assert_eq!(transcript.len,2);
+    }
+
+    #[test]
+    fn steering_failure_and_fallback_are_explicit() {
+        let mut transcript = Transcript::default();
+        transcript.append(&[
+            event(1,"demodex/promptSteering",json!({"clientUserMessageId":"client","text":"Adjust","turnId":"turn"})),
+            event(2,"demodex/promptSteeringFailed",json!({"clientUserMessageId":"client"})),
+        ]);
+        assert_eq!(transcript.chunks[0][0]["_demodexSteering"], "failed");
+        transcript.append(&[event(3,"demodex/promptSteeringDiscarded",json!({"clientUserMessageId":"client"}))]);
+        assert_eq!(transcript.len,0);
+    }
+
     fn event(seq: i64, method: &str, params: Value) -> Value {
         json!({"seq":seq,"message":{"method":method,"params":params}})
     }

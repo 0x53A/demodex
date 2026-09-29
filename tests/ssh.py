@@ -74,6 +74,7 @@ PidFile {root}/sshd.pid
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 UsePAM no
+SetEnv SHELL=/usr/bin/fish
 StrictModes no
 AllowUsers {getpass.getuser()}
 Subsystem sftp internal-sftp
@@ -112,6 +113,10 @@ Subsystem sftp internal-sftp
             api('/targets/ssh',config)
             target=next(t for t in api('/targets') if t['kind']=='ssh')
             assert next(t for t in api('/targets') if t['id']==target['id'])['kind']=='ssh'
+            from wormhole_client import call
+            (root/'picker space').mkdir()
+            listing=call(f'http://127.0.0.1:{api_port}',token,{'BrowseDirectories':{'target':target['id'],'path':str(root)}})
+            assert any(entry['name']=='picker space' for entry in listing['entries']),listing
             api('/targets/'+target['id']+'/check',{})
             direct=api('/runtime/sessions',{'name':'Direct SSH only','targets':[{'id':target['id'],'cwd':str(root)}],'sandbox':'danger-full-access'})
             assert direct['thread_id'] and len(direct['targets'])==1, direct
@@ -124,20 +129,21 @@ Subsystem sftp internal-sftp
 
             private=api('/runtime/sessions',{'name':'Private SSH','targets':[],'sandbox':'danger-full-access'})
             with sync_playwright() as playwright:
-                browser=playwright.chromium.launch(executable_path='/run/current-system/sw/bin/google-chrome',headless=True,args=['--no-sandbox'])
+                browser=playwright.chromium.launch(executable_path=os.environ.get('CHROME','/run/current-system/sw/bin/google-chrome'),headless=True,args=['--no-sandbox'])
                 page=browser.new_page(viewport={'width':390,'height':844})
                 page.goto(f'http://127.0.0.1:{api_port}')
+                page.get_by_role('button', name='+ connection', exact=True).click()
                 page.get_by_label('Access token').fill(token)
-                page.get_by_role('button',name='Connect host',exact=True).click()
-                expect(page.locator('header .indicator')).to_have_text('CONNECTED',timeout=20000)
-                page.get_by_role('button',name='Private SSH',exact=False).click()
+                page.get_by_role('button',name='Save and connect',exact=True).click()
+                expect(page.locator('header .indicator')).to_have_text('connected to',timeout=20000)
+                page.locator('button.session').filter(has_text='Private SSH').click()
                 page.get_by_role('button',name='Session controls',exact=True).click()
                 dialog=page.get_by_role('dialog',name='Session controls',exact=True)
-                dialog.locator('.target-picker > summary').click()
-                dialog.get_by_text('Add SSH executor to this session',exact=True).click()
-                for label,value in [('SSH target name','Private machine'),('SSH destination',config['destination']),('SSH port (optional)',str(ssh_port)),('Identity file on this server (optional)',config['identity_file']),('Known hosts file on this server (optional)',config['known_hosts_file']),('Remote working directory',str(root))]:
-                    dialog.get_by_label(label,exact=True).fill(value)
-                dialog.get_by_role('button',name='Check and add SSH executor',exact=True).click()
+                dialog.get_by_role('button',name='+ Add SSH executor to this session',exact=True).click()
+                ssh_popup=page.get_by_role('dialog',name='Add session SSH executor',exact=True)
+                for label,value in [('SSH executor name','Private machine'),('SSH destination',config['destination']),('SSH port (optional)',str(ssh_port)),('Identity file on this server (optional)',config['identity_file']),('Known hosts file on this server (optional)',config['known_hosts_file']),('Remote working directory',str(root))]:
+                    ssh_popup.get_by_label(label,exact=True).fill(value)
+                ssh_popup.get_by_role('button',name='Check and add SSH executor',exact=True).click()
                 expect(dialog.locator('.target-picker')).to_contain_text('Private machine',timeout=30000)
                 browser.close()
             private_target=next(t for t in api('/targets') if t['name']=='Private machine')
@@ -150,13 +156,14 @@ Subsystem sftp internal-sftp
             api(f'/sessions/{sid}/connect',{})
             api(f'/sessions/{sid}/targets',{'targets':[{'id':target['id'],'cwd':str(root)}]})
             with sync_playwright() as playwright:
-                browser=playwright.chromium.launch(executable_path='/run/current-system/sw/bin/google-chrome',headless=True,args=['--no-sandbox'])
+                browser=playwright.chromium.launch(executable_path=os.environ.get('CHROME','/run/current-system/sw/bin/google-chrome'),headless=True,args=['--no-sandbox'])
                 page=browser.new_page(viewport={'width':1200,'height':850})
                 page.goto(f'http://127.0.0.1:{api_port}')
+                page.get_by_role('button', name='+ connection', exact=True).click()
                 page.get_by_label('Access token').fill(token)
-                page.get_by_role('button',name='Connect host',exact=True).click()
-                expect(page.locator('header .indicator')).to_have_text('CONNECTED',timeout=20000)
-                page.get_by_role('button',name='SSH fixture',exact=False).click()
+                page.get_by_role('button',name='Save and connect',exact=True).click()
+                expect(page.locator('header .indicator')).to_have_text('connected to',timeout=20000)
+                page.locator('.session').filter(has_text='SSH fixture').click()
                 prompt=page.get_by_label('Message',exact=True)
                 png=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
                 with page.expect_file_chooser() as chooser:
@@ -178,6 +185,9 @@ Subsystem sftp internal-sftp
             c=Client(url)
             initialized=c.call('initialize',{'clientName':'integration'})
             assert initialized['environmentInfo']['platformOs']=='linux'
+            remote_shell=initialized['environmentInfo']['shell']
+            assert remote_shell['name'] in ('bash','sh'), remote_shell
+            assert remote_shell['path'].startswith('/'), remote_shell
             uri=(root/'a file.txt').as_uri()
             encode=lambda s:base64.b64encode(s.encode()).decode()
             c.call('fs/writeFile',{'path':uri,'dataBase64':encode('hello remote')})
@@ -211,6 +221,8 @@ Subsystem sftp internal-sftp
                 r=c.call('process/read',{'processId':pid})
                 assert r['closed'] and r['exited'] and not r['failure'],r
                 return r,b''.join(base64.b64decode(ch['chunk']) for ch in r['chunks'])
+            start('reported-shell','',argv=[remote_shell['path'],'-c','printf shell-ready'])
+            assert finish('reported-shell')[1]==b'shell-ready'
             p=start('command','pwd; printf "%s\\n" "$1" "$VALUE"; sleep 0.2; printf done > completed',argv=['sh','-c','pwd; printf "%s\\n" "$1" "$VALUE"; sleep 0.2; printf done > completed','sh','literal; $(touch bad)'],env={'VALUE':'env spaces'})
             assert (root/'completed').read_text()=='done', 'process/start returned before completion'
             result,data=finish('command')

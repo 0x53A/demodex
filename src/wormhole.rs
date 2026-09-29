@@ -224,20 +224,24 @@ async fn connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     )
     .await?;
     actors.0.push(portal.get_cell());
-    let mut changes = app.manager.updates.subscribe();
+    let mut changes = app.manager.notices.subscribe();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     let authentication_deadline = tokio::time::sleep(Duration::from_secs(15));
     tokio::pin!(authentication_deadline);
     loop {
-        tokio::select! {
+        let notice = tokio::select! {
             _ = portal.wait(None) => break,
             _ = &mut authentication_deadline, if !authenticated.load(Ordering::Acquire) => break,
-            result = notify_rx.changed() => { if result.is_err() { break } },
-            _ = changes.recv() => {},
-            _ = heartbeat.tick() => {},
-        }
+            result = notify_rx.changed() => { if result.is_err() { break } Notice::Changed },
+            result = changes.recv() => match result {
+                Ok(notice) => notice,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => Notice::Changed,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            },
+            _ = heartbeat.tick() => Notice::Runtime,
+        };
         if let Some(sink) = notify_rx.borrow().as_ref() {
-            let _ = sink.send_message(Notice::Changed);
+            let _ = sink.send_message(notice);
         }
     }
     Ok(())
@@ -553,6 +557,7 @@ mod tests {
                 generation: "original".into(),
                 thread: "thread".into(),
                 turn: tokio::sync::Mutex::new(None),
+                subagents: Default::default(),
             }),
         );
         let snapshot = app.manager.background_snapshot(&session.id).await;
@@ -659,6 +664,7 @@ mod tests {
                 generation: "fixture".into(),
                 thread: "thread".into(),
                 turn: tokio::sync::Mutex::new(Some("active".into())),
+                subagents: Default::default(),
             }),
         );
         let request = uuid::Uuid::new_v4().to_string();
@@ -725,6 +731,7 @@ mod tests {
                 generation: "fixture".into(),
                 thread: "thread".into(),
                 turn: tokio::sync::Mutex::new(Some("active".into())),
+                subagents: Default::default(),
             }),
         );
         let request = uuid::Uuid::new_v4().to_string();
@@ -802,6 +809,7 @@ mod tests {
                 generation: "fixture".into(),
                 thread: "thread".into(),
                 turn: tokio::sync::Mutex::new(Some("old".into())),
+                subagents: Default::default(),
             }),
         );
         let receipt = uuid::Uuid::new_v4().to_string();
