@@ -8,7 +8,17 @@ Demodex is a thin layer above (and optionally below) the OpenAI(tm) `codex` cli.
 
 Above codex, it provides a webui to remotely access codex sessions, controlling codex cli through the `app-server` JSON-RPC interface.
 
-Below codex, it uses the codex executor interface to run zero or more execution backends (where the tools are executed), which can be locally on the host, in a container/VM, or, using a custom SSH executor, access a remote machine through SSH _**without having to install a server on that machine**_.
+Below codex, it uses the codex executor interface to run zero or more execution backends (where the tools are executed). These can run directly on the host, in a container/VM, or, using a custom SSH executor, can access a remote machine through SSH _**without having to install a server on that machine**_.
+
+The default setup of both codex-cli and claude-code is that you run the terminal app on your developer machine, and the agent runs the tools in the same process, maybe a sub-process (codex added a shared daemon with the latest update), but definitely on the same machine.
+
+With demodex, you can run the demodex server and codex app-server on one machine, including in a container or VM if you so desire, connect to it from multiple remote devices, even at the same time, and can select where tools execute per-session, even change it during a sesion.
+
+![Side-by-side architecture: a local terminal UI, agent and tools on one developer machine; Demodex connects multiple devices to a persistent daemon and Codex app-server, with tool execution on host, container, VM and SSH backends.](assets/architecture.svg)
+
+Now, personally, I always used `codex -s danger-full-access`, and continue to use demodex in host mode, so this added isolation is a nice theoretical propery, but I trust the model, the model hasn't let me down so far. What it does add for me is remote access from my phone (through tailscale), and the ability to access *additional* targets.
+
+![My setup: Demodex runs on my laptop alongside a browser and my taxes folder. A phone connects remotely. The laptop runs the host executor and two SSH executors, connecting to a server and a smartwatch.](assets/my-setup.svg)
 
 ## Setup
 
@@ -42,5 +52,3 @@ So, with all that out of the way, how do you actually use it? Here's a short vid
 
 
 https://github.com/user-attachments/assets/a41295a3-a5f4-4556-9a33-7fcda0824082
-
-

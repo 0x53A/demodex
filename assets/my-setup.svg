@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="940" viewBox="0 0 1200 940">
+<title>My actual Demodex setup</title>
+<desc>A phone connects remotely to Demodex on my laptop. The laptop contains a browser, taxes folder, daemon, Codex app-server, host executor and two SSH executors. The SSH executors connect to a server and smartwatch; they run on the laptop, not on those remote devices.</desc>
+<rect x="0" y="0" width="1200" height="940" rx="12" fill="#17191b" stroke="#17191b"/>
+<text x="40" y="52" text-anchor="start" font-family="monospace" font-size="15" fill="#f49b54" font-weight="400">MY ACTUAL SETUP</text>
+<rect x="250" y="166" width="870" height="550" rx="14" fill="#202326" stroke="#a0a2a4"/>
+<circle cx="685" cy="181" r="3" fill="#74787c"/>
+<text x="278" y="211" text-anchor="start" font-family="monospace" font-size="15" fill="#b9b7b2" font-weight="400">MY LAPTOP / DEMODEX HOST</text>
+<path d="M250 716h870l38 24H212Z" fill="#2b2e31" stroke="#a0a2a4" stroke-width="2" stroke-linejoin="round"/>
+<path d="M606 716l10 10h138l10-10" fill="none" stroke="#a0a2a4" stroke-width="2" stroke-linejoin="round"/>
+<path d="M930 237h48l15 16h67v76H930Z" fill="#332a24" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+<path d="M930 261h130" fill="none" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+<text x="995" y="304" text-anchor="middle" font-family="sans-serif" font-size="22" fill="#f2ede4" font-weight="400">taxes</text>
+<rect x="320" y="240" width="420" height="88" rx="4" fill="#2b2e31" stroke="#74787c"/>
+<path d="M320 259h420" fill="none" stroke="#74787c" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="333" cy="250" r="3" fill="#a0a2a4"/>
+<circle cx="345" cy="250" r="3" fill="#a0a2a4"/>
+<circle cx="357" cy="250" r="3" fill="#a0a2a4"/>
+<text x="530" y="287" text-anchor="middle" font-family="sans-serif" font-size="22" fill="#f2ede4" font-weight="700">Browser</text>
+<text x="530" y="311" text-anchor="middle" font-family="sans-serif" font-size="16" fill="#b9b7b2" font-weight="400">Demodex web UI</text>
+<path d="M530 328v42m-6-8 6 8 6-8" fill="none" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+<rect x="48" y="327" width="126" height="174" rx="16" fill="#2b2e31" stroke="#a0a2a4"/>
+<path d="M92 339h38M94 487h34" fill="none" stroke="#a0a2a4" stroke-width="2" stroke-linejoin="round"/>
+<text x="111" y="399" text-anchor="middle" font-family="sans-serif" font-size="22" fill="#f2ede4" font-weight="700">Phone</text>
+<text x="111" y="426" text-anchor="middle" font-family="sans-serif" font-size="16" fill="#b9b7b2" font-weight="400">PWA</text>
+<path d="M174 414h146m-8-6 8 6-8 6" fill="none" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+<text x="211" y="401" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#f49b54" font-weight="400">Remote</text>
+<rect x="320" y="370" width="720" height="88" rx="4" fill="#332a24" stroke="#f49b54"/>
+<text x="680" y="405" text-anchor="middle" font-family="sans-serif" font-size="23" fill="#f2ede4" font-weight="700">Demodex daemon</text>
+<text x="680" y="435" text-anchor="middle" font-family="sans-serif" font-size="17" fill="#d6c5b7" font-weight="400">Sessions · approvals · target selection</text>
+<path d="M680 458v42m-6-8 6 8 6-8" fill="none" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+<text x="699" y="485" text-anchor="start" font-family="monospace" font-size="14" fill="#b9b7b2" font-weight="400">JSON-RPC</text>
+<rect x="320" y="500" width="720" height="72" rx="4" fill="#2b2e31" stroke="#74787c"/>
+<text x="680" y="531" text-anchor="middle" font-family="sans-serif" font-size="22" fill="#f2ede4" font-weight="700">Codex app-server</text>
+<text x="680" y="556" text-anchor="middle" font-family="sans-serif" font-size="16" fill="#b9b7b2" font-weight="400">Agent runtime</text>
+<path d="M680 572v48m-250 0v-24h500v24" fill="none" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+<path d="M424 612l6 8 6-8" fill="none" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+<rect x="320" y="620" width="220" height="64" rx="4" fill="#2b2e31" stroke="#74787c"/>
+<text x="430" y="647" text-anchor="middle" font-family="sans-serif" font-size="20" fill="#f2ede4" font-weight="700">Host executor</text>
+<text x="430" y="671" text-anchor="middle" font-family="sans-serif" font-size="15" fill="#b9b7b2" font-weight="400">Local tools + files</text>
+<path d="M674 612l6 8 6-8" fill="none" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+<rect x="570" y="620" width="220" height="64" rx="4" fill="#2b2e31" stroke="#74787c"/>
+<text x="680" y="647" text-anchor="middle" font-family="sans-serif" font-size="20" fill="#f2ede4" font-weight="700">SSH executor</text>
+<path d="M924 612l6 8 6-8" fill="none" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+<rect x="820" y="620" width="220" height="64" rx="4" fill="#2b2e31" stroke="#74787c"/>
+<text x="930" y="647" text-anchor="middle" font-family="sans-serif" font-size="20" fill="#f2ede4" font-weight="700">SSH executor</text>
+<path d="M680 684v116m-6-8 6 8 6-8" fill="none" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+<path d="M930 684v112" fill="none" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+<text x="698" y="774" text-anchor="start" font-family="sans-serif" font-size="14" fill="#f49b54" font-weight="400">SSH / SFTP</text>
+<text x="948" y="774" text-anchor="start" font-family="sans-serif" font-size="14" fill="#f49b54" font-weight="400">SSH / SFTP</text>
+<rect x="590" y="800" width="180" height="110" rx="5" fill="#202326" stroke="#a0a2a4"/>
+<path d="M605 817h122m-122 9h122" fill="none" stroke="#74787c" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="750" cy="821" r="3" fill="#f49b54"/>
+<text x="680" y="860" text-anchor="middle" font-family="sans-serif" font-size="22" fill="#f2ede4" font-weight="700">server</text>
+<text x="680" y="889" text-anchor="middle" font-family="sans-serif" font-size="15" fill="#b9b7b2" font-weight="400">Remote tools + files</text>
+<path d="M901 796h58v20h-58Zm0 84h58v40h-58Z" fill="#2b2e31" stroke="#a0a2a4" stroke-width="2" stroke-linejoin="round"/>
+<path d="M930 796v20m-6-8 6 8 6-8" fill="none" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+<rect x="850" y="816" width="160" height="80" rx="18" fill="#202326" stroke="#a0a2a4"/>
+<path d="M1010 841h5v20h-5" fill="#2b2e31" stroke="#a0a2a4" stroke-width="2" stroke-linejoin="round"/>
+<text x="930" y="850" text-anchor="middle" font-family="sans-serif" font-size="21" fill="#f2ede4" font-weight="700">smartwatch</text>
+<text x="930" y="877" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#b9b7b2" font-weight="400">Remote tools + files</text>
+</svg>

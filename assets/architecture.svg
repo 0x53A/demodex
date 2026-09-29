@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">
+  <title>Typical local setup compared with Demodex</title>
+  <desc>Left: a terminal UI connects to a local tool executor on the developer machine. A dashed optional sandbox surrounds only the executor; a taxes folder remains outside that boundary on the same machine. Right: phone and laptop browsers connect to a Demodex daemon. The daemon manages sessions through Codex app-server, with tool execution on selected host, container, virtual machine and SSH backends. Container and VM executors run inside their targets. The SSH executor runs on the Demodex host and connects to a remote machine using SSH and SFTP. Sessions persist independently of browser connections.</desc>
+  <rect width="1200" height="800" rx="12" fill="#17191b"/>
+  <g font-family="sans-serif" fill="#f2ede4">
+    <path d="M600 36V764" stroke="#3b3e41"/>
+    <g font-family="monospace" font-size="15" fill="#f49b54">
+      <text x="40" y="52">TYPICAL CODEX SETUP</text>
+      <text x="640" y="52">DEMODEX</text>
+    </g>
+    <g font-size="28" font-weight="700">
+      <text x="40" y="94">One developer machine</text>
+      <text x="640" y="94">Connect from anywhere</text>
+    </g>
+    <g font-size="17" fill="#b9b7b2">
+      <!-- <text x="40" y="125">Terminal, agent and tools live together.</text>
+      <text x="640" y="125">Remote UI. Persistent sessions. Multiple targets.</text> -->
+    </g>
+
+    <!-- Local setup: tools and personal files share the developer machine. -->
+    <rect x="40" y="165" width="520" height="611" rx="6" fill="#202326" stroke="#64676a"/>
+    <text x="64" y="197" font-family="monospace" font-size="15" fill="#b9b7b2">DEVELOPER MACHINE</text>
+    <path d="M382 247h48l15 16h67v76H382Z" fill="#332a24" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M382 271h130" fill="none" stroke="#f49b54" stroke-width="2"/>
+    <text x="447" y="314" text-anchor="middle" font-size="22">taxes</text>
+    <rect x="88" y="434" width="424" height="80" rx="4" fill="#2b2e31" stroke="#74787c"/>
+    <path d="M110 455l9 8-9 8m16 0h14" fill="none" stroke="#f49b54" stroke-width="2"/>
+    <text x="300" y="466" text-anchor="middle" font-size="23" font-weight="700">Terminal UI</text>
+    <text x="300" y="496" text-anchor="middle" font-size="17" fill="#b9b7b2">Codex CLI</text>
+    <rect x="68" y="586" width="464" height="158" rx="6" fill="none" stroke="#b9b7b2" stroke-dasharray="7 6"/>
+    <text x="88" y="613" font-size="16" fill="#b9b7b2">optional sandbox</text>
+    <path d="M300 514v120m-6-8 6 8 6-8" fill="none" stroke="#b9b7b2" stroke-width="2"/>
+    <rect x="88" y="634" width="424" height="80" rx="4" fill="#2b2e31" stroke="#74787c"/>
+    <text x="300" y="666" text-anchor="middle" font-size="23" font-weight="700">Local Tool Executor</text>
+    <text x="300" y="696" text-anchor="middle" font-size="17" fill="#b9b7b2">Shell · files · builds · tests</text>
+
+    <!-- Phone and laptop browsers connect to the same daemon. -->
+    <rect x="706" y="150" width="100" height="105" rx="12" fill="#2b2e31" stroke="#a0a2a4" stroke-width="2"/>
+    <path d="M741 158h30M743 247h26" stroke="#a0a2a4" stroke-width="2" stroke-linecap="round"/>
+    <text x="756" y="197" text-anchor="middle" font-size="18" font-weight="700">Phone</text>
+    <text x="756" y="223" text-anchor="middle" font-size="14" fill="#b9b7b2">PWA</text>
+    <rect x="960" y="160" width="160" height="85" rx="5" fill="#2b2e31" stroke="#a0a2a4" stroke-width="2"/>
+    <path d="M960 245h160l18 10H942Z" fill="#2b2e31" stroke="#a0a2a4" stroke-width="2" stroke-linejoin="round"/>
+    <text x="1040" y="195" text-anchor="middle" font-size="19" font-weight="700">Laptop</text>
+    <text x="1040" y="222" text-anchor="middle" font-size="15" fill="#b9b7b2">Browser / PWA</text>
+    <path d="M756 255v17h284v-17m-140 17v18m-6-6 6 8 6-8" fill="none" stroke="#f49b54" stroke-width="2"/>
+    <rect x="640" y="294" width="520" height="350" rx="6" fill="#202326" stroke="#64676a"/>
+    <text x="660" y="322" font-family="monospace" font-size="15" fill="#b9b7b2">DEMODEX HOST</text>
+    <text x="1140" y="322" text-anchor="end" font-size="15" fill="#b9b7b2">Machine, VM or container</text>
+    <rect x="664" y="340" width="472" height="90" rx="4" fill="#332a24" stroke="#f49b54" stroke-width="2"/>
+    <text x="900" y="375" text-anchor="middle" font-size="23" font-weight="700">Demodex daemon</text>
+    <text x="900" y="405" text-anchor="middle" font-size="17" fill="#d6c5b7">Sessions · approvals · target selection</text>
+    <path d="M900 430v34" stroke="#f49b54" stroke-width="2"/>
+    <path d="m894 458 6 8 6-8" fill="none" stroke="#f49b54" stroke-width="2"/>
+    <text x="919" y="455" font-family="monospace" font-size="14" fill="#b9b7b2">JSON-RPC</text>
+    <rect x="664" y="470" width="472" height="74" rx="4" fill="#2b2e31" stroke="#74787c"/>
+    <text x="900" y="501" text-anchor="middle" font-size="22" font-weight="700">Codex app-server</text>
+    <text x="900" y="528" text-anchor="middle" font-size="16" fill="#b9b7b2">Agent runtime</text>
+
+    <!-- Local and SSH executors run on the host. Container and VM executors run in their targets. -->
+    <path d="M900 544v116m-156-90v-16h312v16" fill="none" stroke="#f49b54" stroke-width="2"/>
+    <g fill="none" stroke="#f49b54" stroke-width="2">
+      <path d="m738 564 6 8 6-8"/>
+      <path d="m1050 564 6 8 6-8"/>
+    </g>
+    <g fill="#2b2e31" stroke="#74787c">
+      <rect x="664" y="574" width="160" height="52" rx="4"/>
+      <rect x="976" y="574" width="160" height="52" rx="4"/>
+    </g>
+    <g text-anchor="middle" font-size="18" font-weight="700">
+      <text x="744" y="596">Host executor</text>
+      <text x="1056" y="596">SSH executor</text>
+    </g>
+    <g text-anchor="middle" font-size="14" fill="#b9b7b2">
+      <text x="744" y="616">Local tools</text>
+      <text x="1056" y="616">Connects remotely</text>
+    </g>
+    <path d="M722 680v-20h178v20M1056 626v22h22v32" fill="none" stroke="#f49b54" stroke-width="2"/>
+    <rect x="1024" y="653" width="108" height="22" fill="#17191b"/>
+    <text x="1078" y="669" text-anchor="middle" font-size="14" fill="#f49b54">SSH / SFTP</text>
+    <g fill="none" stroke="#f49b54" stroke-width="2">
+      <path d="m1072 674 6 8 6-8"/>
+    </g>
+    <g fill="#202326" stroke="#64676a">
+      <rect x="640" y="686" width="164" height="90" rx="4"/>
+      <rect x="818" y="686" width="164" height="90" rx="4"/>
+      <rect x="996" y="686" width="164" height="90" rx="4"/>
+    </g>
+    <g text-anchor="middle" font-size="18" font-weight="700">
+      <text x="722" y="744">Containers</text>
+      <text x="900" y="744">VMs</text>
+      <text x="1078" y="709">Remote machine</text>
+    </g>
+    <g text-anchor="middle" font-size="14" fill="#b9b7b2">
+      <text x="722" y="765">Docker / Podman</text>
+      <text x="900" y="765">NixOS</text>
+      <text x="1078" y="737">Shell + files</text>
+      <text x="1078" y="760">No executor installed</text>
+    </g>
+    <g fill="none" stroke="#f49b54" stroke-width="2">
+      <path d="M722 680v16m-6-8 6 8 6-8"/>
+      <path d="M900 680v16m-6-8 6 8 6-8"/>
+    </g>
+    <g fill="#2b2e31" stroke="#74787c">
+      <rect x="652" y="696" width="140" height="26" rx="3"/>
+      <rect x="830" y="696" width="140" height="26" rx="3"/>
+    </g>
+    <g text-anchor="middle" font-size="15" font-weight="700">
+      <text x="722" y="715">Executor</text>
+      <text x="900" y="715">Executor</text>
+    </g>
+  </g>
+</svg>
