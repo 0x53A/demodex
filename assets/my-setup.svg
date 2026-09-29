@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="940" viewBox="0 0 1200 940">
 <title>My actual Demodex setup</title>
-<desc>A phone connects remotely to Demodex on my laptop. The laptop contains a browser, taxes folder, daemon, Codex app-server, host executor and two SSH executors. The SSH executors connect to a server and smartwatch; they run on the laptop, not on those remote devices.</desc>
+<desc>A phone connects remotely to Demodex on my laptop. The laptop contains a browser, company secrets and taxes folders, daemon, Codex app-server, host executor and two SSH executors. The SSH executors connect to a server and smartwatch; they run on the laptop, not on those remote devices.</desc>
 <rect x="0" y="0" width="1200" height="940" rx="12" fill="#17191b" stroke="#17191b"/>
 <text x="40" y="52" text-anchor="start" font-family="monospace" font-size="15" fill="#f49b54" font-weight="400">MY ACTUAL SETUP</text>
 <rect x="250" y="166" width="870" height="550" rx="14" fill="#202326" stroke="#a0a2a4"/>
@@ -8,6 +8,10 @@
 <text x="278" y="211" text-anchor="start" font-family="monospace" font-size="15" fill="#b9b7b2" font-weight="400">MY LAPTOP / DEMODEX HOST</text>
 <path d="M250 716h870l38 24H212Z" fill="#2b2e31" stroke="#a0a2a4" stroke-width="2" stroke-linejoin="round"/>
 <path d="M606 716l10 10h138l10-10" fill="none" stroke="#a0a2a4" stroke-width="2" stroke-linejoin="round"/>
+<path d="M770 237h48l15 16h67v76H770Z" fill="#332a24" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+<path d="M770 261h130" fill="none" stroke="#f49b54" stroke-width="2"/>
+<text x="835" y="287" text-anchor="middle" font-family="sans-serif" font-size="18" fill="#f2ede4">company</text>
+<text x="835" y="310" text-anchor="middle" font-family="sans-serif" font-size="18" fill="#f2ede4">secrets</text>
 <path d="M930 237h48l15 16h67v76H930Z" fill="#332a24" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
 <path d="M930 261h130" fill="none" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
 <text x="995" y="304" text-anchor="middle" font-family="sans-serif" font-size="22" fill="#f2ede4" font-weight="400">taxes</text>

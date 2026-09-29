@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">
   <title>Typical local setup compared with Demodex</title>
-  <desc>Left: a terminal UI connects to a local tool executor on the developer machine. A dashed optional sandbox surrounds only the executor; a taxes folder remains outside that boundary on the same machine. Right: phone and laptop browsers connect to a Demodex daemon. The daemon manages sessions through Codex app-server, with tool execution on selected host, container, virtual machine and SSH backends. Container and VM executors run inside their targets. The SSH executor runs on the Demodex host and connects to a remote machine using SSH and SFTP. Sessions persist independently of browser connections.</desc>
+  <desc>Left: a terminal UI connects to a local tool executor on the developer machine. A dashed optional sandbox surrounds only the executor; company secrets and taxes folders remain outside that boundary on the same machine. Right: phone and laptop browsers connect to a Demodex daemon. The client laptop contains company secrets and taxes folders. The daemon manages sessions through Codex app-server, with tool execution on selected host, container, virtual machine and SSH backends. Container and VM executors run inside their targets. The SSH executor runs on the Demodex host and connects to a remote machine using SSH and SFTP. Sessions persist independently of browser connections.</desc>
   <rect width="1200" height="800" rx="12" fill="#17191b"/>
   <g font-family="sans-serif" fill="#f2ede4">
     <path d="M600 36V764" stroke="#3b3e41"/>
@@ -20,6 +20,10 @@
     <!-- Local setup: tools and personal files share the developer machine. -->
     <rect x="40" y="165" width="520" height="611" rx="6" fill="#202326" stroke="#64676a"/>
     <text x="64" y="197" font-family="monospace" font-size="15" fill="#b9b7b2">DEVELOPER MACHINE</text>
+    <path d="M218 247h48l15 16h67v76H218Z" fill="#332a24" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M218 271h130" fill="none" stroke="#f49b54" stroke-width="2"/>
+    <text x="283" y="297" text-anchor="middle" font-size="18">company</text>
+    <text x="283" y="320" text-anchor="middle" font-size="18">secrets</text>
     <path d="M382 247h48l15 16h67v76H382Z" fill="#332a24" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
     <path d="M382 271h130" fill="none" stroke="#f49b54" stroke-width="2"/>
     <text x="447" y="314" text-anchor="middle" font-size="22">taxes</text>
@@ -39,10 +43,16 @@
     <path d="M741 158h30M743 247h26" stroke="#a0a2a4" stroke-width="2" stroke-linecap="round"/>
     <text x="756" y="197" text-anchor="middle" font-size="18" font-weight="700">Phone</text>
     <text x="756" y="223" text-anchor="middle" font-size="14" fill="#b9b7b2">PWA</text>
-    <rect x="960" y="160" width="160" height="85" rx="5" fill="#2b2e31" stroke="#a0a2a4" stroke-width="2"/>
-    <path d="M960 245h160l18 10H942Z" fill="#2b2e31" stroke="#a0a2a4" stroke-width="2" stroke-linejoin="round"/>
-    <text x="1040" y="195" text-anchor="middle" font-size="19" font-weight="700">Laptop</text>
-    <text x="1040" y="222" text-anchor="middle" font-size="15" fill="#b9b7b2">Browser / PWA</text>
+    <rect x="858" y="132" width="290" height="113" rx="5" fill="#2b2e31" stroke="#a0a2a4" stroke-width="2"/>
+    <path d="M858 245h290l18 10H840Z" fill="#2b2e31" stroke="#a0a2a4" stroke-width="2" stroke-linejoin="round"/>
+    <text x="1003" y="155" text-anchor="middle" font-size="17" font-weight="700">Laptop · Browser / PWA</text>
+    <path d="M876 168h35l10 10h68v56H876Z" fill="#332a24" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M876 184h113" fill="none" stroke="#f49b54" stroke-width="2"/>
+    <text x="932" y="204" text-anchor="middle" font-size="15">company</text>
+    <text x="932" y="223" text-anchor="middle" font-size="15">secrets</text>
+    <path d="M1014 168h35l10 10h71v56H1014Z" fill="#332a24" stroke="#f49b54" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M1014 184h116" fill="none" stroke="#f49b54" stroke-width="2"/>
+    <text x="1072" y="215" text-anchor="middle" font-size="18">taxes</text>
     <path d="M756 255v17h284v-17m-140 17v18m-6-6 6 8 6-8" fill="none" stroke="#f49b54" stroke-width="2"/>
     <rect x="640" y="294" width="520" height="350" rx="6" fill="#202326" stroke="#64676a"/>
     <text x="660" y="322" font-family="monospace" font-size="15" fill="#b9b7b2">DEMODEX HOST</text>

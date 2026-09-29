@@ -2,7 +2,7 @@
 
 ## What it is, and isn't
 
-Demodex is a thin layer above (and optionally below) the OpenAI(tm) `codex` cli.
+Demodex is a thin layer above (and optionally below) the OpenAI(tm) `codex` cli, allowing remote access and isolation between agent runtime and tool execution.
 
 **It is _not_ another harness (like OpenCode), and it does _not_ support different backends (like ACP)**.
 
@@ -12,21 +12,30 @@ Below codex, it uses the codex executor interface to run zero or more execution 
 
 The default setup of both codex-cli and claude-code is that you run the terminal app on your developer machine, and the agent runs the tools in the same process, maybe a sub-process (codex added a shared daemon with the latest update), but definitely on the same machine.
 
-With demodex, you can run the demodex server and codex app-server on one machine, including in a container or VM if you so desire, connect to it from multiple remote devices, even at the same time, and can select where tools execute per-session, even change it during a sesion.
+With demodex, you can run the demodex server and codex app-server on one machine, including in a container or VM if you so desire, connect to it from multiple remote devices, even at the same time, and can select where tools execute per-session, even change it during a session.
 
 ![Side-by-side architecture: a local terminal UI, agent and tools on one developer machine; Demodex connects multiple devices to a persistent daemon and Codex app-server, with tool execution on host, container, VM and SSH backends.](assets/architecture.svg)
 
-Now, personally, I always used `codex -s danger-full-access`, and continue to use demodex in host mode, so this added isolation is a nice theoretical propery, but I trust the model, the model hasn't let me down so far. What it does add for me is remote access from my phone (through tailscale), and the ability to access *additional* targets.
+Note that even though they are drawn separately, you can obviously run both demodex and one or more executors directly on your dev PC, either on the host, or in VMs. You do **not** need a complicated, multi-machine cloud setup, demodex is very explicitly there to give you full, **local** control.
+
+Now, personally, I always used `codex -s danger-full-access`, and continue to use demodex in host mode, so this added isolation is a nice theoretical property, but I trust the model, the model hasn't let me down so far. What it does add for me is remote access from my phone (through tailscale), and the ability to access *additional* targets.
 
 ![My setup: Demodex runs on my laptop alongside a browser and my taxes folder. A phone connects remotely. The laptop runs the host executor and two SSH executors, connecting to a server and a smartwatch.](assets/my-setup.svg)
+
+# Usage
+
+So, with all that out of the way, how do you actually use it? Here's a short video showing the main interface, and how you can change the available executors at runtime.
+
+
+https://github.com/user-attachments/assets/a41295a3-a5f4-4556-9a33-7fcda0824082
 
 ## Setup
 
 Demodex does not embed codex, you need to install it, depending on your os.
 
-You can configure whether it should share authentication and session storage with your normal user profile, or have it's own codex directory.
+You can configure whether it should share authentication and session storage with your normal user profile, or have its own codex directory.
 
-The demox webui supports token authentication or tailscale authentication. It does **not** have any multi-user features. There's one token, and one list of sessions.
+The demodex webui supports token authentication or tailscale authentication. It does **not** have any multi-user features. There's one token, and one list of sessions.
 
 If you use nix, this repo contains the files I use to host it on my system.
 
@@ -38,17 +47,10 @@ Install and configure both codex and tailscale. Ask your agent to scan the repos
 
 ## Development and Contribution
 
-It works for me, my next planned steps are probably improving the multi-executor workflow and additional tools to copy files and folders between executors.
+It works for me, my next planned steps are probably improving the multi-executor workflow and adding tools to copy files and folders between executors.
 
 If you're here, you're a vibecoder. Please don't send PRs, I'm not gonna merge any PRs. Open an issue, if you have changes, push them to a branch and link the branch. I'll tell my agent to look at it.
 
 ## License
 
-This is vibe-engineered, as such I'm happy to put it into public domain. My contributions are dual-licensed under cc0 and MIT, at your convenience; for referenced crates and libraries, their respective licenses apply.
-
-# Usage
-
-So, with all that out of the way, how do you actually use it? Here's a short video showing the main interface, and how you can change the available executors at runtime.
-
-
-https://github.com/user-attachments/assets/a41295a3-a5f4-4556-9a33-7fcda0824082
+This is vibe-engineered, as such I'm happy to put it into the public domain. My contributions are dual-licensed under cc0 and MIT, at your convenience; for referenced crates and libraries, their respective licenses apply.
