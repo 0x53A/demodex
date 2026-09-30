@@ -1,4 +1,5 @@
 mod app;
+mod approval;
 mod client;
 mod sync;
 mod controls;

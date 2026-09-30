@@ -11,6 +11,11 @@ Small, deliberate, slightly odd. A session console, not a decorative dashboard.
   back action. Desktop: persistent sidebar and main conversation.
 - Approval/question cards are visually distinct and remain until resolved.
   No default answer, time limit, automatic selection, or implicit dismissal.
+  Command/file approvals lead with the reason, exact command when supplied,
+  and reported executor/directory or requested write root. Keep requested extra
+  permissions visible and the complete protocol request in expandable details.
+  Approve once, Decline and Cancel turn are separate touch-sized actions; show
+  pending, sending, delivered and unavailable states in plain language.
 - Tool output is collapsed by default; preserve plain text verbatim. Never
   render remote output or model text as raw HTML.
 - Composer and primary controls remain reachable on narrow displays.

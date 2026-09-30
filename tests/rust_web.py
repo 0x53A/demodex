@@ -564,6 +564,44 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             expect(page.locator(".session-heading .status")).to_have_text("idle")
             assert codex.answers == [{"id": 777, "result": {"answers": {"choice": {"answers": ["Explicit answer"]}}}}], codex.answers
             assert api(f"/sessions/{session_id}")["session"]["status"] == "idle"
+            # Approval summaries stay inert and require an explicit action on
+            # both mobile and desktop; expanding details must never answer.
+            for index, (width, label, decision) in enumerate([
+                (390, 'Approve once', 'accept'),
+                (1200, 'Decline', 'decline'),
+                (390, 'Cancel turn', 'cancel'),
+            ]):
+                page.set_viewport_size({'width': width, 'height': 844})
+                request_id = 790 + index
+                before = len(codex.answers)
+                command = 'echo "<img src=x onerror=alert(1)>"'
+                codex.send('item/commandExecution/requestApproval', {
+                    'threadId': 'thread', 'turnId': 'turn', 'itemId': f'approval-{index}',
+                    'command': command, 'cwd': '/workspace/project',
+                    'environmentId': 'fixture-executor', 'reason': 'Needs access to the workspace',
+                }, request_id)
+                card = page.get_by_role('region', name='Approve command', exact=True)
+                expect(card).to_contain_text('Waiting for you')
+                expect(card.locator('.approval-command')).to_have_text(command)
+                expect(card.locator('.approval-context')).to_contain_text('/workspace/project')
+                expect(card.locator('img')).to_have_count(0)
+                expect(card.locator('.approval-details pre')).not_to_be_visible()
+                card.get_by_text('Request details', exact=True).click()
+                expect(card.locator('.approval-details pre')).to_contain_text('fixture-executor')
+                assert len(codex.answers) == before
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                card.get_by_role('button', name=label, exact=True).click()
+                expect(card).to_have_count(0)
+                assert codex.answers[-1] == {'id': request_id, 'result': {'decision': decision}}
+            codex.send('item/fileChange/requestApproval', {
+                'threadId': 'thread', 'turnId': 'turn', 'itemId': 'file-approval',
+                'reason': 'Update the shared configuration', 'grantRoot': '/workspace/config',
+            }, 793)
+            file_card = page.get_by_role('region', name='Approve file changes', exact=True)
+            expect(file_card).to_contain_text('Update the shared configuration')
+            expect(file_card.locator('.approval-context')).to_contain_text('/workspace/config')
+            file_card.get_by_role('button', name='Decline', exact=True).click()
+            expect(file_card).to_have_count(0)
             second_port = port()
             second_host = f"http://127.0.0.1:{second_port}"
             start("--bind", f"127.0.0.1:{second_port}", "--data-dir", str(directory / "second"), "--api-only", "--allowed-origin", origin)
