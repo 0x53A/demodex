@@ -162,7 +162,7 @@ fn message_item(props: &ItemProps) -> Html {
             _=>Html::default(),
         }}
         {match kind {
-            "agentMessage" | "plan"=>html!{<crate::rich_messages::Message source={text(item,"text").to_owned()} item_id={text(item,"id").to_owned()} file_revision={item["_demodexFilesRevision"].as_u64().unwrap_or_default()}/>},
+            "agentMessage" | "plan"=>html!{<><crate::rich_messages::Message source={text(item,"text").to_owned()} item_id={text(item,"id").to_owned()} file_revision={item["_demodexFilesRevision"].as_u64().unwrap_or_default()}/><crate::music::MessageScores text={text(item,"text").to_owned()}/></>},
             "userMessage"=>html!{<crate::rich_messages::Message source={array(&item["content"]).iter().map(|c|match text(c,"type") {"image"=>"[Attached image]", "localImage"=>text(c,"path"), _=>text(c,"text")}).collect::<Vec<_>>().join("\n")}/>},
             "reasoning"=>html!{<><pre>{array(&item["summary"]).iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n\n")}</pre>{if !array(&item["content"]).is_empty(){html!{<details><summary>{"Reasoning details"}</summary><pre>{array(&item["content"]).iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n\n")}</pre></details>}}else{Html::default()}}</>},
             "commandExecution"=>html!{<><pre class="tool-heading"><code>{text(item,"command")}</code></pre><small class="muted">{text(item,"cwd")}</small>{command_output(text(item,"aggregatedOutput"))}</>},

@@ -479,3 +479,8 @@ meter::-moz-meter-bar{border-radius:0;background:#91b88b}
 .message-time{margin-left:auto;color:#939b90;font:10px ui-monospace,monospace;letter-spacing:0;white-space:nowrap}
 
 .push-settings p { overflow-wrap: anywhere; }
+/* The component owns its editor and audio controls inside its shadow root. */
+.score-player-host { width: 100%; height: min(680px, 75dvh); min-height: 340px; }
+.score-player { margin: 12px 0; border: 1px solid var(--border, #444); }
+.score-player > p { padding: 8px; }
+.open-score { margin: 4px 8px 4px 0; }

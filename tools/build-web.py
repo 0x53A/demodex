@@ -6,8 +6,30 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def bundle_apteronotus(directory, package):
+    """Keep player releases addressable for tabs on older frontend releases."""
+    files = [package / "apteronotus_app.js", package / "apteronotus_app_bg.wasm"]
+    if not all(path.is_file() for path in files):
+        raise ValueError("--apteronotus-pkg must contain a built Apteronotus web/pkg")
+    # wasm-bindgen may emit additional modules below snippets/.
+    files += sorted(path for path in (package / "snippets").rglob("*") if path.is_file())
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.relative_to(package).as_posix().encode())
+        digest.update(path.read_bytes())
+    destination = directory / "assets" / ("apteronotus-" + digest.hexdigest()[:20])
+    for path in files:
+        target = destination / path.relative_to(package)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+    (directory / "apteronotus.json").write_text(json.dumps({
+        "module": "./" + (destination / "apteronotus_app.js").relative_to(directory).as_posix()
+    }))
 
 
 def seal_release(directory):
@@ -30,6 +52,7 @@ if __name__ == "__main__":
     parser.add_argument("--public-url", default="/", help="Absolute site path, e.g. /demodex/")
     parser.add_argument("--standalone", action="store_true", help="Start without assuming a same-origin daemon")
     parser.add_argument("--dist", type=Path, default=ROOT / "web/.rust-dist")
+    parser.add_argument("--apteronotus-pkg", type=Path, help="Bundle the built Apteronotus web/pkg player")
     args = parser.parse_args()
     if not args.public_url.startswith("/") or args.public_url.startswith("//") or any(c in args.public_url for c in "?#"):
         parser.error("--public-url must be an absolute site path")
@@ -41,4 +64,6 @@ if __name__ == "__main__":
     subprocess.run(["trunk", "build", "--release", "--locked", "--config", "crates/web/Trunk.toml",
                     "--public-url", args.public_url.rstrip("/") + "/", "--dist", str(args.dist.resolve())],
                    cwd=ROOT, env=env, check=True)
+    if args.apteronotus_pkg:
+        bundle_apteronotus(args.dist.resolve(), args.apteronotus_pkg.resolve())
     print("PWA release:", seal_release(args.dist.resolve()))

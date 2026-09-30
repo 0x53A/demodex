@@ -47,6 +47,29 @@ Install and configure both codex and tailscale. Ask your agent to scan the repos
 
 ## Development and Contribution
 
+Conversation code blocks tagged `eod`, `apt`, or `apteronotus` offer an **Open
+Apteronotus score** button. The embedded editor loads the exact score; **Run**
+starts synthesis and **Close player** tears down playback. Ordinary Lua snippets
+do not offer playback. This uses the Apteronotus web component, initialized only
+when opened, with no redirect or score text in a URL.
+
+To include the player in a frontend release, build Apteronotus first, then bundle
+its generated package with Demodex:
+
+```sh
+# In the Apteronotus checkout:
+./tools/build-web.sh --locked
+# In the Demodex development shell:
+uv run tools/build-web.py --apteronotus-pkg ../apteronotus/web/pkg
+```
+
+The player is served from the same origin under a content-derived asset path.
+The PWA verifies and caches those static assets with the release; initialization
+is on demand, but installing the PWA downloads the bundled player for offline
+use. Builds without `--apteronotus-pkg` show an explicit unavailable-player
+message. Source-file acquisition from execution targets is separate from this
+text embedding.
+
 It works for me, my next planned steps are probably improving the multi-executor workflow and adding tools to copy files and folders between executors.
 
 If you're here, you're a vibecoder. Please don't send PRs, I'm not gonna merge any PRs. Open an issue, if you have changes, push them to a branch and link the branch. I'll tell my agent to look at it.

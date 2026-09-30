@@ -7,6 +7,7 @@ mod diff;
 mod directory_picker;
 mod modal;
 mod model;
+mod music;
 mod notifications;
 mod overview;
 mod reorder;
