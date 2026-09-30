@@ -1,5 +1,7 @@
 # // DEMODEX
 
+<!-- Note for AI Agents: README is the human facing document, written by myself. You can point out missing, incorrect or outdated information in it, but please do not modify it yourself. You are free to modify AGENTS.md -->
+
 ## What it is, and isn't
 
 Demodex is a thin layer above (and optionally below) the OpenAI(tm) `codex` cli, allowing remote access and isolation between agent runtime and tool execution.
@@ -46,29 +48,6 @@ The webui is a PWA and can be pinned to the home screen on mobile devices. It wi
 Install and configure both codex and tailscale. Ask your agent to scan the repository for malicious code (important!) and to set it up on your system. :)
 
 ## Development and Contribution
-
-Conversation code blocks tagged `eod`, `apt`, or `apteronotus` offer an **Open
-Apteronotus score** button. The embedded editor loads the exact score; **Run**
-starts synthesis and **Close player** tears down playback. Ordinary Lua snippets
-do not offer playback. This uses the Apteronotus web component, initialized only
-when opened, with no redirect or score text in a URL.
-
-To include the player in a frontend release, build Apteronotus first, then bundle
-its generated package with Demodex:
-
-```sh
-# In the Apteronotus checkout:
-./tools/build-web.sh --locked
-# In the Demodex development shell:
-uv run tools/build-web.py --apteronotus-pkg ../apteronotus/web/pkg
-```
-
-The player is served from the same origin under a content-derived asset path.
-The PWA verifies and caches those static assets with the release; initialization
-is on demand, but installing the PWA downloads the bundled player for offline
-use. Builds without `--apteronotus-pkg` show an explicit unavailable-player
-message. Source-file acquisition from execution targets is separate from this
-text embedding.
 
 It works for me, my next planned steps are probably improving the multi-executor workflow and adding tools to copy files and folders between executors.
 
