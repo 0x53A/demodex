@@ -750,6 +750,20 @@ impl Store {
         Ok(db.last_insert_rowid())
     }
 
+    pub(crate) fn event_batch(&self, id: &str, messages: &[&Value]) -> Result<()> {
+        if messages.is_empty() { return Ok(()); }
+        let encoded = messages.iter().map(serde_json::to_string)
+            .collect::<serde_json::Result<Vec<_>>>()?;
+        let mut db = self.lock()?;
+        let tx = db.transaction()?;
+        {
+            let mut insert = tx.prepare_cached("INSERT INTO events(session_id,message) VALUES(?1,?2)")?;
+            for message in encoded { insert.execute(params![id, message])?; }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn conversation(&self, id: &str) -> Result<demodex_protocol::ConversationSnapshot> {
         // Capture a finite high-water mark; later events are fetched by cursor.
         let end: i64 = self.lock()?.query_row("SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=?1", [id], |r| r.get(0))?;
@@ -927,6 +941,20 @@ mod tests {
         assert_eq!(*restored.chunks[0][0], fresh.items[0]);
         assert_eq!(fresh.items[0]["_demodexAt"], at);
         assert_eq!(store.events(&id, snapshot.cursor - 1)?[0].message["method"], "future/unknown");
+        Ok(())
+    }
+
+    #[test]
+    fn event_batch_rolls_back_all_fragments_on_insert_failure() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        let id = store.create("batch", "ws://localhost:1", &[], None)?.id;
+        store.lock()?.execute_batch("CREATE TRIGGER reject_fragment BEFORE INSERT ON events WHEN json_extract(NEW.message,'$.params.delta')='fail' BEGIN SELECT RAISE(ABORT,'test failure'); END;")?;
+        let first = json!({"method":"item/agentMessage/delta","params":{"delta":"first"}});
+        let fail = json!({"method":"item/agentMessage/delta","params":{"delta":"fail"}});
+        assert!(store.event_batch(&id, &[&first, &fail]).is_err());
+        assert!(store.events(&id, 0)?.is_empty());
+        store.event_batch(&id, &[&first])?;
+        assert_eq!(store.events(&id, 0)?[0].message, first);
         Ok(())
     }
 

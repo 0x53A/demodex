@@ -7,6 +7,14 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, broadcast};
 
+fn content_delta(message: &Value) -> bool {
+    message.get("id").is_none()
+        && matches!(message["method"].as_str(),
+            Some("item/agentMessage/delta" | "item/reasoning/summaryTextDelta" |
+                "item/reasoning/textDelta" | "item/commandExecution/outputDelta" |
+                "item/plan/delta"))
+}
+
 pub struct Live {
     pub rpc: Rpc,
     pub generation: String,
@@ -231,13 +239,14 @@ impl Manager {
             let manager=self.clone(); let id=id.to_string();
             tokio::spawn(async move {
                 let mut failure="app-server disconnected".to_string();
-                while let Some(event)=events.recv().await {
-                    match event {
-                        Ok(message) => {
-                            if let Err(error)=manager.ingest(&id,&live,&message).await { failure=error.to_string(); break; }
-                        }
-                        Err(error)=>{failure=error.to_string();break;}
+                let mut buffered = Vec::with_capacity(128);
+                // Drain only events already queued; never delay an event to fill a batch.
+                while events.recv_many(&mut buffered, 128).await != 0 {
+                    if let Err(error) = manager.ingest_buffered(&id, &live, &buffered).await {
+                        failure = error.to_string();
+                        break;
                     }
+                    buffered.clear();
                 }
                 let mut sessions=manager.live.lock().await;
                 let current=sessions.get(&id).is_some_and(|s|s.generation==live.generation);
@@ -256,6 +265,41 @@ impl Manager {
             self.changed();
         }
         outcome
+    }
+
+    async fn ingest_buffered(self: &Arc<Self>, id: &str, live: &Live, events: &[Result<Value>]) -> Result<()> {
+        let mut deltas = Vec::new();
+        for event in events {
+            if let Ok(message) = event && content_delta(message) {
+                deltas.push(message);
+                continue;
+            }
+            // Preserve ordering across state changes, requests and transport errors.
+            self.ingest_deltas(id, live, &deltas).await?;
+            deltas.clear();
+            match event {
+                Ok(message) => self.ingest(id, live, message).await?,
+                Err(error) => bail!("{error}"),
+            }
+        }
+        self.ingest_deltas(id, live, &deltas).await
+    }
+
+    async fn ingest_deltas(&self, id: &str, live: &Live, messages: &[&Value]) -> Result<()> {
+        if messages.is_empty() { return Ok(()); }
+        // Apply the same generation and thread checks as individual event ingestion.
+        let sessions = self.live.lock().await;
+        if sessions.get(id).is_none_or(|s| s.generation != live.generation) {
+            return Ok(());
+        }
+        let messages: Vec<_> = messages.iter().copied().filter(|message|
+            message["params"]["threadId"].as_str().is_none_or(|t| t == live.thread)
+        ).collect();
+        if !messages.is_empty() {
+            self.store.event_batch(id, &messages)?;
+            self.session_changed(id, false);
+        }
+        Ok(())
     }
 
     async fn ingest(self: &Arc<Self>, id: &str, live: &Live, message: &Value) -> Result<()> {
@@ -396,10 +440,7 @@ impl Manager {
             }
         }
         // Content-only events never require account, controls or registry reads.
-        let content_only = matches!(method,
-            "item/agentMessage/delta" | "item/reasoning/summaryTextDelta" |
-            "item/reasoning/textDelta" | "item/commandExecution/outputDelta" |
-            "item/plan/delta");
+        let content_only = content_delta(message);
         self.session_changed(id, !content_only);
         if runtime_changed { let _ = self.notices.send(demodex_protocol::Notice::Runtime); }
         Ok(())
@@ -804,6 +845,32 @@ mod tests {
             assert_eq!(manager.store.events(&session.id,0)?.last().unwrap().message, event);
             assert!(notices.try_recv().is_err());
         }
+        let delta = |thread: &str, n| json!({"method":"item/agentMessage/delta","params":{"threadId":thread,"itemId":"item","delta":format!("{n}")}});
+        let mut expected: Vec<Value> = (0..100).map(|n| delta("thread", n)).collect();
+        // A server request with a delta-shaped method must still become a decision.
+        expected.push(json!({"id":99,"method":"item/agentMessage/delta","params":{"threadId":"thread"}}));
+        expected.extend((100..200).map(|n| delta("thread", n)));
+        expected.push(json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn"}}}));
+        let mut buffered: Vec<_> = expected.iter().cloned().map(Ok).collect();
+        buffered.insert(10, Ok(delta("other-thread", 999)));
+        buffered.push(Err(anyhow::anyhow!("transport failed")));
+        buffered.push(Ok(delta("thread", 999)));
+        assert_eq!(manager.ingest_buffered(&session.id, &live, &buffered).await.unwrap_err().to_string(), "transport failed");
+        let stored = manager.store.events(&session.id, 0)?;
+        assert_eq!(stored[3..].iter().map(|event| event.message.clone()).collect::<Vec<_>>(), expected);
+        assert!(stored.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+        assert_eq!(manager.store.pending(&session.id)?.len(), 1);
+        assert_eq!(manager.store.get(&session.id)?.status, "idle");
+        for state in [false, true, false, true] {
+            assert_eq!(notices.try_recv()?, Notice::Session { id:session.id.clone(), state });
+            legacy.try_recv()?;
+        }
+        assert_eq!(notices.try_recv()?, Notice::Runtime);
+        assert!(notices.try_recv().is_err());
+        // Buffered deltas from a disconnected/replaced generation cannot be saved.
+        manager.disconnect(&session.id, "test").await?;
+        manager.ingest_buffered(&session.id, &live, &[Ok(delta("thread", 999))]).await?;
+        assert_eq!(manager.store.events(&session.id, 0)?.len(), stored.len());
         fake.abort();
         Ok(())
     }

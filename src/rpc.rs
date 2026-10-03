@@ -93,7 +93,10 @@ impl Rpc {
             .await
             .context("app-server connection timed out")??;
         let (out, mut commands) = mpsc::channel::<Outgoing>(64);
-        let (events, receiver) = mpsc::channel(256);
+        // Absorb streaming bursts while the consumer commits event batches.
+        // Keep this bounded and fail closed on overflow: waiting here would
+        // also stall RPC replies needed by the event consumer.
+        let (events, receiver) = mpsc::channel(10_000);
         let pending: Waiters = Arc::new(Mutex::new(HashMap::new()));
         let waiters = pending.clone();
         let task = tokio::spawn(async move {
@@ -239,6 +242,40 @@ mod tests {
         assert_eq!(rpc.call("still-connected", json!({})).await?, json!({}));
         rpc.close();
         fake.await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streaming_burst_does_not_block_rpc_replies() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("ws://{}", listener.local_addr()?);
+        let fake = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut ws = tokio_tungstenite::accept_async(stream).await?;
+            while let Some(frame) = ws.next().await {
+                let frame = frame?;
+                if frame.is_close() { break; }
+                let request: Value = serde_json::from_str(frame.to_text()?)?;
+                if request["method"] == "initialized" { continue; }
+                if request["method"] == "burst" {
+                    for n in 0..1024 {
+                        ws.send(Message::Text(json!({"method":"item/agentMessage/delta",
+                            "params":{"threadId":"thread","delta":n.to_string()}}).to_string().into())).await?;
+                    }
+                }
+                ws.send(Message::Text(json!({"id":request["id"],"result":{}}).to_string().into())).await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+        let (rpc, mut events) = Rpc::connect(&url).await?;
+        // Deliberately leave events unread until the reply has arrived.
+        assert_eq!(rpc.call("burst", json!({})).await?, json!({}));
+        for n in 0..1024 {
+            assert_eq!(events.try_recv()??["params"]["delta"], n.to_string());
+        }
+        assert!(events.try_recv().is_err());
+        rpc.close();
+        fake.abort();
         Ok(())
     }
 
