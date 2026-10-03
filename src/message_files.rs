@@ -306,9 +306,53 @@ pub async fn read(
     Ok(result)
 }
 
+/// Only recorded uploads may load automatically; never read arbitrary Markdown paths.
+pub async fn read_uploaded_image(manager: &crate::manager::Manager, id: &str, path: &str) -> Result<Value> {
+    use sha2::{Digest, Sha256};
+    let (target, digest) = manager.store.uploaded_image(id, path)?.context("No recorded image upload for this path")?;
+    let _live = manager.runtime(id).await?;
+    let current = manager.store.get(id)?;
+    // Uploads use the next-turn selection, which may not be active yet.
+    let staged = manager.store.staged_targets(id)?.unwrap_or_default();
+    ensure!(current.targets.iter().chain(&staged).any(|t| t.id == target.id && t.url == target.url), "The original image executor is unavailable or replaced");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let _permit = manager.file_slots.acquire().await?;
+        let mut socket = connect(&target).await?;
+        let params = json!({"path":crate::ssh::sftp::path_uri(path)});
+        let metadata = request(&mut socket, 2, "fs/getMetadata", params.clone()).await?;
+        ensure!(metadata["isFile"] == true && metadata["size"].as_u64().is_some_and(|n| n <= LIMIT as u64), "Image must be a regular file of at most 4 MiB");
+        let result = request(&mut socket, 3, "fs/readFile", params).await?;
+        let encoded = result["dataBase64"].as_str().context("Executor returned no image bytes")?;
+        ensure!(encoded.len() <= LIMIT.div_ceil(3)*4, "Image exceeds 4 MiB");
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+        let extension = crate::uploads::extension(&bytes)?;
+        ensure!(Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>() == digest, "Uploaded image has changed");
+        let mime = if extension == "jpg" { "image/jpeg".to_owned() } else { format!("image/{extension}") };
+        Ok::<_,anyhow::Error>(json!({"dataBase64":encoded,"mime":mime}))
+    }).await.context("Image read timed out")?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn uploaded_images_are_durable_session_scoped_and_require_live_executors() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let db = temp.path().join("state.sqlite");
+        let store = crate::store::Store::open(&db)?;
+        let target = Target { id: "original".into(), url: "ws://127.0.0.1:1".into(), cwd: "/remote".into() };
+        let session = store.create("image", "ws://127.0.0.1:2", std::slice::from_ref(&target), None)?;
+        let other = store.create("other", "ws://127.0.0.1:2", &[], None)?;
+        store.record_uploaded_image(&session.id, "/remote/image.png", &target, "digest")?;
+        drop(store);
+        let store = crate::store::Store::open(&db)?;
+        assert_eq!(store.uploaded_image(&session.id, "/remote/image.png")?, Some((target, "digest".into())));
+        assert!(store.uploaded_image(&other.id, "/remote/image.png")?.is_none());
+        let manager = crate::manager::Manager::new(store);
+        assert!(read_uploaded_image(&manager, &session.id, "/etc/passwd").await.unwrap_err().to_string().contains("No recorded"));
+        assert!(read_uploaded_image(&manager, &session.id, "/remote/image.png").await.is_err());
+        Ok(())
+    }
     #[test]
     fn snapshots_bound_files_and_keep_executor_paths() {
         let targets = vec![Target {

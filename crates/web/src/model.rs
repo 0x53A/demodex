@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Connection {
@@ -24,12 +24,15 @@ pub struct Navigation {
 #[serde(default)]
 pub struct Saved {
     pub applied_shares: Vec<String>,
+    // Deserialize the old tab preference once; localStorage now owns persistence.
+    #[serde(skip_serializing)]
     pub enter_sends: bool,
     pub host: String,
     pub selected: String,
     pub page: String,
     pub drafts: BTreeMap<String, String>,
     pub answers: BTreeMap<String, String>,
+    pub dismissed_requests: BTreeSet<(String, String, String)>,
     pub fields: BTreeMap<String, String>,
     pub receipts: BTreeMap<String, String>,
     pub host_fields: BTreeMap<String, BTreeMap<String, String>>,
@@ -140,6 +143,14 @@ impl Saved {
             .cloned()
             .unwrap_or_default()
     }
+    pub fn dismiss_request(&mut self, key: &str) {
+        self.dismissed_requests
+            .insert((self.host.clone(), self.selected.clone(), key.into()));
+    }
+    pub fn request_dismissed(&self, key: &str) -> bool {
+        self.dismissed_requests
+            .contains(&(self.host.clone(), self.selected.clone(), key.into()))
+    }
     pub fn key(&self) -> String {
         format!("{}:{}", self.host, self.selected)
     }
@@ -174,6 +185,25 @@ pub fn sandbox_name(value: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn request_dismissal_is_persisted_and_scoped_to_host_and_session() {
+        let mut saved = Saved {
+            host: "https://one".into(),
+            selected: "session".into(),
+            ..Saved::default()
+        };
+        saved.dismiss_request("request");
+        let mut saved: Saved = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert!(saved.request_dismissed("request"));
+        assert!(!saved.request_dismissed("other"));
+        saved.selected = "other-session".into();
+        assert!(!saved.request_dismissed("request"));
+        saved.selected = "session".into();
+        saved.switch_host("https://two".into());
+        assert!(!saved.request_dismissed("request"));
+        saved.switch_host("https://one".into());
+        assert!(saved.request_dismissed("request"));
+    }
     #[test]
     fn migration_retains_unsent_input() {
         let saved = Saved::legacy(
@@ -241,14 +271,14 @@ pub fn insert_image_path(draft: &str, path: &str, start: u32, end: u32) -> Strin
     let before = &draft[..start];
     let after = &draft[end..];
     format!(
-        "{}{}\"{}\"{}{}",
+        "{}{}![Attached image](<{}>){}{}",
         before,
         if before.is_empty() || before.ends_with(char::is_whitespace) {
             ""
         } else {
             " "
         },
-        path,
+        path.replace('%', "%25").replace('\\', "\\\\").replace('<', "%3C").replace('>', "%3E").replace('\n', "%0A").replace('\r', "%0D"),
         if after.is_empty() || after.starts_with(char::is_whitespace) {
             ""
         } else {
@@ -265,11 +295,11 @@ mod image_tests {
     fn path_insertion_uses_browser_offsets_and_preserves_surrounding_text() {
         assert_eq!(
             insert_image_path("🙂 replace end", "/a b.png", 3, 10),
-            "🙂 \"/a b.png\" end"
+            "🙂 ![Attached image](</a b.png>) end"
         );
         assert_eq!(
             insert_image_path("later edits", "/image.png", u32::MAX, u32::MAX),
-            "later edits \"/image.png\""
+            "later edits ![Attached image](</image.png>)"
         );
     }
 }

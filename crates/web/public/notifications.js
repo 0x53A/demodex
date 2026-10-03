@@ -34,6 +34,24 @@
     if(sub && !await sub.unsubscribe())throw Error('The browser could not unsubscribe. Try again.');
     await binding(null);return old;
   }
+  async function testDisplay(){
+    if(!supported() || Notification.permission!=='granted')throw Error('Enable browser notification permission first.');
+    const reg=await ready();
+    await reg.showNotification('Demodex display test',{
+      body:'This notification was created locally on your device.',
+      tag:`demodex-display-test:${crypto.randomUUID()}`,
+    });
+  }
+  function watchTest(server_id){
+    return new Promise(resolve=>{
+      const finish=result=>{clearTimeout(timer);navigator.serviceWorker.removeEventListener('message',receive);resolve(result);};
+      const receive=event=>{
+        if(event.data?.type==='DEMODEX_PUSH_TEST' && event.data.server_id===server_id)finish(event.data);
+      };
+      const timer=setTimeout(()=>finish({state:'unconfirmed'}),20000);
+      navigator.serviceWorker.addEventListener('message',receive);
+    });
+  }
   // A clicked notification uses only navigation metadata, never credentials.
   function route(){
     const u=new URL(location.href);const server=u.searchParams.get('notify_server');const session=u.searchParams.get('notify_session');
@@ -43,5 +61,5 @@
     u.searchParams.delete('notify_server');u.searchParams.delete('notify_session');history.replaceState(history.state,'',u);
     return {host:parsed.origin,selected:session||'',page:'',connections:false};
   }
-  window.demodexPush={status,enable,disable,route};
+  window.demodexPush={status,enable,disable,testDisplay,watchTest,route};
 })();

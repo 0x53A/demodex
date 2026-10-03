@@ -30,10 +30,14 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         Sessions => return Ok(Response::Sessions(list(app).await?)),
         Detail { id } => return Ok(Response::Detail(detail(app, id).await?)),
         Events { id, after } => return Ok(Response::Events(app.manager.store.events(&id, after)?)),
+        Conversation { id } => {
+            let manager = app.manager.clone();
+            return Ok(Response::Conversation(tokio::task::spawn_blocking(move || manager.store.conversation(&id)).await??));
+        }
         Runtime => runtime_status(app).await?,
         RuntimeModels => {
             let (rpc, _) = app.orchestrator.runtime_rpc().await?;
-            crate::controls::model_catalog(&rpc).await?
+            crate::controls::runtime_model_catalog(&rpc).await?
         }
         PromptSettings => app.orchestrator.prompt_settings_view().await?,
         SavePromptSettings { expected_revision, settings } => {
@@ -103,6 +107,7 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
             let bytes = crate::uploads::decode_file(&name, &data)?;
             json!({"path":app.orchestrator.upload_file(&id, &bytes, &name, false).await?})
         }
+        ReadUploadedImage { id, path } => crate::message_files::read_uploaded_image(&app.manager, &id, &path).await?,
         UploadImage { id, bytes } => {
             json!({"path":app.orchestrator.upload_image(&id, &bytes).await?})
         }

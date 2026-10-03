@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import shutil
 import socket
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -322,7 +323,7 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             expect(page.locator('.weekly-usage summary')).to_have_text('Weekly: unavailable')
             expect(page.locator('.composer .context-usage')).to_have_text('Context unavailable')
             def usage_report(tokens,window=200000,thread='thread'):
-                codex.send('thread/tokenUsage/updated',{'threadId':thread,'turnId':'turn','tokenUsage':{'last':{'totalTokens':tokens},'total':{'totalTokens':900000},'modelContextWindow':window}})
+                codex.send('thread/tokenUsage/updated',{'threadId':thread,'turnId':'turn','tokenUsage':{'last':{'totalTokens':tokens,'inputTokens':max(0,tokens-1679),'cachedInputTokens':max(0,tokens-4000)},'total':{'totalTokens':900000},'modelContextWindow':window}})
             usage_report(50000)
             expect(page.locator('.composer .context-usage')).to_contain_text('Context 75% remaining')
             expect(page.locator('aside .session .context-usage')).to_contain_text('Context 75% remaining')
@@ -335,7 +336,32 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             expect(page.locator('.composer .context-usage')).to_contain_text('Context 75% remaining')
             expect(page.locator('.composer .context-usage meter')).to_have_attribute('value','75')
             assert page.locator('.composer .context-usage meter').evaluate("el=>getComputedStyle(el).transform")=='matrix(-1, 0, 0, 1, 0, 0)'
-            print("CHECK: usage and transcript rendering", flush=True)
+            # Age only the disposable fixture: no waiting or model inference.
+            cold_session=api('/sessions')[0]
+            with sqlite3.connect(directory/'state/state.sqlite') as db:
+                db.execute("UPDATE session_usage SET value=json_set(value,'$.reported_at',?) WHERE session_id=?",(int(time.time())-3600,cold_session['id']))
+                db.execute("UPDATE sessions SET status='idle' WHERE id=?",(cold_session['id'],))
+            codex.send('thread/status/changed',{'status':{'type':'idle'}})
+            expect(page.locator('.cache-info')).to_contain_text('Possibly cold · Last request: 48,321 input tokens.')
+            expect(page.locator('aside .cache-indicator')).to_have_count(1)
+            expect(page.locator('.cache-info')).to_have_attribute('role','note')
+            assert page.locator('.cache-info').evaluate('el=>getComputedStyle(el).borderLeftColor')=='rgb(117, 184, 247)'
+            page.set_viewport_size({'width':390,'height':844})
+            expect(page.locator('.cache-info')).to_be_in_viewport()
+            expect(composer).to_be_in_viewport()
+            page.screenshot(path=str(ROOT/'target/review-cold-session.png'))
+            page.set_viewport_size({'width':1200,'height':850})
+            # A repeated usage report on resume must not pretend to warm the cache.
+            usage_report(50000)
+            expect(page.locator('.cache-info')).to_be_visible()
+            usage_report(50001)
+            expect(page.locator('.cache-info')).to_have_count(0)
+            expect(page.locator('aside .cache-indicator')).to_have_count(0)
+            usage_report(50000)
+            with sqlite3.connect(directory/'state/state.sqlite') as db:
+                db.execute('UPDATE sessions SET status=? WHERE id=?',(cold_session['status'],cold_session['id']))
+            codex.send('thread/status/changed',{'status':{'type':cold_session['status']}})
+            print("CHECK: usage, informational cold-cache estimate and fresh-report recovery", flush=True)
             # Large transcripts never own settings, requests, or composer scrolling.
             for i in range(400):
                 codex.send('item/completed',{'item':{'id':f'long-{i}','type':'agentMessage','text':f'Long transcript message {i}\n'+'Content '*30}})
@@ -386,6 +412,33 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             page.get_by_label('Enter sends',exact=True).check()
             expect(page.locator('#composer-shortcut')).to_contain_text('Enter: send · Shift+Enter: newline')
             expect(composer).to_have_attribute('enterkeyhint','send')
+            # Persistent preference is shared, while each tab keeps its own draft.
+            assert page.evaluate("localStorage.getItem('demodex-enter-sends')")=='true'
+            preference_tab=context.new_page()
+            preference_tab.goto(origin)
+            preference_tab.locator('.connection').filter(has=preference_tab.locator('small',has_text=host)).locator('.connection-open').click()
+            expect(preference_tab.locator('header .indicator')).to_have_text('connected to')
+            preference_tab.locator('.session').filter(has_text='Wormhole fixture').click()
+            peer_toggle=preference_tab.get_by_label('Enter sends',exact=True)
+            peer_composer=preference_tab.get_by_label('Message',exact=True)
+            expect(peer_toggle).to_be_checked()
+            composer.fill('Original tab draft')
+            peer_composer.fill('Other tab draft')
+            sends_before=sum(c['method'] in ('turn/start','turn/steer') for c in codex.calls)
+            peer_toggle.uncheck()
+            expect(page.get_by_label('Enter sends',exact=True)).not_to_be_checked()
+            expect(composer).to_have_attribute('enterkeyhint','enter')
+            expect(composer).to_have_value('Original tab draft')
+            page.get_by_label('Enter sends',exact=True).check()
+            expect(peer_toggle).to_be_checked()
+            expect(peer_composer).to_have_attribute('enterkeyhint','send')
+            expect(peer_composer).to_have_value('Other tab draft')
+            preference_tab.reload()
+            expect(peer_toggle).to_be_checked()
+            expect(peer_composer).to_have_value('Other tab draft')
+            assert sum(c['method'] in ('turn/start','turn/steer') for c in codex.calls)==sends_before
+            preference_tab.close()
+            print('CHECK: Enter sends persists and syncs both ways without syncing drafts or sending',flush=True)
             composer.fill('Steer current work')
             composer.press('Shift+Enter')
             expect(composer).to_have_value('Steer current work\n')
@@ -396,7 +449,10 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             composer.press('Enter')
             expect(composer).to_have_value('')
             assert sum(c['method']=='turn/steer' for c in codex.calls)==1
+            cold_start=time.monotonic()
             page.reload()
+            expect(page.locator('[data-item-id="long-399"]')).to_have_count(1,timeout=10000)
+            print(f"CHECK: cold 440-message transcript restored in {time.monotonic()-cold_start:.2f}s",flush=True)
             expect(page.get_by_label('Enter sends',exact=True)).to_be_checked()
             expect(page.get_by_label('Message', exact=True)).to_have_attribute('enterkeyhint','send')
             page.get_by_label('Enter sends',exact=True).uncheck()
@@ -680,7 +736,7 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             codex.send("item/tool/call",call,880)
             expect(page.locator('.context-project')).to_contain_text("/home/operator/src/cairn")
             expect(page.locator('.context-description')).to_have_text("Building the snapshot store")
-            expect(page.locator('.folder-name')).to_contain_text("/home/operator/src/cairn")
+            expect(page.locator('.tree-folder > .folder-name')).to_contain_text("/home/operator/src/cairn")
             current = api('/sessions')[0]
             identity = current['presentation']['name']
             assert current['targets'][0]['cwd'] == '/home/operator/src'
@@ -722,7 +778,7 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             page.get_by_role('button',name='Close',exact=True).click()
             page.get_by_role('button',name='← Sessions',exact=True).click()
             expect(page.get_by_role('navigation',name='Sessions by project')).to_be_visible()
-            expect(page.locator('.folder-name')).to_contain_text('/home/operator/src/cairn-next')
+            expect(page.locator('.tree-folder > .folder-name')).to_contain_text('/home/operator/src/cairn-next')
             page.screenshot(path='/tmp/demodex-overview-tree.png')
             page.locator('.session').filter(has_text='Wormhole fixture').click()
             expect(page.get_by_label('Composer model',exact=True)).to_be_visible()
@@ -895,19 +951,26 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             # Human-readable streaming activity, tool outcomes and errors.
             codex.send('item/started',{'item':{'id':'ui-reasoning','type':'reasoning','summary':[]}})
             codex.send('item/reasoning/summaryTextDelta',{'itemId':'ui-reasoning','summaryIndex':0,'delta':'Checking the UI controls'})
+            reasoning_group = page.locator('.tool-group').last
+            expect(reasoning_group.locator(':scope > summary')).to_contain_text('Reasoning')
+            if reasoning_group.get_attribute('open') is None:
+                reasoning_group.locator(':scope > summary').click()
             expect(page.locator('[data-item-id="ui-reasoning"]')).to_contain_text('Checking the UI controls')
             codex.send('turn/plan/updated',{'turnId':'turn','plan':[{'step':'Inspect controls','status':'completed'},{'step':'Check activity','status':'inProgress'}]})
             expect(page.locator('.plan-steps')).to_contain_text('In progressCheck activity')
             codex.send('item/started',{'item':{'id':'ui-command','type':'commandExecution','command':'cargo test','cwd':'/workspace','status':'inProgress'}})
+            group=page.locator('.tool-group[data-group-id="ui-command"]')
+            expect(group).not_to_have_attribute('open','')
+            expect(page.locator('[data-item-id="ui-command"]')).to_have_count(0)
+            group.locator(':scope > summary').click()
             command=page.locator('[data-item-id="ui-command"]')
             expect(command).to_contain_text('Running')
             codex.send('item/completed',{'item':{'id':'ui-command','type':'commandExecution','command':'cargo test','status':'completed','exitCode':1,'durationMs':1200,'aggregatedOutput':'Test failure'}})
             expect(command.locator('.item-status.failed')).to_contain_text('exit 1')
             expect(command.locator('details')).not_to_have_attribute('open','')
             group=page.locator('.tool-group[data-group-id="ui-command"]')
-            expect(group).not_to_have_attribute('open','')
+            expect(group).to_have_attribute('open','')
             expect(group.locator(':scope > summary')).to_contain_text('1 failed')
-            group.locator(':scope > summary').click()
             command.locator('summary').click()
             expect(command).to_contain_text('Test failure')
             codex.send('item/started',{'item':{'id':'ui-tool','type':'mcpToolCall','server':'docs','tool':'search','status':'inProgress'}})
@@ -933,6 +996,31 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             expect(page.locator('[data-item-id="ui-tool"]')).to_contain_text('Turn ended · outcome unreported')
             expect(page.locator('.activity')).to_have_count(0)
             page.screenshot(path=str(ROOT/'target'/'review-activity-mobile.png'))
+            # Only requests whose owning Codex connection ended can be hidden.
+            # Dismissal survives reads/reloads in this tab and never answers Codex.
+            codex.send('item/fileChange/requestApproval', {
+                'threadId': 'thread', 'turnId': 'turn', 'itemId': 'lost-approval',
+                'reason': 'Unavailable approval fixture',
+            }, 899)
+            lost = page.get_by_role('region', name='Approve file changes', exact=True)
+            expect(lost).to_contain_text('Waiting for you')
+            expect(lost.get_by_role('button', name='Dismiss', exact=True)).to_have_count(0)
+            answers_before = list(codex.answers)
+            interrupts_before = sum(c.get('method') == 'turn/interrupt' for c in codex.calls)
+            codex.socket.close()
+            expect(lost).to_contain_text('Unavailable')
+            expect(lost.get_by_role('button', name='Approve once', exact=True)).to_be_disabled()
+            lost.get_by_role('button', name='Dismiss', exact=True).click()
+            expect(lost).to_have_count(0)
+            page.evaluate("window.dispatchEvent(new Event('online'))")
+            expect(lost).to_have_count(0)
+            page.reload()
+            expect(page.get_by_label('Message', exact=True)).to_be_visible()
+            expect(lost).to_have_count(0)
+            stored = api(f'/sessions/{session_id}')['pending']
+            assert any(p['state'] == 'unavailable' and p['params'].get('itemId') == 'lost-approval' for p in stored)
+            assert codex.answers == answers_before
+            assert sum(c.get('method') == 'turn/interrupt' for c in codex.calls) == interrupts_before
             assert not rest_requests, rest_requests
             assert not errors, errors
             browser.close()

@@ -16,6 +16,9 @@ Small, deliberate, slightly odd. A session console, not a decorative dashboard.
   permissions visible and the complete protocol request in expandable details.
   Approve once, Decline and Cancel turn are separate touch-sized actions; show
   pending, sending, delivered and unavailable states in plain language.
+  Unavailable requests offer an explicit Dismiss action that hides the card in
+  this browser tab, including across reloads, without answering or cancelling.
+  Scope dismissal to the server, session and request; retain the server record.
 - Tool output is collapsed by default; preserve plain text verbatim. Never
   render remote output or model text as raw HTML.
 - Composer and primary controls remain reachable on narrow displays.
@@ -48,9 +51,11 @@ Small, deliberate, slightly odd. A session console, not a decorative dashboard.
 
 ## Session overview and context
 
-- Each server shows one sparse folder tree, grouped by project path, never by
+- Each server shows one sparse folder tree, grouped by stable execution target, then project path, never by
   executor generation. Each session appears once: at its reported project, or
-  its primary executor directory. Executor names appear on session entries.
+  its host directory when host is attached, otherwise its first executor directory.
+  The environment in a valid context report selects the active display target.
+  Executor names appear on session entries.
   Only paths with sessions and their ancestors appear; no filesystem scan is
   needed. Compress ancestry with no sessions to keep deep paths readable on mobile.
 - Each attachment has a persisted generated adjective/subject name and icon.
@@ -123,8 +128,8 @@ accepted by app-server. Terminal-local commands (theme, editor, keybindings,
 screen clearing) need browser-specific designs.
 
 - By default, Enter inserts a newline and Shift+Enter sends. The “Enter sends”
-  checkbox below the composer reverses these keys; its preference survives reload
-  in the current tab and follows host switches. The action row wraps on narrow
+  checkbox below the composer reverses these keys; its preference persists in localStorage, follows host switches, and syncs across
+  open tabs on the same frontend origin. Existing tab preferences migrate once. The action row wraps on narrow
   screens. Composition
   events and repeated keydown events never send. The shortcut and Send button share
   eligibility checks and preserve drafts when delivery fails.
@@ -396,7 +401,10 @@ with icon, index and title, an exact-destination hover tooltip, plus a destinati
 An operator-opened HTTP(S) popup exposes the full parsed URL with its hostname
 bold before navigation. Reject malformed/control characters and embedded
 credentials; explain normalization and Punycode. Unsupported schemes remain
-inert. Images remain omitted; MathML and Mermaid supply no active destinations.
+inert. Uploaded images render compact thumbnails in messages and above the composer, with
+tap-to-expand modals. Web images render inline buttons with a yellow warning triangle;
+the modal shows the full URL and requires a separate Load image action before setting
+the image source. Closing discards consent. MathML and Mermaid supply no active destinations.
 Raw view/copy preserves exact source. Rendering never fetches web previews.
 
 Completed assistant messages trigger bounded metadata checks against the executors
@@ -432,7 +440,11 @@ notifications from completion, questions, errors, or subagent events. Duplicate 
 calls return the original receipt without repeating the chat event or push attempt.
 
 Server settings offers Enable push on this device, Disable push, Send test notification,
-and Hide message previews. Permission and subscription require an explicit gesture.
+Test notification display, and Hide message previews. Permission and subscription require an explicit gesture.
+Push tests show progress immediately and wait up to 20 seconds for ephemeral worker
+feedback, distinguishing provider acceptance, browser receipt, and display errors.
+The local display test bypasses push delivery to help check browser/device settings;
+successful display requests never claim that an OS banner appeared.
 The first version binds one daemon to each PWA installation, clearly labelled; users
 can disable that subscription before enabling another server. Switching ordinary
 connections does not change the notification binding. Distinct server origins can
@@ -496,7 +508,8 @@ and web/file/SVG previews. Conversation content and pending decisions retain the
 purpose-specific structure; shared controls, focus and popup rules still apply.
 
 Folder groups with sessions place a thin shared dashed + Session button directly
-below the path, before session cards. It opens the New Session form.
+below the path, before session cards. It opens the New Session form with that target and project directory selected.
+Private SSH targets stage a new private attachment using the same SSH settings.
 The usage popup shows every reported quota window with relative and absolute reset
 times, plus reported credit balances or an explicit unavailable state.
 
@@ -528,3 +541,19 @@ draft, preserving existing edits and leaving Send explicit. Keep files unchanged
 including HEIC, and show a large-upload warning above 4 MiB. Interrupted uploads
 show unconfirmed receipts and never restart automatically. Discard clears the
 local incoming payload; confirmed executor uploads follow existing retention.
+
+Cold transcript loads use a daemon-projected conversation snapshot and resume live
+event paging at its cursor. Raw events remain available on demand in Diagnostics.
+Collapsed activity groups mount their contents on first expansion.
+
+New Session shows inherited model, reasoning effort and service tier as
+Default (resolved value), using the runtime profile before catalogue defaults.
+Loading or unavailable defaults stay explicit; inheritance never pins a model choice.
+
+A blue snowflake in the session overview and a blue informational banner in the
+selected session indicate Possibly cold after 30 minutes without a token-usage
+report, for inactive sessions with at least 1,024 reported input tokens. Display
+the exact last-request input count, not cumulative or predicted next-turn usage.
+This is explicitly an age estimate: Codex supplies no live cache-expiry flag.
+Unknown usage stays unknown; active work has no cold indicator. Opening a session
+or restarting the daemon never refreshes the usage timestamp.

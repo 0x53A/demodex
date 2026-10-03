@@ -42,6 +42,23 @@ impl App {
             self.saved.field("new_effort")
         };
         let selected_tier = self.saved.field("new_tier");
+        let defaults = &self.new_models["defaults"];
+        let default_record = models.iter().find(|m|m["model"] == defaults["model"]);
+        let inherited_label = |value: Option<&str>| match value.filter(|v|!v.is_empty()) {
+            Some(value) => format!("Default ({value})"),
+            None if self.new_models.is_null() && self.new_model_error.is_empty() => "Default (loading…)".into(),
+            None => "Default (unavailable)".into(),
+        };
+        let default_model_label = inherited_label(default_record.and_then(|m|m["displayName"].as_str()).filter(|name|!name.is_empty()).or_else(||defaults["model"].as_str()));
+        let default_effort_label = inherited_label(defaults["effort"].as_str());
+        let tier_id = if selected_model.is_empty() { defaults["serviceTier"].as_str() } else {
+            self.new_models["configured_service_tier"].as_str().or_else(||selected_record.and_then(|m|m["defaultServiceTier"].as_str()))
+        };
+        let tier_record = if selected_model.is_empty() { default_record } else { selected_record };
+        let tier_name = tier_record.and_then(|m|m["serviceTiers"].as_array()).and_then(|tiers|tiers.iter().find(|t|t["id"].as_str() == tier_id)).and_then(|t|t["name"].as_str());
+        let default_tier_label = inherited_label(if !defaults.is_object() { None } else {
+            Some(if matches!(tier_id, None | Some("default")) { "Standard" } else { tier_name.or(tier_id).unwrap_or("Standard") })
+        });
         let payload = sandbox_choice(&sandbox).map(|sandbox| demodex_protocol::SelectedSession {
             include_project: match self.saved.field("new_project_instructions").as_str() { "true"=>Some(true),"false"=>Some(false),_=>None },
             name: self.saved.field("new_session_name"),
@@ -95,7 +112,7 @@ impl App {
                             {if enabled && target["kind"]=="host" {self.new_target_directory(ctx,&chosen,chosen.iter().position(|value|text(value,"id")==id).unwrap())}else{Html::default()}}
                         </div>}
                     })}
-                    {if let Some(ssh)=&self.staged_ssh{html!{<div class="staged-ssh"><span>{format!("SSH · {} · {}",ssh.name,ssh.destination)}</span><crate::ui::IconButton label="Remove SSH executor" title="Remove executor" onclick={ctx.link().callback(|_|Msg::RemoveStagedSsh)}>{"×"}</crate::ui::IconButton></div>}}else{Html::default()}}
+                    {if let Some(ssh)=&self.staged_ssh{html!{<div class="staged-ssh"><span>{format!("SSH · {} · {}",ssh.name,ssh.destination)}</span><code>{&ssh.cwd}</code><crate::ui::IconButton label="Remove SSH executor" title="Remove executor" onclick={ctx.link().callback(|_|Msg::RemoveStagedSsh)}>{"×"}</crate::ui::IconButton></div>}}else{Html::default()}}
                     {for chosen.iter().enumerate().filter(|(_,target)|!self.targets.iter().any(|known|known["id"]==target["id"] && known["kind"]=="host")).map(|(index,_)|self.new_target_directory(ctx,&chosen,index))}
                     <div class="target-add-actions">
                         <crate::ui::AddButton onclick={ctx.link().callback(|_|Msg::NewTargetSetup("vm".into()))}>{"+ New VM"}</crate::ui::AddButton>
@@ -104,17 +121,18 @@ impl App {
                     </div>
                     </crate::ui::Group><crate::ui::Group title="Model settings">
                     <label>{"Model"}<select aria-label="Model" value={selected_model.clone()} onchange={ctx.link().callback(|e:Event|Msg::NewModel(e.target_unchecked_into::<HtmlSelectElement>().value()))}>
-                        <option value="" selected={selected_model.is_empty()}>{"Use runtime defaults"}</option>
+                        <option value="" selected={selected_model.is_empty()}>{default_model_label}</option>
                         {for models.iter().map(|model|html!{<option value={text(model,"model").to_owned()} selected={text(model,"model")==selected_model}>{text(model,"displayName")}</option>})}
                     </select></label>
                     <label>{"Reasoning effort"}<select aria-label="Reasoning effort" disabled={selected_model.is_empty()} value={selected_effort.clone()} onchange={ctx.link().callback(|e:Event|Msg::Field("new_effort".into(),e.target_unchecked_into::<HtmlSelectElement>().value()))}>
-                        {if selected_model.is_empty(){html!{<option value="">{"Use runtime defaults"}</option>}}else{Html::default()}}
-                        {for selected_record.into_iter().flat_map(|model|array(&model["supportedReasoningEfforts"])).map(|effort|{let value=text(&effort,"reasoningEffort");html!{<option value={value.to_owned()} selected={value==selected_effort}>{effort["description"].as_str().unwrap_or(value)}</option>}})}
+                        {if selected_model.is_empty(){html!{<option value="">{default_effort_label}</option>}}else{Html::default()}}
+                        {for selected_record.into_iter().flat_map(|model|array(&model["supportedReasoningEfforts"])).map(|effort|{let value=text(&effort,"reasoningEffort");html!{<option value={value.to_owned()} selected={value==selected_effort}>{value}</option>}})}
                     </select></label>
                     <label>{"Service tier"}<select aria-label="Service tier" disabled={selected_model.is_empty()} value={selected_tier.clone()} onchange={ctx.link().callback(|e:Event|Msg::Field("new_tier".into(),e.target_unchecked_into::<HtmlSelectElement>().value()))}>
-                        <option value="" selected={selected_tier.is_empty()}>{if selected_model.is_empty(){"Use runtime defaults"}else{"Default"}}</option>
+                        <option value="" selected={selected_tier.is_empty()}>{default_tier_label}</option>
                         {for selected_record.into_iter().flat_map(|model|array(&model["serviceTiers"])).filter(|tier|text(tier,"id")!="default").map(|tier|html!{<option value={text(&tier,"id").to_owned()} selected={text(&tier,"id")==selected_tier}>{if text(&tier,"name").is_empty(){text(&tier,"id")}else{text(&tier,"name")}}</option>})}
                     </select></label>
+                    {if let Some(error)=self.new_models["defaults_error"].as_str(){html!{<p class="error" role="alert">{error}</p>}}else{Html::default()}}
                     {if !self.new_model_error.is_empty(){html!{<p class="error" role="alert">{&self.new_model_error}<button type="button" onclick={ctx.link().callback(|_|Msg::LoadNewModels)}>{"Retry models"}</button></p>}}else if models.is_empty(){html!{<p role="status">{"Loading models…"}</p>}}else{Html::default()}}
                     </crate::ui::Group><crate::ui::Group title="Permissions">
                     {self.sandbox(ctx,"new_sandbox","Sandbox")}

@@ -14,6 +14,7 @@ mod overview;
 mod reorder;
 mod rich_messages;
 mod links;
+mod images;
 mod svg;
 mod runtime_features;
 mod prompt_settings;

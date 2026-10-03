@@ -43,7 +43,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-host-') as temporary:
 
     def launch():
         child = subprocess.Popen([os.environ.get('DEMODEX_BIN', str(ROOT / 'target/rust-pwa/debug/demodex')), '--data-dir', str(data),
-            '--bind', f'127.0.0.1:{port}', '--host-workspace', str(workspace), *profile_args], stdout=log, stderr=log)
+            '--bind', f'127.0.0.1:{port}', '--web-dir', os.environ.get('DEMODEX_WEB_DIST', str(ROOT/'web/.rust-dist')), '--host-workspace', str(workspace), *profile_args], stdout=log, stderr=log)
         for _ in range(200):
             assert child.poll() is None, 'manager exited'
             try:
@@ -230,14 +230,23 @@ with tempfile.TemporaryDirectory(prefix='demodex-host-') as temporary:
             with page.expect_file_chooser() as chooser:
                 page.get_by_role('button', name='Attach image', exact=True).click()
             chooser.value.set_files({'name': '../../screenshot.png', 'mimeType': 'image/png', 'buffer': png})
-            expect(prompt).to_have_value(re.compile(r'🙂 \"/.*/uploads/[^/]+\.png\" end'), timeout=20000)
-            image_path = Path(prompt.input_value().split('"')[1])
+            expect(prompt).to_have_value(re.compile(r'🙂 !\[Attached image\]\(</.*/uploads/[^/]+\.png>\) end'), timeout=20000)
+            image_path = Path(prompt.input_value().split('](<')[1].split('>)')[0])
             assert image_path.read_bytes() == png
             assert image_path.parent == data / 'uploads'
             assert image_path.stat().st_mode & 0o777 == 0o600
+            page.set_viewport_size({'width':390,'height':844})
+            expect(page.locator('.composer-images img')).to_have_count(1, timeout=20000)
+            assert page.locator('.composer-images img').evaluate('(e)=>e.complete && e.naturalWidth > 0')
+            page.locator('.composer-images button').click()
+            expect(page.get_by_role('dialog').locator('img')).to_have_count(1)
+            page.get_by_role('dialog').get_by_role('button',name='Close',exact=True).click()
+            assert page.locator('.composer-images').bounding_box()['height'] <= 64
+            page.set_viewport_size({'width':1280,'height':720})
             draft = prompt.input_value()
             page.reload()
             expect(prompt).to_have_value(draft, timeout=20000)
+            expect(page.locator('.composer-images img')).to_have_count(1, timeout=20000)
             # Clipboard uploads append at the current selection and remain unsent.
             prompt.evaluate('(el) => el.setSelectionRange(el.value.length, el.value.length)')
             prompt.evaluate("""(el, data) => {
@@ -246,7 +255,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-host-') as temporary:
                 el.dispatchEvent(new ClipboardEvent('paste', {clipboardData, bubbles:true, cancelable:true}));
             }""", list(png))
             expect(page.get_by_role('button', name='Attach image', exact=True)).to_be_enabled(timeout=20000)
-            expect(prompt).to_have_value(re.compile(r' end \"/.*/uploads/[^/]+\.png\"$'), timeout=20000)
+            expect(prompt).to_have_value(re.compile(r' end !\[Attached image\]\(</.*/uploads/[^/]+\.png>\)$'), timeout=20000)
             assert len(list((data/'uploads').iterdir())) == 2
             page.get_by_label('Upload image', exact=True).set_input_files({'name':'bad.png','mimeType':'image/png','buffer':b'not an image'})
             expect(page.get_by_role('alert')).to_contain_text('Choose a PNG', timeout=20000)

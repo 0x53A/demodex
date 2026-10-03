@@ -48,6 +48,34 @@ Exact transport dependency versions constrain consumers with separate lockfiles.
 
 ## Library and native clients
 
+Protocol v36 adds last-request input_tokens and cached_input_tokens to
+Session.context_usage. Existing usage snapshots recover those fields from saved
+events while preserving report time. The blue Possibly cold indicator is a
+30-minute age heuristic, not confirmed provider cache expiry or a billing quote;
+it shows last-request input tokens, never cumulative usage. Active work is exempt.
+Deploy matching daemon and clients; receipt encoding remains v16.
+
+Protocol v36 adds authenticated ReadUploadedImage for recorded image uploads.
+Uploads insert Markdown images; composer and transcript thumbnails expand in a modal.
+Reads require the original executor in the active or staged selection, regular
+files, the 4 MiB limit and matching upload digest. URL images are inert buttons with a warning; the popup displays the
+full parsed URL and requires a separate Load image action. Deploy matching clients
+and daemon; receipt encoding remains v16.
+
+Protocol v35 adds resolved runtime model, reasoning effort and service tier to
+RuntimeModels, including the configured tier and explicit default-discovery errors.
+New Session labels inheritance as Default (resolved value); choosing it still
+leaves model settings unset. Deploy matching daemon and clients.
+
+Protocol v34 adds read-only Conversation snapshots projected from durable events,
+with a high-water cursor for subsequent Events reads. The projection is shared
+by daemon and frontend; full raw events remain available through Events and UI
+Diagnostics. Targets also reports known_hosts_file for copying private SSH
+configuration into a reviewable new-session form. Session ordering and placement
+use stable target then project, with reported environment first, host fallback,
+then the first attached target. Deploy matching daemon and clients; receipt
+encoding remains v16.
+
 Protocol v33 also adds a paginated RuntimeModels read and an optional validated
 model, reasoning effort and service tier to managed-session creation. The choice
 is persisted before `thread/start` so prompt-layer composition uses the selected
@@ -403,7 +431,9 @@ scoped to the frontend origin. Fresh same-origin windows try identity or a saved
 token; standalone builds start with the connection picker. Successful login
 updates the saved entry. Forget removes its saved token and disconnects the
 current local client; other open tabs may retain authenticated connections.
-Active-tab state and drafts remain tab-scoped and host-specific.
+Active-tab state and drafts remain tab-scoped and host-specific. The Enter sends
+preference persists in localStorage per frontend origin and syncs across tabs via
+storage events; old tab preferences migrate when no shared preference exists.
 
 Browser history stores navigation only, never credentials or drafts. Back/forward
 restores screens; history for another host returns to the connection picker.
@@ -415,8 +445,8 @@ Message rendering uses pulldown-cmark and math-core in WASM, with an allowlisted
 MathML tree. Never insert model-supplied HTML. Links render as numbered buttons with explicit destination lists. Only an
 operator-opened web popup may install a parsed HTTP(S) destination as a link;
 show the exact serialized URL with its hostname bold, reject invalid/control
-characters and credentials, and explain normalization/Punycode warnings. No web
-preview fetches occur. Images remain omitted. File metadata is the explicit
+characters and credentials, and explain normalization/Punycode warnings. Web images load only after a separate explicit confirmation in their URL popup.
+Recorded uploads may load automatically through authenticated, bounded reads. File metadata is the explicit
 exception to automatic content-derived I/O: bounded daemon checks run once on
 completed assistant messages through their captured executors. File contents
 require a Show/Download action. Never install arbitrary content URLs in src/style
@@ -439,7 +469,7 @@ filenames/MIME labels are untrusted and signature checks are not image decoding.
 Store host files privately in the data directory; VM uploads use its existing
 SSH identity and a private directory under `/workspace`. Never fall back to host
 storage for an unavailable VM or external session. Receipts retain digest/path,
-not image bytes. Insert the quoted path into the original session's draft without
+not image bytes. Insert a Markdown image with the path into the original session's draft without
 submitting it or overwriting intervening edits; handle UTF-16 cursor offsets.
 Removing a draft path does not delete the upload; retention cleanup is not implemented.
 

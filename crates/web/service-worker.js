@@ -88,11 +88,22 @@ self.addEventListener('push',event=>event.waitUntil((async()=>{
   const url=new URL(self.registration.scope);
   url.searchParams.set('notify_server',binding.server_url);
   url.searchParams.set('notify_session',typeof data.session_id==='string'?data.session_id:'');
-  await self.registration.showNotification(data.title.slice(0,240),{
-    body:data.message.slice(0,1500),tag:`demodex:${data.server_id}:${data.id}`,renotify:false,
-    icon:new URL('./icon-192.png',self.registration.scope).href,
-    data:{url:url.href},
-  });
+  let result;
+  try {
+    await self.registration.showNotification(data.title.slice(0,240),{
+      body:data.message.slice(0,1500),tag:`demodex:${data.server_id}:${data.id}`,renotify:false,
+      icon:new URL('./icon-192.png',self.registration.scope).href,
+      data:{url:url.href},
+    });
+    result={state:'display-requested'};
+  } catch(error) {
+    if(data.session_id!=='')throw error;
+    result={state:'failed',error:error?.message||'The browser could not display the notification.'};
+  }
+  // Test feedback is ephemeral and contains no notification content or credentials.
+  if(data.session_id==='') {
+    for(const client of await self.clients.matchAll({type:'window'}))client.postMessage({type:'DEMODEX_PUSH_TEST',server_id:data.server_id,...result});
+  }
 })()));
 self.addEventListener('notificationclick',event=>{
   event.notification.close();

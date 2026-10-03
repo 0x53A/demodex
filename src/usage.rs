@@ -1,6 +1,7 @@
 //! Read-only account quota and last-reported thread context snapshots.
 use crate::rpc::Rpc;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     sync::{Arc, Weak},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -126,7 +127,10 @@ impl RateLimitsCache {
 pub fn context(usage: &Value) -> Value {
     let used = usage["last"]["totalTokens"].as_i64().filter(|n| *n >= 0);
     let window = usage["modelContextWindow"].as_i64().filter(|n| *n > 0);
-    json!({"used_tokens":used,"window_tokens":window,"reported_at":now()})
+    let input = usage["last"]["inputTokens"].as_i64().filter(|n| *n >= 0);
+    let cached = usage["last"]["cachedInputTokens"].as_i64().filter(|n| *n >= 0 && input.is_some_and(|input| *n <= input));
+    let fingerprint = Sha256::digest(usage.to_string().as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>();
+    json!({"used_tokens":used,"window_tokens":window,"input_tokens":input,"cached_input_tokens":cached,"reported_at":now(),"report_fingerprint":fingerprint})
 }
 
 #[cfg(test)]
@@ -261,6 +265,47 @@ mod tests {
             0
         );
     }
+    #[test]
+    fn upgrading_usage_recovers_input_counts_without_resetting_report_time() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage.db");
+        let id;
+        {
+            let store = crate::store::Store::open(&path)?;
+            id = store.create("legacy", "ws://localhost:1", &[], None)?.id;
+            store.event(&id, &json!({"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"last":{"inputTokens":43210,"cachedInputTokens":42000,"totalTokens":45000}}}}))?;
+            // A later resume can repeat the event after the original report.
+            store.lock()?.execute("UPDATE events SET at='2020-01-02 00:00:00' WHERE session_id=?1", [&id])?;
+            store.lock()?.execute("INSERT INTO session_usage VALUES(?1,?2)", rusqlite::params![id,json!({"used_tokens":45000,"reported_at":1577836800}).to_string()])?;
+        }
+        let store = crate::store::Store::open(&path)?;
+        let usage = store.get(&id)?.context_usage;
+        assert_eq!(usage["input_tokens"], 43210);
+        assert_eq!(usage["cached_input_tokens"], 42000);
+        assert_eq!(usage["reported_at"], 1577836800_i64);
+        Ok(())
+    }
+
+    #[test]
+    fn last_input_counts_and_duplicate_reports_keep_their_original_age() -> anyhow::Result<()> {
+        let store = crate::store::Store::open(std::path::Path::new(":memory:"))?;
+        let id = store.create("usage", "ws://localhost:1", &[], None)?.id;
+        let usage = json!({"last":{"inputTokens":123456,"cachedInputTokens":120000,"totalTokens":130000},"total":{"inputTokens":900000}});
+        let mut projected = context(&usage);
+        projected["reported_at"] = json!(1000);
+        store.lock()?.execute("INSERT INTO session_usage VALUES(?1,?2)", rusqlite::params![id,projected.to_string()])?;
+        store.context_usage(&id, &usage)?;
+        let saved = store.get(&id)?.context_usage;
+        assert_eq!(saved["input_tokens"], 123456);
+        assert_eq!(saved["cached_input_tokens"], 120000);
+        assert_eq!(saved["reported_at"], 1000);
+        let mut next = usage; next["total"]["inputTokens"] = json!(1000000);
+        store.context_usage(&id, &next)?;
+        assert!(store.get(&id)?.context_usage["reported_at"].as_i64().unwrap() > 1000);
+        assert!(context(&json!({}))["input_tokens"].is_null());
+        Ok(())
+    }
+
     #[test]
     fn context_uses_last_not_cumulative_tokens_and_can_decrease_after_compaction() {
         let first = context(

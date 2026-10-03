@@ -45,6 +45,16 @@ fn storage_set(key: &str, value: &str) -> bool {
         .flatten()
         .is_some_and(|s| s.set_item(key, value).is_ok())
 }
+const ENTER_SENDS_KEY: &str = "demodex-enter-sends";
+const ENTER_SENDS_STORAGE_ERROR: &str = "Enter sends could not be saved or synced. Browser local storage is unavailable.";
+fn read_enter_sends() -> Result<Option<bool>, ()> {
+    let storage = window().local_storage().map_err(|_| ())?.ok_or(())?;
+    storage.get_item(ENTER_SENDS_KEY).map(|value|value.map(|v|v == "true")).map_err(|_| ())
+}
+fn write_enter_sends(enabled: bool) -> bool {
+    window().local_storage().ok().flatten().is_some_and(|storage|
+        storage.set_item(ENTER_SENDS_KEY, if enabled { "true" } else { "false" }).is_ok())
+}
 fn input(event: InputEvent) -> String {
     let target = event.target().unwrap();
     if let Some(input) = target.dyn_ref::<HtmlInputElement>() {
@@ -72,6 +82,7 @@ pub struct App {
     connecting: bool,
     retry: Option<Timeout>,
     _listeners: Vec<EventListener>,
+    _cache_clock: gloo::timers::callback::Interval,
     sessions: Vec<Value>,
     runtime: Value,
     environments: Vec<Value>,
@@ -102,11 +113,14 @@ pub struct App {
     queued: Vec<Value>,
     queue_error: String,
     events: Vec<Value>,
+    event_count: usize,
+    history_loaded: bool,
     transcript: crate::transcript::Transcript,
     reads: Reads,
     busy: bool,
     error: String,
     storage_error: String,
+    enter_sends_error: String,
     receipt: String,
     saved_threads: Vec<Value>,
     saved_search_serial: u64,
@@ -147,6 +161,7 @@ pub enum Msg {
     Controls(bool),
     ReorderMode,
     NewSession(bool),
+    NewProjectSession((String, String)),
     SavedSearch(bool),
     NewTargetSetup(String),
     StageSsh,
@@ -154,6 +169,7 @@ pub enum Msg {
     ServerSettings(bool),
     Background(bool),
     Diagnostics(bool),
+    DiagnosticsLoaded(u64, String, Result<Vec<Value>, String>),
     LoadModels,
     ModelsLoaded(u64, u64, String, Result<Value, String>),
     LoadNewModels,
@@ -161,6 +177,8 @@ pub enum Msg {
     NewModel(String),
     ControlField(String, String),
     EnterSends(bool),
+    SyncEnterSends,
+    CacheClock,
     Field(String, String),
     TargetDraft(Value),
     Draft(String),
@@ -177,6 +195,7 @@ pub enum Msg {
     SavedThreads(u64, u64, Result<Value, String>, bool),
     ChooseThread(Value),
     Answer(Value, Option<String>),
+    DismissRequest(String),
     Dismiss,
     Scroll,
     Latest,
@@ -191,13 +210,14 @@ impl App {
         for resource in RESOURCES {
             let selected = self.saved.selected.clone();
             let Some(ticket) = self.reads.start(resource, &selected) else { continue; };
-            let after = self.events.last().and_then(|v|v["seq"].as_i64()).unwrap_or(0);
+            let after = self.transcript.cursor();
             let operation = match resource {
                 Resource::Sessions => Operation::Sessions,
                 Resource::Runtime => Operation::Runtime,
                 Resource::Environments => Operation::Environments,
                 Resource::Targets => Operation::Targets,
                 Resource::Detail => Operation::Detail { id: selected.clone() },
+                Resource::Events if !self.history_loaded => Operation::Conversation { id: selected.clone() },
                 Resource::Events => Operation::Events { id: selected.clone(), after },
             };
             let generation = self.generation;
@@ -393,6 +413,15 @@ impl Component for App {
                     default_host(),
                 )
             });
+        let mut enter_sends_error = String::new();
+        match read_enter_sends() {
+            Ok(Some(enabled)) => saved.enter_sends = enabled,
+            Ok(None) => {
+                // Preserve an existing tab's preference when upgrading.
+                if !write_enter_sends(saved.enter_sends) { enter_sends_error = ENTER_SENDS_STORAGE_ERROR.into(); }
+            }
+            Err(()) => enter_sends_error = ENTER_SENDS_STORAGE_ERROR.into(),
+        }
         if saved.host.is_empty() {
             saved.host = default_host();
         }
@@ -440,7 +469,17 @@ impl Component for App {
         let pwa = ctx.link().clone();
         let navigation = ctx.link().clone();
         let resize = ctx.link().clone();
+        let preferences = ctx.link().clone();
         let listeners = vec![
+            EventListener::new(&window(), "storage", move |event| {
+                if let Some(event) = event.dyn_ref::<web_sys::StorageEvent>()
+                    && event.key().as_deref().is_none_or(|key|key == ENTER_SENDS_KEY)
+                    && event.storage_area() == window().local_storage().ok().flatten()
+                {
+                    // Read the current value rather than an older queued event.
+                    preferences.send_message(Msg::SyncEnterSends);
+                }
+            }),
             EventListener::new(&window(), "resize", move |_| resize.send_message(Msg::Resize)),
             EventListener::new(&window(), "popstate", move |event| {
                 if let Some(route) = event
@@ -458,7 +497,9 @@ impl Component for App {
                 pwa.send_message(Msg::Pwa)
             }),
         ];
+        let cache_clock = ctx.link().clone();
         let mut app = Self {
+            _cache_clock: gloo::timers::callback::Interval::new(60_000, move || cache_clock.send_message(Msg::CacheClock)),
             share: share::State::default(),
             host_input: saved.host.clone(),
             saved,
@@ -506,11 +547,14 @@ impl Component for App {
             queued: vec![],
             queue_error: String::new(),
             events: vec![],
+            event_count: 0,
+            history_loaded: false,
             transcript: crate::transcript::Transcript::default(),
             reads: Reads::default(),
             busy: false,
             error: String::new(),
             storage_error: String::new(),
+            enter_sends_error,
             receipt: String::new(),
             saved_threads: vec![],
             saved_search_serial: 0,
@@ -594,6 +638,8 @@ impl Component for App {
                     self.saved.page.clear();
                     self.current = Value::Null;
                     self.events.clear();
+                    self.event_count = 0;
+                    self.history_loaded = false;
                     self.reads.reset(true);
                     self.transcript = crate::transcript::Transcript::default();
                     self.pending.clear();
@@ -611,6 +657,37 @@ impl Component for App {
                 self.new_target_setup.clear();
             }
             Msg::RemoveStagedSsh => self.staged_ssh = None,
+            Msg::NewProjectSession((target, path)) => {
+                if target.is_empty() {
+                    self.staged_ssh = None;
+                    self.saved.fields.insert("new_targets".into(), "[]".into());
+                    self.saved.fields.insert("resume_session".into(), "false".into());
+                    ctx.link().send_message(Msg::NewSession(true));
+                    return true;
+                }
+                let Some(known) = self.targets.iter().find(|known|text(known,"id") == target) else {
+                    self.error = "This executor is no longer registered. Choose a target from New Session.".into();
+                    return true;
+                };
+                self.staged_ssh = None;
+                self.saved.fields.insert("resume_session".into(), "false".into());
+                if known["kind"] == "ssh" && !known["owner"].is_null() {
+                    self.staged_ssh = Some(demodex_protocol::SshTarget {
+                        name:text(known,"name").into(), destination:text(known,"destination").into(), cwd:path,
+                        port:known["port"].as_u64().map(|p|p as u16),
+                        identity_file:known["identity_file"].as_str().map(String::from),
+                        known_hosts_file:known["known_hosts_file"].as_str().map(String::from),
+                    });
+                    self.saved.fields.insert("new_targets".into(), "[]".into());
+                } else {
+                    self.saved.fields.insert("new_targets".into(), json!([{"id":target,"cwd":path}]).to_string());
+                }
+                // This picker remains explicit and reviewable before Create.
+                if matches!(text(known,"kind"), "ssh"|"container") {
+                    self.saved.fields.insert("new_sandbox".into(), "danger-full-access".into());
+                }
+                ctx.link().send_message(Msg::NewSession(true));
+            }
             Msg::NewSession(open) => {
                 if !open { self.share.creating = false; }
                 self.show_saved_search = false;
@@ -735,6 +812,8 @@ impl Component for App {
                     self.saved.selected.clear();
                     self.saved.page.clear();
                     self.events.clear();
+                    self.event_count = 0;
+                    self.history_loaded = false;
                     self.reads.reset(true);
                     self.transcript = crate::transcript::Transcript::default();
                     self.current = Value::Null;
@@ -926,14 +1005,21 @@ impl Component for App {
                             self.queue_error = text(&value, "queue_error").into();
                         }
                         Resource::Events => {
-                            let cursor = self.events.last().and_then(|v|v["seq"].as_i64()).unwrap_or(0);
+                            let cursor = self.transcript.cursor();
                             if after != cursor {
                                 self.reads.invalidate(Resource::Events);
+                            } else if !self.history_loaded {
+                                if let (Some(items), Some(cursor), Some(count)) = (value["items"].as_array(), value["cursor"].as_i64(), value["event_count"].as_u64()) {
+                                    self.transcript = crate::transcript::Transcript::restore(items, cursor);
+                                    self.event_count = count as usize;
+                                    self.history_loaded = true;
+                                    self.reads.invalidate(Resource::Events);
+                                } else { self.error = "Invalid conversation response".into(); }
                             } else if let Some(batch) = value.as_array() {
                                 let incoming: Vec<_> = batch.iter().filter(|v|v["seq"].as_i64().unwrap_or(0)>cursor).cloned().collect();
                                 if !incoming.is_empty() {
                                     self.transcript.append(&incoming);
-                                    self.events.extend(incoming);
+                                    self.event_count += incoming.len();
                                     // Render each page before fetching the next, rather than
                                     // buffering an entire history behind one snapshot.
                                     if batch.len() == 500 { self.reads.invalidate(Resource::Events); }
@@ -963,6 +1049,8 @@ impl Component for App {
                 self.current = Value::Null;
                 self.pending.clear();
                 self.events.clear();
+                self.event_count = 0;
+                self.history_loaded = false;
                 self.reads.reset(true);
                 self.transcript = crate::transcript::Transcript::default();
                 self.follow = true;
@@ -982,6 +1070,8 @@ impl Component for App {
                 self.saved.selected.clear();
                 self.current = Value::Null;
                 self.events.clear();
+                self.event_count = 0;
+                self.history_loaded = false;
                 self.reads.reset(true);
                 self.transcript = crate::transcript::Transcript::default();
                 self.pending.clear();
@@ -993,7 +1083,20 @@ impl Component for App {
                     value.to_string(),
                 );
             }
-            Msg::EnterSends(enabled) => self.saved.enter_sends = enabled,
+            Msg::EnterSends(enabled) => {
+                self.saved.enter_sends = enabled;
+                self.enter_sends_error = if write_enter_sends(enabled) { String::new() } else { ENTER_SENDS_STORAGE_ERROR.into() };
+            }
+            Msg::CacheClock => return true,
+            Msg::SyncEnterSends => {
+                match read_enter_sends() {
+                    Ok(value) => {
+                        self.saved.enter_sends = value.unwrap_or(false);
+                        self.enter_sends_error.clear();
+                    }
+                    Err(()) => self.enter_sends_error = ENTER_SENDS_STORAGE_ERROR.into(),
+                }
+            }
             Msg::Field(name, value) => {
                 if name == "search" {
                     // A cursor belongs to the submitted query. Editing invalidates
@@ -1018,6 +1121,30 @@ impl Component for App {
                 self.show_background = false;
                 self.show_diagnostics = open;
                 self.show_controls = false;
+                if open && let Some(client) = self.client.clone() {
+                    self.events.clear();
+                    let id = self.saved.selected.clone();
+                    let generation = self.generation;
+                    let end = self.transcript.cursor();
+                    ctx.link().send_future(async move {
+                        let result = async {
+                            let mut events = Vec::new();
+                            loop {
+                                let after = events.last().and_then(|v: &Value|v["seq"].as_i64()).unwrap_or(0);
+                                let value = client.read(Operation::Events { id: id.clone(), after }).await.map_err(|e|format!("{e:#}"))?;
+                                let batch = value.as_array().ok_or("Invalid event response")?;
+                                events.extend(batch.iter().filter(|v|v["seq"].as_i64().unwrap_or(0) <= end).cloned());
+                                if batch.len() < 500 || events.last().and_then(|v|v["seq"].as_i64()).unwrap_or(0) >= end { break; }
+                            }
+                            Ok(events)
+                        }.await;
+                        Msg::DiagnosticsLoaded(generation, id, result)
+                    });
+                }
+            }
+            Msg::DiagnosticsLoaded(generation, id, result) => {
+                if generation != self.generation || id != self.saved.selected || !self.show_diagnostics { return false; }
+                match result { Ok(events) => self.events = events, Err(error) => self.error = error }
             }
             Msg::ReorderMode => { self.reorder_mode = !self.reorder_mode; }
             Msg::Controls(open) => {
@@ -1539,6 +1666,11 @@ impl Component for App {
                 );
             }
             Msg::InvalidForm(error) => { self.error = error; self.error_epoch = None; },
+            Msg::DismissRequest(key) => {
+                if self.pending.iter().any(|p| text(p, "key") == key && text(p, "state") == "unavailable") {
+                    self.saved.dismiss_request(&key);
+                }
+            }
             Msg::Dismiss => self.error.clear(),
             Msg::Resize => return self.follow,
             Msg::Latest => {
@@ -1636,7 +1768,7 @@ impl Component for App {
                     {self.target_setup_view(ctx)}
                     {if !self.connection_storage_error.is_empty(){html!{<div class="app-notice" role="alert">{self.connection_storage_error.clone()}</div>}}else{Html::default()}}
                     {if self.update_available{html!{<div class="app-notice" role="status"><span>{"New version available. Your agent keeps running."}</span><button disabled={self.busy||self.updating} onclick={ctx.link().callback(|_|Msg::ApplyUpdate)}>{if self.updating{"Updating…"}else{"Update now"}}</button></div>}}else{Html::default()}}
-                    {if !self.storage_error.is_empty()||!self.update_error.is_empty(){html!{<div class="app-notice" role="status">{format!("{} {}",self.storage_error,self.update_error)}</div>}}else{Html::default()}}
+                    {if !self.storage_error.is_empty()||!self.update_error.is_empty()||!self.enter_sends_error.is_empty(){html!{<div class="app-notice" role="status">{format!("{} {} {}",self.storage_error,self.update_error,self.enter_sends_error)}</div>}}else{Html::default()}}
                     {if !self.error.is_empty() && !self.show_controls && !self.show_diagnostics && !self.show_background && !self.connections_page && !self.show_new_session && !self.show_server_settings{html!{<div class="error global-error" role="alert"><pre>{self.error.clone()}</pre><button onclick={ctx.link().callback(|_|Msg::Dismiss)}>{"Dismiss"}</button>{if !self.connected{html!{<button disabled={self.connecting} onclick={ctx.link().callback(|_|Msg::Connect)}>{if self.connecting{"Connecting…"}else{"Retry connection"}}</button>}}else{Html::default()}}{if !self.receipt.is_empty(){self.button(ctx,"Check command receipt",Operation::Receipt{id:self.receipt.clone()})}else{Html::default()}}</div>}}else{Html::default()}}
                     {if !self.connected&&!self.sessions.is_empty(){html!{<div class="app-notice" role="status">{"Connection lost — showing the last known session state. Reconnecting does not replay commands."}</div>}}else{Html::default()}}
                     <div class={classes!("layout",detail.then_some("detail"))}>
@@ -1646,8 +1778,8 @@ impl Component for App {
                                 <button type="button" aria-pressed={(self.saved.field("session_view")=="flat").to_string()} onclick={ctx.link().callback(|_|Msg::Field("session_view".into(),"flat".into()))}>{"List"}</button>
                             </div><button type="button" class="reorder-toggle" aria-pressed={self.reorder_mode.to_string()} onclick={ctx.link().callback(|_|Msg::ReorderMode)}>{if self.reorder_mode{"Done reordering"}else{"Reorder"}}</button></div>
                             <button class="new-session-nav primary" disabled={!self.connected} onclick={ctx.link().callback(|_|Msg::NewSession(true))}>{"+ New Session"}</button>
-                            {crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]!=true).map(|s|{let mut s=s.clone();s["goal"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["goal"].clone()}else{Value::Null};s["active_subagents"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["active_subagents"].clone()}else{Value::Null};s["background_count"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["count"].clone()}else{Value::Null};s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode,self.saved.field("session_view")=="flat",ctx.link().callback(|_|Msg::NewSession(true)))}
-                            {if self.sessions.iter().any(|s|s["archived"]==true){html!{<details class="archived-sessions"><summary>{format!("Archived sessions ({})",self.sessions.iter().filter(|s|s["archived"]==true).count())}</summary>{crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]==true).map(|s|{let mut s=s.clone();s["background_count"]=Value::Null;s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode,self.saved.field("session_view")=="flat",ctx.link().callback(|_|Msg::NewSession(true)))}</details>}}else{Html::default()}}
+                            {crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]!=true).map(|s|{let mut s=s.clone();s["goal"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["goal"].clone()}else{Value::Null};s["active_subagents"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["active_subagents"].clone()}else{Value::Null};s["background_count"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["count"].clone()}else{Value::Null};s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode,self.saved.field("session_view")=="flat",ctx.link().callback(Msg::NewProjectSession))}
+                            {if self.sessions.iter().any(|s|s["archived"]==true){html!{<details class="archived-sessions"><summary>{format!("Archived sessions ({})",self.sessions.iter().filter(|s|s["archived"]==true).count())}</summary>{crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]==true).map(|s|{let mut s=s.clone();s["background_count"]=Value::Null;s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode,self.saved.field("session_view")=="flat",ctx.link().callback(Msg::NewProjectSession))}</details>}}else{Html::default()}}
                         </aside>
                         <main class={(!self.saved.selected.is_empty()).then_some("chat-main")}>
                             {if !self.saved.selected.is_empty(){self.chat_view(ctx)}else{html!{<section class="empty"><span class="eyebrow">{"SERVER OVERVIEW"}</span><h1>{"Your agents, by project."}</h1><p>{"Select an agent in the folder tree to open its conversation. Only folders with sessions appear."}</p><p class="muted">{"Each agent keeps its icon and generated name. Status shows who is working, waiting for you, or disconnected."}</p><button disabled={!self.connected} onclick={ctx.link().callback(|_|Msg::NewSession(true))}>{"New Session"}</button></section>}}}
@@ -1756,7 +1888,9 @@ impl App {
         html! {<>
             <div class="session-heading"><button class="back" onclick={ctx.link().callback(|_|Msg::Page(String::new()))}>{"← Sessions"}</button><div class="session-heading-text"><h1>{crate::overview::title(&self.current)}</h1><span class="agent-name">{crate::overview::identity(&self.current)}</span>{if !text(&self.current,"thread_id").is_empty(){html!{<code class="thread-reference" title="Codex thread UUID">{text(&self.current,"thread_id")}</code>}}else{Html::default()}}</div><span class={classes!("status",crate::overview::status_class(status))}>{status}</span>{close}</div>
             {if !error.is_empty(){html!{<div class="error session-error" role="status"><span>{error}</span>{if reconnect{self.button(ctx,"Reconnect",Operation::Connect{id:id.clone()})}else{Html::default()}}</div>}}else{Html::default()}}
+            {crate::usage::cache_indicator(&self.current,true)}
             <div class="transcript-frame"><div class="transcript" ref={self.transcript_ref.clone()} onscroll={ctx.link().callback(|_|Msg::Scroll)} role="region" aria-label="Chat transcript" tabindex="0">
+                {if !self.history_loaded {html!{<p class="muted" role="status">{"Loading conversation…"}</p>}}else{Html::default()}}
                 <ContextProvider<crate::links::LinkContext> context={crate::links::LinkContext { client:self.client.clone(), session:id.clone(), targets:self.current["targets"].clone(), connected:self.connected }}>
                 <crate::conversation::Conversation key={self.saved.key()} chunks={self.transcript.groups.clone()} {working} {waiting} connected={self.connected}/>
                 </ContextProvider<crate::links::LinkContext>>
@@ -1772,7 +1906,7 @@ impl App {
                 </section>}}else{Html::default()}}
                 {if !self.queue_error.is_empty(){html!{<p class="muted">{format!("Message queue unavailable: {}",self.queue_error)}</p>}}else{Html::default()}}
             </div>
-            <form class="composer" onsubmit={ctx.link().callback(|e:SubmitEvent|{e.prevent_default();Msg::Send})}><label class="sr-only" for="prompt">{"Message"}</label><textarea id="prompt" ref={self.prompt_ref.clone()} value={self.saved.draft()} placeholder="Give the agent a task…" aria-describedby="composer-shortcut" enterkeyhint={if enter_sends {"send"} else {"enter"}} onkeydown={ctx.link().batch_callback(move |e:web_sys::KeyboardEvent| {
+            <form class="composer" onsubmit={ctx.link().callback(|e:SubmitEvent|{e.prevent_default();Msg::Send})}><ContextProvider<crate::links::LinkContext> context={crate::links::LinkContext { client:self.client.clone(), session:id.clone(), targets:self.current["targets"].clone(), connected:self.connected }}><crate::images::DraftImages source={self.saved.draft()}/></ContextProvider<crate::links::LinkContext>><label class="sr-only" for="prompt">{"Message"}</label><textarea id="prompt" ref={self.prompt_ref.clone()} value={self.saved.draft()} placeholder="Give the agent a task…" aria-describedby="composer-shortcut" enterkeyhint={if enter_sends {"send"} else {"enter"}} onkeydown={ctx.link().batch_callback(move |e:web_sys::KeyboardEvent| {
                 if e.key()=="Enter" && e.shift_key() != enter_sends && !e.ctrl_key() && !e.alt_key() && !e.meta_key() && !e.is_composing() && e.key_code()!=229 {
                     e.prevent_default();
                     if !e.repeat() { return Some(Msg::Send); }
@@ -1812,7 +1946,7 @@ impl App {
                 <crate::ui::Group class="control-section" label="Session context" title="Context and identity">
                     {crate::usage::context(&self.current,true)}
                     {crate::overview::context_view(&self.current,&self.targets)}
-                    <button onclick={ctx.link().callback(|_|Msg::Diagnostics(true))}>{format!("Protocol events ({})",self.events.len())}</button>
+                    <button onclick={ctx.link().callback(|_|Msg::Diagnostics(true))}>{format!("Protocol events ({})",self.event_count)}</button>
                 </crate::ui::Group>
                 <crate::ui::Group class="session-archive control-section" label="Archive session" title="Session history">
                     {if self.current["archived"]==true{html!{<><p class="muted">{"Archived on this server. Restore this session to resume work."}</p>{self.button(ctx,"Restore session",Operation::Archive{id:id.clone(),archived:false})}</>}}else{html!{<><p class="muted">{"Archive a stopped session without deleting its history."}</p>{if matches!(status,"idle"|"connected"|"disconnected") && !working && !waiting && self.queued.is_empty() && self.controls["goal"]["status"]!="active" {self.button(ctx,"Archive session",Operation::Archive{id:id.clone(),archived:true})}else{html!{<><button disabled=true>{"Archive session"}</button><p class="muted control-warning" role="status">{"Stop the current turn, pause any active goal, and remove queued messages before archiving."}</p></>}}}</>}}}
@@ -1831,9 +1965,13 @@ impl App {
         let disabled = self.busy || !self.connected || text(pending, "state") != "pending";
         let key = text(pending, "key");
         let method = text(pending, "method");
+        let unavailable = text(pending, "state") == "unavailable";
+        if unavailable && self.saved.request_dismissed(key) {
+            return Html::default();
+        }
         html! {<section key={key.to_owned()} class="approval" aria-label={crate::approval::title(method)}>
             <div class="approval-heading"><h2>{crate::approval::title(method)}</h2><span class="approval-status" role="status">{crate::approval::status(text(pending,"state"),self.connected)}</span></div>
-            {if text(pending,"state")=="unavailable"{html!{<p>{"The connection owning this request ended. No answer was selected automatically; this request cannot be answered on a new connection."}</p>}}else{Html::default()}}
+            {if unavailable{let key=key.to_owned();html!{<><p>{"The connection owning this request ended. No answer was selected automatically; this request cannot be answered on a new connection."}</p><button type="button" title="Hide this unavailable request in this browser tab without sending a response" onclick={ctx.link().callback(move |_|Msg::DismissRequest(key.clone()))}>{"Dismiss"}</button></>}}else{Html::default()}}
             {if matches!(method,"item/commandExecution/requestApproval"|"item/fileChange/requestApproval") {
                 html!{<>{crate::approval::summary(method,&pending["params"])}
                     <div class="approval-actions">{for [("Approve once","accept","Allow this request"),("Decline","decline","Reject this request"),("Cancel turn","cancel","Stop the current turn")].into_iter().map(|(label,decision,hint)|{let p=pending.clone();html!{<button type="button" class={if decision=="cancel"{"approval-cancel"}else{""}} title={hint} disabled={disabled} onclick={ctx.link().callback(move |_|Msg::Answer(p.clone(),Some(decision.into())))}>{label}</button>}})}</div>

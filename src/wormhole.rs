@@ -438,7 +438,7 @@ mod tests {
                 id: "host".into(),
                 cwd: directory.path().to_string_lossy().into_owned(),
             }],
-            &[],
+            &[crate::store::Target { id: "host-fixture".into(), url: "ws://127.0.0.1:1".into(), cwd: directory.path().to_string_lossy().into_owned() }],
         )?;
         let request = uuid::Uuid::new_v4().to_string();
         let first = execute(&app, &request, command.clone()).await?;

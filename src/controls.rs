@@ -71,6 +71,27 @@ pub(crate) async fn model_catalog(rpc: &crate::rpc::Rpc) -> Result<Value> {
     Ok(json!({"data":models}))
 }
 
+fn runtime_defaults(config: &Value, models: &[Value]) -> Value {
+    let model = config["model"].as_str().or_else(|| models.iter().find(|m|m["isDefault"] == true).and_then(|m|m["model"].as_str()));
+    let record = models.iter().find(|m|m["model"].as_str() == model);
+    let effort = config["model_reasoning_effort"].as_str().or_else(||record.and_then(|m|m["defaultReasoningEffort"].as_str()));
+    let tier = config["service_tier"].as_str().or_else(||record.and_then(|m|m["defaultServiceTier"].as_str()));
+    json!({"model":model,"effort":effort,"serviceTier":tier})
+}
+
+pub(crate) async fn runtime_model_catalog(rpc: &crate::rpc::Rpc) -> Result<Value> {
+    let mut catalog = model_catalog(rpc).await?;
+    match rpc.call("config/read", json!({"includeLayers":false})).await {
+        Ok(response) if response["config"].is_object() => {
+            catalog["defaults"] = runtime_defaults(&response["config"], catalog["data"].as_array().unwrap());
+            catalog["configured_service_tier"] = response["config"]["service_tier"].clone();
+        }
+        Ok(_) => catalog["defaults_error"] = json!("Runtime returned no default configuration"),
+        Err(error) => catalog["defaults_error"] = json!(format!("Could not read runtime defaults: {error:#}")),
+    }
+    Ok(catalog)
+}
+
 fn same_model_settings(accepted: &Value, requested: &Value) -> bool {
     let tier = |value: &Value| match value["serviceTier"].as_str() {
         None | Some("default") => String::new(),
@@ -251,6 +272,15 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inherited_settings_resolve_profile_before_catalogue() {
+        let models = vec![json!({"model":"catalogue","isDefault":true,"defaultReasoningEffort":"medium"}), json!({"model":"profile","defaultReasoningEffort":"low","defaultServiceTier":"priority"})];
+        assert_eq!(runtime_defaults(&json!({}), &models), json!({"model":"catalogue","effort":"medium","serviceTier":null}));
+        assert_eq!(runtime_defaults(&json!({"model":"profile","model_reasoning_effort":"high","service_tier":"flex"}), &models), json!({"model":"profile","effort":"high","serviceTier":"flex"}));
+        assert_eq!(runtime_defaults(&json!({"model":"profile"}), &models), json!({"model":"profile","effort":"low","serviceTier":"priority"}));
+        assert_eq!(runtime_defaults(&json!({"model":"uncatalogued"}), &models)["effort"], Value::Null);
+    }
+
     #[test]
     fn model_capabilities_come_from_the_server() {
         let catalog = vec![

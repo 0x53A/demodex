@@ -312,6 +312,11 @@ pub struct EditorProps {
 }
 #[function_component(PromptEditor)]
 fn prompt_editor(props: &EditorProps) -> Html {
+    let wrapping = use_state(|| true);
+    let set_wrapping = wrapping.clone();
+    let onwrap = Callback::from(move |event: Event| {
+        set_wrapping.set(event.target_unchecked_into::<HtmlInputElement>().checked());
+    });
     let overlay = use_node_ref();
     let target = overlay.clone();
     let onscroll = Callback::from(move |event: Event| {
@@ -322,16 +327,44 @@ fn prompt_editor(props: &EditorProps) -> Html {
         }
     });
     let (old, new) = changed_lines(&props.baseline, &props.value);
-    html! {<div class={classes!("prompt-editor",props.diff.then_some("prompt-diff"))}>
-    {if props.diff {html!{<div class="prompt-original"><strong>{"Current default"}</strong><pre>{for props.baseline.split('\n').enumerate().map(|(i,line)|html!{<span class={old[i].then_some("diff-delete")}>{line}{"\n"}</span>})}</pre></div>}}else{Html::default()}}
+    let (old_words, new_words) = if props.diff {
+        changed_words(&props.baseline, &props.value, &old, &new)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let digits = props
+        .value
+        .split('\n')
+        .count()
+        .max(props.baseline.split('\n').count())
+        .to_string()
+        .len();
+    let numbered_lines =
+        |source: &str, changed: &[bool], words: &[Vec<(&str, bool)>], class: &'static str| {
+            source.split('\n').enumerate().map(|(i, line)| html! {
+            <span class={classes!("prompt-line", changed[i].then_some(class))}>
+                <span class="prompt-line-number" aria-hidden="true">{i + 1}</span>
+                {if line.is_empty() {html!{"\u{200b}"}} else if props.diff {
+                    html!{{for words[i].iter().map(|(word, changed)| html!{
+                        <span class={if *changed {"diff-word"} else {"diff-context"}}>{*word}</span>
+                    })}}
+                } else {html!{line}}}
+            </span>
+        }).collect::<Html>()
+        };
+    html! {<div class={classes!("prompt-editor",props.diff.then_some("prompt-diff"),(props.diff && !*wrapping).then_some("prompt-nowrap"))} style={format!("--prompt-gutter:{}ch",digits + 2)}>
+    {if props.diff {html!{<><div class="prompt-diff-options"><label class="checkbox"><input type="checkbox" checked={*wrapping} onchange={onwrap}/>{"Word wrapping"}</label><span class="muted">{"Removed words are struck through; added words are underlined. Unchanged text stays neutral."}</span></div><div class="prompt-original"><strong>{"Current default"}</strong><pre>{numbered_lines(&props.baseline, &old, &old_words, "diff-delete")}</pre></div></>}}else{Html::default()}}
     <div class="prompt-replacement"><strong>{"Your version"}</strong><div class="prompt-edit-area">
-    {if props.diff{html!{<pre ref={overlay} aria-hidden="true">{for props.value.split('\n').enumerate().map(|(i,line)|html!{<span class={new[i].then_some("diff-add")}>{line}{"\n"}</span>})}</pre>}}else{Html::default()}}
-    <textarea aria-label="Prompt text" spellcheck="false" wrap="off" value={props.value.clone()} {onscroll} oninput={props.oninput.reform(|e:InputEvent|e.target_unchecked_into::<HtmlTextAreaElement>().value())}/>
+    <pre ref={overlay} aria-hidden="true">{numbered_lines(&props.value, &new, &new_words, "diff-add")}</pre>
+    <textarea aria-label="Prompt text" spellcheck="false" wrap={if props.diff && !*wrapping {"off"} else {"soft"}} value={props.value.clone()} {onscroll} oninput={props.oninput.reform(|e:InputEvent|e.target_unchecked_into::<HtmlTextAreaElement>().value())}/>
     </div></div></div>}
 }
 fn changed_lines(old: &str, new: &str) -> (Vec<bool>, Vec<bool>) {
     let a: Vec<_> = old.split('\n').collect();
     let b: Vec<_> = new.split('\n').collect();
+    changed_items(&a, &b)
+}
+fn changed_items(a: &[&str], b: &[&str]) -> (Vec<bool>, Vec<bool>) {
     let mut left = vec![true; a.len()];
     let mut right = vec![true; b.len()];
     if a.len().saturating_mul(b.len()) > 2_000_000 {
@@ -373,6 +406,81 @@ fn changed_lines(old: &str, new: &str) -> (Vec<bool>, Vec<bool>) {
     (left, right)
 }
 
+// Compare words inside changed blocks between matching source lines. This keeps
+// repeated words elsewhere in a long prompt from stealing local matches.
+type WordLines<'a> = Vec<Vec<(&'a str, bool)>>;
+fn changed_words<'a>(
+    old: &'a str,
+    new: &'a str,
+    left: &[bool],
+    right: &[bool],
+) -> (WordLines<'a>, WordLines<'a>) {
+    fn words(source: &str) -> WordLines<'_> {
+        source
+            .split('\n')
+            .map(|line| {
+                let mut tokens = Vec::new();
+                let mut start = 0;
+                let mut previous = None;
+                for (i, ch) in line.char_indices() {
+                    let kind = if ch.is_whitespace() {
+                        0
+                    } else if ch.is_alphanumeric() || ch == '_' {
+                        1
+                    } else {
+                        2
+                    };
+                    if previous.is_some_and(|p| p != kind || kind == 2) {
+                        tokens.push((&line[start..i], false));
+                        start = i;
+                    }
+                    previous = Some(kind);
+                }
+                if start < line.len() {
+                    tokens.push((&line[start..], false));
+                }
+                tokens
+            })
+            .collect()
+    }
+    let (mut a, mut b) = (words(old), words(new));
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() || j < b.len() {
+        let (start_i, start_j) = (i, j);
+        while i < a.len() && left[i] {
+            i += 1;
+        }
+        while j < b.len() && right[j] {
+            j += 1;
+        }
+        let old_tokens: Vec<_> = a[start_i..i]
+            .iter()
+            .flatten()
+            .map(|(word, _)| *word)
+            .collect();
+        let new_tokens: Vec<_> = b[start_j..j]
+            .iter()
+            .flatten()
+            .map(|(word, _)| *word)
+            .collect();
+        let (removed, added) = changed_items(&old_tokens, &new_tokens);
+        for (token, changed) in a[start_i..i].iter_mut().flatten().zip(removed) {
+            token.1 = changed;
+        }
+        for (token, changed) in b[start_j..j].iter_mut().flatten().zip(added) {
+            token.1 = changed;
+        }
+        // The next unchanged line is a shared anchor, if present.
+        if i < a.len() {
+            i += 1;
+        }
+        if j < b.len() {
+            j += 1;
+        }
+    }
+    (a, b)
+}
+
 #[derive(Properties)]
 pub struct PreviewProps {
     pub client: Rc<Client>,
@@ -382,7 +490,9 @@ pub struct PreviewProps {
 }
 impl PartialEq for PreviewProps {
     fn eq(&self, o: &Self) -> bool {
-        Rc::ptr_eq(&self.client, &o.client) && self.target == o.target && self.global_inline == o.global_inline
+        Rc::ptr_eq(&self.client, &o.client)
+            && self.target == o.target
+            && self.global_inline == o.global_inline
     }
 }
 pub struct InstructionPreview {
@@ -473,7 +583,7 @@ impl Component for InstructionPreview {
         }
         html! {<><button type="button" onclick={ctx.link().callback(|_|PreviewMsg::Open)}>{"Read instruction files"}</button>{if self.open{html!{<crate::modal::Modal title="Instruction files (read-only)" onclose={ctx.link().callback(|_|PreviewMsg::Close)}>
         {if self.busy{html!{<p role="status">{"Reading instruction files…"}</p>}}else{Html::default()}}
-        <p class="muted">{text(&self.data,"note")}</p><p class="error" role="alert">{&self.error}</p>
+        <p class="muted">{text(&self.data,"note")}</p>{if !self.error.is_empty(){html!{<p class="error" role="alert">{&self.error}</p>}}else{Html::default()}}
         {for array(&self.data["files"]).iter().map(|file|html!{<details><summary>{format!("{} · {}",text(file,"scope"),text(file,"path"))}</summary>{if file["truncated"]==true{html!{<p class="control-warning">{"Codex's project instruction limit excludes some or all of this file."}</p>}}else{Html::default()}}<pre class="instruction-file">{text(file,"text")}</pre></details>})}
         {if !self.busy&&self.error.is_empty()&&array(&self.data["files"]).is_empty(){html!{<p>{"No instruction files found."}</p>}}else{Html::default()}}
         </crate::modal::Modal>}}else{Html::default()}}</>}
@@ -483,6 +593,40 @@ impl Component for InstructionPreview {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn word_diff_preserves_context_punctuation_unicode_and_blank_lines() {
+        let old = "Keep the red café.\n\nUnchanged\nRemoved";
+        let new = "Keep the blue café!\n\nUnchanged\n";
+        let (left, right) = changed_lines(old, new);
+        let (a, b) = changed_words(old, new, &left, &right);
+        assert_eq!(
+            a[0].iter()
+                .filter(|(_, changed)| *changed)
+                .map(|(word, _)| *word)
+                .collect::<Vec<_>>(),
+            vec!["red", "."]
+        );
+        assert_eq!(
+            b[0].iter()
+                .filter(|(_, changed)| *changed)
+                .map(|(word, _)| *word)
+                .collect::<Vec<_>>(),
+            vec!["blue", "!"]
+        );
+        assert!(a[1].is_empty() && b[1].is_empty() && b[3].is_empty());
+        assert_eq!(a[2], vec![("Unchanged", false)]);
+        assert_eq!(a[3], vec![("Removed", true)]);
+        for (source, lines) in [(old, a), (new, b)] {
+            assert_eq!(
+                lines
+                    .iter()
+                    .map(|line| line.iter().map(|(word, _)| *word).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                source
+            );
+        }
+    }
     #[test]
     fn diff_marks_insertions_without_marking_unchanged_lines() {
         assert_eq!(

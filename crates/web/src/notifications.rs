@@ -13,6 +13,10 @@ extern "C" {
     fn browser_enable(options: JsValue) -> Result<js_sys::Promise, JsValue>;
     #[wasm_bindgen(js_namespace=demodexPush,js_name=disable,catch)]
     async fn browser_disable() -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(js_namespace=demodexPush,js_name=testDisplay,catch)]
+    async fn browser_test_display() -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(js_namespace=demodexPush,js_name=watchTest,catch)]
+    fn browser_watch_test(server_id: &str) -> Result<js_sys::Promise, JsValue>;
     #[wasm_bindgen(js_namespace=demodexPush,js_name=route,catch)]
     fn browser_route() -> Result<JsValue, JsValue>;
 }
@@ -59,6 +63,7 @@ pub enum Msg {
     Enable,
     Disable,
     Test,
+    TestDisplay,
     Preview(bool),
     Done(Result<String, String>),
 }
@@ -182,16 +187,42 @@ impl Component for Notifications {
             }
             Msg::Test => {
                 self.busy = true;
-                self.message.clear();
+                self.message =
+                    "Sending test notification; waiting for this browser to receive it…".into();
+                let received = browser_watch_test(self.remote["server_id"].as_str().unwrap_or(""));
                 let client = ctx.props().client.clone();
                 let id = self.local["binding"]["device_id"]
                     .as_str()
                     .unwrap_or("")
                     .to_owned();
-                ctx.link().send_future(async move {Msg::Done(async{
-                    let result=command(&client,Operation::TestPush{device_id:id}).await?;
-                    Ok(if result["delivery"]["accepted"].as_u64().unwrap_or(0)>0{"Push service accepted the test. Device display is not confirmed.".into()}else{"Test was not confirmed by the push service. Check device permission and re-enable an expired subscription.".into()})
-                }.await)});
+                ctx.link().send_future(async move {
+                    Msg::Done(async {
+                        let received = received.map_err(error)?;
+                        let result = command(&client, Operation::TestPush { device_id: id }).await?;
+                        if result["delivery"]["accepted"].as_u64().unwrap_or(0) == 0 {
+                            return Ok(if result["delivery"]["expired"].as_u64().unwrap_or(0) > 0 {
+                                "The push subscription expired. Disable push, then enable it again.".into()
+                            } else {
+                                "The push service did not confirm the test. Try again later or disable and re-enable push.".into()
+                            });
+                        }
+                        let received = value(wasm_bindgen_futures::JsFuture::from(received).await.map_err(error)?);
+                        Ok(match received["state"].as_str() {
+                            Some("display-requested") => "Test received by this browser; notification display requested. If no banner appeared, check device notification settings and Do Not Disturb.".into(),
+                            Some("failed") => format!("Test received, but display failed: {}", received["error"].as_str().unwrap_or("unknown browser error")),
+                            _ => "Push service accepted the test, but this browser has not confirmed receipt within 20 seconds. Delivery may arrive later. Try Test notification display to check local browser and device settings.".into(),
+                        })
+                    }.await)
+                });
+            }
+            Msg::TestDisplay => {
+                self.busy = true;
+                self.message = "Requesting a notification directly on this device…".into();
+                ctx.link().send_future(async {
+                    Msg::Done(browser_test_display().await.map_err(error).map(|_| {
+                        "Local notification display requested. If no banner appeared, check browser and device notification settings and Do Not Disturb.".into()
+                    }))
+                });
             }
             Msg::Done(result) => {
                 self.message = result.unwrap_or_else(|e| e);
@@ -220,6 +251,7 @@ impl Component for Notifications {
                 <button disabled={self.busy||!available||(has_binding&&!same)||self.remote["public_key"].is_null()} onclick={ctx.link().callback(|_|Msg::Enable)}>{if enabled{"Save push settings"}else{"Enable push on this device"}}</button>
                 {if has_binding {html!{<button disabled={self.busy} onclick={ctx.link().callback(|_|Msg::Disable)}>{"Disable push"}</button>}}else{Html::default()}}
                 <button disabled={self.busy||!enabled} onclick={ctx.link().callback(|_|Msg::Test)}>{"Send test notification"}</button>
+                <button disabled={self.busy||!available||self.local["permission"]!="granted"} onclick={ctx.link().callback(|_|Msg::TestDisplay)}>{"Test notification display"}</button>
             </div>
             {if !self.message.is_empty(){html!{<p role="status">{&self.message}</p>}}else{Html::default()}}
             <p class="muted">{"Agents can send notifications explicitly; every notification remains in chat. Agent notifications require a newly created Codex thread."}</p>

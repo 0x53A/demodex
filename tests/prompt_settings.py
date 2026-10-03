@@ -5,6 +5,7 @@
 import copy
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import signal
@@ -119,6 +120,33 @@ with tempfile.TemporaryDirectory(prefix='demodex-prompt-settings-') as tmp:
                 page.get_by_label('Access token').fill(token)
                 page.get_by_role('button',name='Save and connect',exact=True).click()
                 expect(page.locator('header .indicator')).to_have_text('connected to',timeout=20000)
+                # Folder creation inherits its stable host and exact project path.
+                host_group=page.locator('.target-folder[data-target-id="host"]')
+                host_group.get_by_role('button',name='+ Session',exact=True).first.click()
+                creation=page.get_by_role('dialog',name='New Session',exact=True)
+                expect(creation.locator('.creation-target input[type="checkbox"]').first).to_be_checked()
+                expect(creation.locator('.target-directory input').first).to_have_value(str(workspace))
+                runtime_models=api('RuntimeModels')
+                assert runtime_models['defaults']['model']==configured_model
+                assert runtime_models['defaults']['effort']=='high'
+                default_model=next(m for m in runtime_models['data'] if m['model']==configured_model)
+                expect(creation.get_by_label('Model',exact=True).locator('option:checked')).to_have_text(f"Default ({default_model['displayName']})")
+                expect(creation.get_by_label('Reasoning effort',exact=True).locator('option:checked')).to_have_text('Default (high)')
+                tier=runtime_models['defaults']['serviceTier']
+                tier_label=next((t['name'] for t in default_model.get('serviceTiers',[]) if t['id']==tier),tier or 'Standard')
+                expect(creation.get_by_label('Service tier',exact=True).locator('option:checked')).to_have_text(f'Default ({tier_label})')
+                creation.get_by_label('Model',exact=True).select_option(model)
+                efforts=creation.get_by_label('Reasoning effort',exact=True).locator('option')
+                for index in range(efforts.count()):
+                    option=efforts.nth(index)
+                    if option.get_attribute('value'):
+                        assert option.inner_text()==option.get_attribute('value')
+                creation.get_by_role('button',name='Read instruction files',exact=True).click()
+                preview=page.get_by_role('dialog',name='Instruction files (read-only)',exact=True)
+                expect(preview.locator('details')).to_have_count(2)
+                expect(preview.locator('[role="alert"]')).to_have_count(0)
+                preview.get_by_role('button',name='Close',exact=True).click()
+                creation.get_by_role('button',name='Close',exact=True).click()
                 page.get_by_role('button',name='Server settings',exact=True).click()
                 settings_dialog=page.get_by_role('dialog',name='Server settings',exact=True)
                 expect(settings_dialog.get_by_label('Append instructions for all models',exact=True)).to_have_value('Shared appendix',timeout=20000)
@@ -129,7 +157,42 @@ with tempfile.TemporaryDirectory(prefix='demodex-prompt-settings-') as tmp:
                 settings_dialog.get_by_role('button',name=f'Edit prompt for {model}',exact=True).click()
                 editor=page.get_by_role('dialog',name=f'System prompt · {model}',exact=True)
                 original_text=editor.get_by_label('Prompt text',exact=True).input_value()
+                # Numbers follow source lines, including empty lines, while long
+                # prose and unbroken words wrap without changing the draft.
+                draft=('Wrapped prose ' * 35)+'\n\n'+('x' * 300)+'\n'+('\tIndented line\n' * 45)
+                prompt=editor.get_by_label('Prompt text',exact=True)
+                prompt.fill(draft)
+                expect(editor.locator('.prompt-edit-area .prompt-line-number')).to_have_count(len(draft.split('\n')))
+                for width in (1200,390):
+                    page.set_viewport_size({'width':width,'height':900})
+                    for mode in ('Diff','Edit'):
+                        editor.get_by_role('button',name=mode,exact=True).click()
+                        expect(prompt).to_have_value(draft)
+                        assert prompt.evaluate('(t)=>t.scrollWidth<=t.clientWidth'), 'prompt scrolls horizontally'
+                        assert editor.locator('.prompt-edit-area .prompt-line').first.evaluate('(l)=>l.clientHeight>21'), 'prose did not wrap'
+                        assert editor.locator('.prompt-edit-area .prompt-line').nth(2).evaluate('(l)=>l.clientHeight>21'), 'unbroken word did not wrap'
+                        assert editor.locator('.prompt-edit-area').evaluate('''(area)=>{
+                            const t=area.querySelector('textarea'), p=area.querySelector('pre');
+                            return Math.abs(t.scrollHeight-p.scrollHeight)<=2;
+                        }'''), 'line numbers and text have different layout heights'
+                        prompt.evaluate('(t)=>{t.scrollTop=230;t.dispatchEvent(new Event("scroll"));}')
+                        expect(editor.locator('.prompt-edit-area pre')).to_have_js_property('scrollTop',230)
+                page.set_viewport_size({'width':1200,'height':900})
                 editor.get_by_role('button',name='Diff',exact=True).click()
+                wrap=editor.get_by_label('Word wrapping',exact=True)
+                expect(wrap).to_be_checked()
+                wrap.uncheck()
+                assert prompt.evaluate('(t)=>t.scrollWidth>t.clientWidth')
+                expect(prompt).to_have_value(draft)
+                wrap.check()
+                # A small wording edit highlights only the replacement, and
+                # preserves the common words visibly in both panes.
+                default_text=baseline['defaults'][model]['text']
+                first_word=re.search(r'\w+',default_text).group()
+                prompt.fill(default_text.replace(first_word, 'Someone', 1))
+                expect(editor.locator('.prompt-original .diff-word').first).to_have_text(first_word)
+                expect(editor.locator('.prompt-replacement .diff-word').first).to_have_text('Someone')
+                expect(editor.locator('.prompt-replacement .diff-context').first).to_be_visible()
                 editor.get_by_label('Prompt text',exact=True).fill('Editable replacement\n<script>inert</script>')
                 expect(editor.locator('.diff-add').first).to_be_visible()
                 assert editor.locator('script').count()==0

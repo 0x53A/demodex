@@ -1,8 +1,10 @@
 //! Browser/daemon contract. Bump VERSION for semantic changes, including JSON payloads.
-pub const VERSION: u32 = 33;
+pub const VERSION: u32 = 36;
 /// SHA-256 of normalized wire declarations and pinned transport dependencies.
 pub const SCHEMA_HASH: &str = env!("DEMODEX_PROTOCOL_SCHEMA");
 pub mod links;
+pub mod transcript;
+pub mod location;
 mod wire;
 pub use wire::*;
 
@@ -45,6 +47,7 @@ impl Operation {
                 | Self::Detail { .. }
                 | Self::Models { .. }
                 | Self::Events { .. }
+                | Self::Conversation { .. }
                 | Self::Runtime
                 | Self::RuntimeModels
                 | Self::DefaultPrompt
@@ -56,6 +59,7 @@ impl Operation {
                 | Self::BrowseDirectories { .. }
                 | Self::MessageFiles { .. }
                 | Self::ReadMessageFile { .. }
+                | Self::ReadUploadedImage { .. }
                 | Self::Targets
                 | Self::Receipt { .. }
         )

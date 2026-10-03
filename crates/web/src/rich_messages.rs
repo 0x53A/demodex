@@ -99,6 +99,15 @@ fn element(name: &str, children: Vec<Html>) -> Html {
     tag.into()
 }
 
+fn image_label(node: &Html) -> String {
+    match node {
+        yew::virtual_dom::VNode::VText(text) => text.text.to_string(),
+        yew::virtual_dom::VNode::VList(list) => list.iter().map(image_label).collect(),
+        yew::virtual_dom::VNode::VTag(tag) => tag.children().map(image_label).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
 // Normalize the common TeX delimiters outside inline/fenced code. Markdown's
 // own parser remains responsible for code, escaped dollars and table structure.
 fn math_delimiters(source: &str) -> String {
@@ -304,8 +313,9 @@ fn nodes<'a>(
                             html!{<button type="button" class="message-link markdown-link" title={link.destination.clone()} onclick={Callback::from(move |_|open.emit(chosen.clone()))}><span aria-hidden="true">{format!("{} {} ",crate::links::icon(&link.kind),index+1)}</span>{for children}</button>}
                         } else { html!{<span class="markdown-link">{for children}</span>} }
                     },
-                    Tag::Image { .. } => {
-                        html! {<span class="markdown-image">{"[Image omitted: "}{for children}{"]"}</span>}
+                    Tag::Image { dest_url, .. } => {
+                        let label = children.iter().map(image_label).collect::<String>();
+                        html! {<crate::images::Image destination={dest_url.to_string()} {label}/>}
                     }
                     _ => html! {<>{for children}</>},
                 };

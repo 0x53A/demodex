@@ -45,6 +45,11 @@ impl PartialEq for ItemProps {
 // items render. Keys use stable item IDs, never event cursor or list length.
 #[function_component(MessageChunk)]
 fn message_chunk(props: &ChunkProps) -> Html {
+    let open = use_state(|| false);
+    let toggle = { let open = open.clone(); Callback::from(move |event: Event| {
+        let element = event.target_unchecked_into::<web_sys::Element>();
+        if element.has_attribute("open") { open.set(true); }
+    }) };
     let items = html! {<>{for props.items.iter().map(|item|html!{
         <MessageItem key={text(item,"id").to_owned()} item={item.clone()}/>
     })}</>};
@@ -55,13 +60,13 @@ fn message_chunk(props: &ChunkProps) -> Html {
     let stopped = props.items.iter().filter(|item| matches!(text(item,"status"),"interrupted"|"declined")).count();
     let last = props.items.last().unwrap();
     let description = match text(last,"type") { "commandExecution"=>text(last,"command"), "webSearch"=>text(last,"query"), "mcpToolCall"|"dynamicToolCall"=>text(last,"tool"), kind=>label(kind) };
-    html!{<details class="tool-group" data-group-id={text(&props.items[0],"id").to_owned()}>
+    html!{<details class="tool-group" ontoggle={toggle} data-group-id={text(&props.items[0],"id").to_owned()}>
         <summary><span>{format!("{} activit{}",props.items.len(),if props.items.len()==1{"y"}else{"ies"})}</span>
         {if running>0{html!{<span class="activity-running">{format!(" · {running} running")}</span>}}else{Html::default()}}
         {if failed>0{html!{<span class="failed">{format!(" · {failed} failed")}</span>}}else{Html::default()}}
         {if unknown>0{html!{<span>{format!(" · {unknown} unreported")}</span>}}else{Html::default()}}
         {if stopped>0{html!{<span>{format!(" · {stopped} stopped/declined")}</span>}}else{Html::default()}}
-        <code class="activity-description">{description}</code></summary>{items}
+        <code class="activity-description">{description}</code></summary>{if *open { items } else { Html::default() }}
     </details>}
 }
 

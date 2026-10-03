@@ -19,6 +19,7 @@ pub struct Client {
     api: ActorRef<Api>,
     notices: Arc<Mutex<crate::sync::Notices>>,
     actors: Vec<ActorCell>,
+    file_reads: tokio::sync::Semaphore,
 }
 impl Drop for Client {
     fn drop(&mut self) {
@@ -202,6 +203,7 @@ impl Client {
                 api,
                 notices,
                 actors: std::mem::take(&mut guard.0),
+                file_reads: tokio::sync::Semaphore::new(4),
             }),
             rx,
         ))
@@ -215,6 +217,11 @@ impl Client {
     }
 
     pub async fn read(&self, operation: Operation) -> Result<Value> {
+        // A cold snapshot can mount many file widgets at once. Leave capacity
+        // for transcript, controls and mutations in the server's 16-call limit.
+        let _permit = if matches!(operation, Operation::MessageFiles { .. } | Operation::ReadUploadedImage { .. } | Operation::ReadMessageFile { .. }) {
+            Some(self.file_reads.acquire().await?)
+        } else { None };
         self.call(operation, String::new()).await
     }
 

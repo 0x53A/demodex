@@ -16,7 +16,7 @@ from websockets.exceptions import ConnectionClosed
 from wormhole_client import api, call
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / 'target/rust-pwa/debug/demodex'
+BINARY = Path(os.environ.get('DEMODEX_BIN', ROOT / 'target/rust-pwa/debug/demodex'))
 DIST = Path(os.environ.get('DEMODEX_WEB_DIST', ROOT / 'web/.rust-dist'))
 
 def port():
@@ -77,6 +77,8 @@ with tempfile.TemporaryDirectory(prefix='demodex-push-') as temp:
                 Object.defineProperty(Notification,'permission',{get:()=>window.pushPermission});
                 Notification.requestPermission=async()=>{if(!navigator.userActivation.isActive)throw Error('Permission requested without user activation');window.permissionCalls++;return window.pushPermission='granted';};
                 window.fakeSubscription=null;
+                window.displayTests=[];
+                ServiceWorkerRegistration.prototype.showNotification=async function(title,options){window.displayTests.push({title,...options});};
                 PushManager.prototype.getSubscription=async()=>window.fakeSubscription;
                 PushManager.prototype.subscribe=async function(options){
                     window.subscribeCalls++;
@@ -117,9 +119,21 @@ with tempfile.TemporaryDirectory(prefix='demodex-push-') as temp:
             remote=call(host,token,{'PushSettings':{'device_id':device}})
             assert remote['enabled'] and remote['hide_preview'],remote
             assert 'auth' not in remote and 'endpoint' not in remote
+            # Exercise the actual Test button without sending to a real provider:
+            # removing the registration leaves the displayed snapshot stale.
+            call(host,token,{'RemovePush':{'device_id':device}})
+            panel.get_by_role('button',name='Send test notification',exact=True).click()
+            expect(panel.get_by_role('status')).to_contain_text('Enable push on this device first')
+            expect(panel.get_by_role('button',name='Enable push on this device')).to_be_enabled()
+            panel.get_by_role('button',name='Enable push on this device').click()
+            expect(panel.get_by_role('button',name='Send test notification')).to_be_enabled()
             # Worker validates local server association and builds credential-free links.
             worker=context.service_workers[0]
             worker.evaluate('''self.captured=[];self.registration.showNotification=async(title,options)=>self.captured.push({title,...options});self.opened=[];self.clients.openWindow=async(url)=>self.opened.push(url);void 0;''')
+            panel.get_by_role('button',name='Test notification display',exact=True).click()
+            expect(panel.get_by_role('status')).to_contain_text('Local notification display requested')
+            assert len(page.evaluate('displayTests'))==1
+            assert page.evaluate('displayTests[0].title')=='Demodex display test'
             payload={'id':'push-1','server_id':server_id,'server_url':host,'session_id':created['id'],'title':'Fixture notification','message':'Fixture only'}
             worker.evaluate('(p)=>self.dispatchEvent(new PushEvent("push",{data:JSON.stringify(p)}))',payload)
             for _ in range(100):
@@ -134,6 +148,26 @@ with tempfile.TemporaryDirectory(prefix='demodex-push-') as temp:
             other={**payload,'id':'foreign','server_id':'another-server'}
             worker.evaluate('(p)=>self.dispatchEvent(new PushEvent("push",{data:JSON.stringify(p)}))',other)
             time.sleep(.2);assert len(worker.evaluate('self.captured'))==1
+            # Accepted pushes need a separate worker acknowledgement to establish
+            # browser receipt; showNotification success cannot prove an OS banner.
+            page.evaluate('(id)=>{window.testReceipt=demodexPush.watchTest(id);}',server_id)
+            test_payload={**payload,'id':'test-push','session_id':'','title':'Demodex test'}
+            worker.evaluate('(p)=>self.dispatchEvent(new PushEvent("push",{data:JSON.stringify(p)}))',test_payload)
+            assert page.evaluate('testReceipt')['state']=='display-requested'
+            assert page.evaluate('''async(id)=>{
+                const original=setTimeout;
+                window.setTimeout=(fn,ms)=>original(fn,ms===20000?1:ms);
+                const pending=demodexPush.watchTest(id);
+                window.setTimeout=original;
+                return await pending;
+            }''',server_id)['state']=='unconfirmed'
+            worker.evaluate('self.registration.showNotification=async()=>{throw Error("Display blocked by browser");};void 0;')
+            page.evaluate('(id)=>{window.testReceipt=demodexPush.watchTest(id);}',server_id)
+            worker.evaluate('(p)=>self.dispatchEvent(new PushEvent("push",{data:JSON.stringify(p)}))',test_payload)
+            assert page.evaluate('testReceipt')['error']=='Display blocked by browser'
+            page.evaluate('ServiceWorkerRegistration.prototype.showNotification=async()=>{throw Error("Display blocked by browser");};void 0;')
+            panel.get_by_role('button',name='Test notification display',exact=True).click()
+            expect(panel.get_by_role('status')).to_contain_text('Display blocked by browser')
             # Disable invalidates the actual browser subscription and remote registration.
             panel.get_by_role('button',name='Disable push',exact=True).click()
             expect(panel.get_by_role('button',name='Send test notification')).to_be_disabled()
@@ -154,7 +188,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-push-') as temp:
             page.screenshot(path=str(ROOT/'target/notifications-mobile.png'))
             assert not errors,errors
             browser.close()
-        print('PASS: explicit durable notification, duplicate receipt, permission gesture, subscription privacy/settings/removal, mocked SW delivery/click/server binding, mobile layout; no real push sent')
+        print('PASS: explicit durable notification, duplicate receipt, permission gesture, subscription privacy/settings/removal, Test error feedback, local display test, worker receipt/display failure/timeout, mocked SW routing/server binding, mobile layout; no real push sent')
     finally:
         for process in reversed(processes):
             process.terminate()

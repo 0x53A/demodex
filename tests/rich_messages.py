@@ -3,6 +3,9 @@
 # ///
 """Markdown, native MathML and sandboxed local Mermaid; no inference."""
 import json
+import base64
+import hashlib
+import sqlite3
 import os
 from pathlib import Path
 import socket
@@ -156,6 +159,79 @@ graph LR
             expect_diagram(article)
             assert article.locator('iframe').get_attribute('sandbox')=='allow-scripts'
             assert not external,external
+            image_button=article.get_by_role('button',name='Preview Do not fetch',exact=True)
+            expect(image_button.locator('.image-warning')).to_be_visible()
+            image_button.click()
+            popup=page.get_by_role('dialog')
+            expect(popup).to_contain_text('https://example.org/private.png')
+            expect(popup.locator('img')).to_have_count(0)
+            assert not external,external
+            page.route('https://example.org/private.png', lambda route: route.fulfill(content_type='image/png',body=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')))
+            popup.get_by_role('button',name='Load image',exact=True).click()
+            expect(popup.locator('img')).to_have_attribute('src','https://example.org/private.png')
+            expect(popup.locator('img')).to_have_attribute('referrerpolicy','no-referrer')
+            expect(popup.locator('img')).to_be_visible()
+            page.wait_for_function('document.querySelector("dialog img").naturalWidth > 0')
+            popup.get_by_role('button',name='Close',exact=True).click()
+            image_button.click()
+            expect(page.get_by_role('dialog').locator('img')).to_have_count(0)
+            page.get_by_role('dialog').get_by_role('button',name='Close',exact=True).click()
+            codex.message('changing-image','![Changing](https://example.org/private.png)')
+            changing=page.locator('[data-item-id="changing-image"]')
+            changing.get_by_role('button',name='Preview Changing',exact=True).click()
+            page.get_by_role('dialog').get_by_role('button',name='Load image',exact=True).click()
+            expect(page.get_by_role('dialog').locator('img')).to_have_count(1)
+            codex.message('changing-image','![Changing](https://example.org/replacement.png)')
+            expect(page.get_by_role('dialog')).to_have_count(0)
+            changing.get_by_role('button',name='Preview Changing',exact=True).click()
+            expect(page.get_by_role('dialog').locator('img')).to_have_count(0)
+            assert 'https://example.org/replacement.png' not in external
+            page.get_by_role('dialog').get_by_role('button',name='Close',exact=True).click()
+            external.clear()
+            # A durable upload record with a real executor exercises sent-message
+            # previews without a model turn; host.py covers actual upload creation.
+            png=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
+            uploaded=directory/'uploaded.png'
+            uploaded.write_bytes(png)
+            target=api(host,token,'/sessions/'+created['id'])['session']['targets'][0]
+            with sqlite3.connect(directory/'state/state.sqlite') as db:
+                db.execute('INSERT INTO uploaded_images VALUES(?,?,?,?)',(created['id'],str(uploaded),json.dumps(target),hashlib.sha256(png).hexdigest()))
+            codex.socket.send(json.dumps({'method':'item/completed','params':{'threadId':'thread','item':{'id':'sent-image','type':'userMessage','content':[{'type':'text','text':f'![Screenshot](<{uploaded}>)'}]}}}))
+            sent=page.locator('[data-item-id="sent-image"]')
+            expect(sent.locator('.image-thumbnail')).to_have_count(1,timeout=20000)
+            sent.get_by_role('button',name='Preview Screenshot',exact=True).click()
+            expect(page.get_by_role('dialog').locator('img')).to_be_visible()
+            page.get_by_role('dialog').get_by_role('button',name='Close',exact=True).click()
+            page.reload()
+            expect(sent.locator('.image-thumbnail')).to_have_count(1,timeout=20000)
+            assert call(host,token,{'ReadUploadedImage':{'id':created['id'],'path':str(uploaded)}})['dataBase64'] == base64.b64encode(png).decode()
+            uploaded.write_bytes(png+b'changed')
+            try:
+                call(host,token,{'ReadUploadedImage':{'id':created['id'],'path':str(uploaded)}})
+                raise AssertionError('changed upload was accepted')
+            except AssertionError as error: assert 'has changed' in str(error),error
+            uploaded.write_bytes(png)
+            # A recorded upload can belong to a staged executor before the next
+            # turn applies it. Replacing that generation must still reject reads.
+            staged_target = dict(target, id=target['id'] + '-staged')
+            with sqlite3.connect(directory/'state/state.sqlite') as db:
+                db.execute('UPDATE uploaded_images SET target=? WHERE session_id=? AND path=?', (json.dumps(staged_target), created['id'], str(uploaded)))
+                db.execute('INSERT INTO staged_session_targets VALUES(?,?,?)', (created['id'], '[]', json.dumps([staged_target])))
+            assert call(host,token,{'ReadUploadedImage':{'id':created['id'],'path':str(uploaded)}})['dataBase64'] == base64.b64encode(png).decode()
+            with sqlite3.connect(directory/'state/state.sqlite') as db:
+                db.execute('DELETE FROM staged_session_targets WHERE session_id=?', (created['id'],))
+            try:
+                call(host,token,{'ReadUploadedImage':{'id':created['id'],'path':str(uploaded)}})
+                raise AssertionError('detached image executor was accepted')
+            except AssertionError as error: assert 'unavailable or replaced' in str(error),error
+            with sqlite3.connect(directory/'state/state.sqlite') as db:
+                db.execute('UPDATE uploaded_images SET target=? WHERE session_id=? AND path=?', (json.dumps(target), created['id'], str(uploaded)))
+            codex.message('many-images', '\n'.join(f'![Image {i}](<{uploaded}>)' for i in range(24)))
+            expect(page.locator('[data-item-id="many-images"] .image-thumbnail')).to_have_count(24, timeout=30000)
+            try:
+                call(host,token,{'ReadUploadedImage':{'id':created['id'],'path':str(report)}})
+                raise AssertionError('arbitrary image path was read')
+            except AssertionError as error: assert 'No recorded' in str(error),error
             article.get_by_role('button',name='Copy raw',exact=True).click()
             expect(article.get_by_role('button',name='Copied raw',exact=True)).to_be_visible()
             assert page.evaluate('navigator.clipboard.readText()')==source
@@ -386,7 +462,7 @@ sequenceDiagram
             assert not external,external
             assert not errors,errors
             browser.close()
-        print('PASS: Markdown/math/Mermaid/SVG, explicit web links, real-executor file snapshots/previews/downloads, limits, detached executors, exact raw source, mobile/offline rendering')
+        print('PASS: Markdown/math/Mermaid/SVG, confirmed URL images, explicit web links, real-executor file snapshots/previews/downloads, limits, detached executors, exact raw source, mobile/offline rendering')
     finally:
         for process in reversed(processes):
             process.terminate()

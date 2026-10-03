@@ -17,16 +17,26 @@ pub use demodex_protocol::Pending;
 
 pub struct Store(Mutex<Connection>);
 
-// Match the overview's normalized folder grouping, independent of executor IDs.
-fn session_group(session: &Session) -> String {
-    let path = session.presentation.context.as_ref()
-        .filter(|c| c.path.starts_with('/') && session.targets.iter().any(|t| t.id == c.environment_id))
-        .map(|c| c.path.as_str())
-        .or_else(|| session.targets.first().map(|t| t.cwd.as_str())).unwrap_or("");
-    path.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("/")
+// Keep manual ordering inside the same target/project group as the overview.
+fn session_group(session: &Session) -> (String, String) {
+    let context = session.presentation.context.as_ref().filter(|c| c.path.starts_with('/'));
+    let environment = demodex_protocol::location::preferred(session.targets.iter().map(|t|t.id.as_str()), context.map(|c|c.environment_id.as_str())).unwrap_or("");
+    let path = context.filter(|c|c.environment_id == environment).map(|c|c.path.as_str())
+        .or_else(||session.targets.iter().find(|t|t.id == environment).map(|t|t.cwd.as_str())).unwrap_or("");
+    (demodex_protocol::location::target_id(environment).into(), path.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("/"))
 }
 
 impl Store {
+    pub fn record_uploaded_image(&self, id: &str, path: &str, target: &Target, digest: &str) -> Result<()> {
+        self.0.lock().unwrap().execute("INSERT INTO uploaded_images VALUES(?1,?2,?3,?4)", params![id,path,serde_json::to_string(target)?,digest])?;
+        Ok(())
+    }
+
+    pub fn uploaded_image(&self, id: &str, path: &str) -> Result<Option<(Target, String)>> {
+        let row: Option<(String,String)> = self.0.lock().unwrap().query_row("SELECT target,digest FROM uploaded_images WHERE session_id=?1 AND path=?2", params![id,path], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+        row.map(|(target,digest)| Ok((serde_json::from_str(&target)?,digest))).transpose()
+    }
+
     pub fn runtime_features(&self) -> Result<std::collections::BTreeMap<String, bool>> {
         let connection = self.0.lock().unwrap();
         let mut statement = connection.prepare("SELECT name, enabled FROM runtime_features ORDER BY name")?;
@@ -68,6 +78,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS execution_targets (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, cwd TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS session_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id), selection TEXT NOT NULL, pending INTEGER NOT NULL DEFAULT 0);
              CREATE TABLE IF NOT EXISTS staged_session_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id), selection TEXT NOT NULL, targets TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS uploaded_images (session_id TEXT NOT NULL REFERENCES sessions(id), path TEXT NOT NULL, target TEXT NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(session_id,path));
              CREATE TABLE IF NOT EXISTS message_files (session_id TEXT NOT NULL REFERENCES sessions(id), item_id TEXT NOT NULL, targets TEXT NOT NULL, files TEXT NOT NULL, PRIMARY KEY(session_id,item_id));
              CREATE TABLE IF NOT EXISTS events (
                seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -135,7 +146,7 @@ impl Store {
         // Recover the last report already in persisted history on first upgrade.
         let usage_ids = connection
             .prepare(
-                "SELECT id FROM sessions WHERE id NOT IN (SELECT session_id FROM session_usage)",
+                "SELECT id FROM sessions WHERE id NOT IN (SELECT session_id FROM session_usage) OR id IN (SELECT session_id FROM session_usage WHERE json_type(value,'$.input_tokens') IS NULL)",
             )?
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -148,7 +159,7 @@ impl Store {
                 let mut usage = crate::usage::context(&message["params"]["tokenUsage"]);
                 usage["reported_at"] = serde_json::json!(at);
                 connection.execute(
-                    "INSERT INTO session_usage VALUES(?1,?2)",
+                    "INSERT INTO session_usage VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET value=json_set(excluded.value,'$.reported_at',json_extract(session_usage.value,'$.reported_at'))",
                     params![id, usage.to_string()],
                 )?;
             }
@@ -476,7 +487,9 @@ impl Store {
     }
 
     pub fn context_usage(&self, id: &str, usage: &Value) -> Result<()> {
-        self.lock()?.execute("INSERT INTO session_usage VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET value=excluded.value",
+        // Resume can repeat an old report without running inference. Do not make
+        // a possibly cold prompt appear fresh just because it was reattached.
+        self.lock()?.execute("INSERT INTO session_usage VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET value=excluded.value WHERE json_extract(session_usage.value,'$.report_fingerprint') IS NOT json_extract(excluded.value,'$.report_fingerprint')",
             params![id, crate::usage::context(usage).to_string()])?;
         Ok(())
     }
@@ -737,6 +750,23 @@ impl Store {
         Ok(db.last_insert_rowid())
     }
 
+    pub fn conversation(&self, id: &str) -> Result<demodex_protocol::ConversationSnapshot> {
+        // Capture a finite high-water mark; later events are fetched by cursor.
+        let end: i64 = self.lock()?.query_row("SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=?1", [id], |r| r.get(0))?;
+        let mut transcript = demodex_protocol::transcript::Transcript::default();
+        let mut count = 0usize;
+        let mut after = 0;
+        while after < end {
+            let batch: Vec<_> = self.events(id, after)?.into_iter().take_while(|event| event.seq <= end).collect();
+            if batch.is_empty() { break; }
+            after = batch.last().unwrap().seq;
+            count += batch.len();
+            transcript.append(&batch.into_iter().map(|event| json!(event)).collect::<Vec<_>>());
+        }
+        let items: Vec<_> = transcript.chunks.iter().flat_map(|chunk| chunk.iter().map(|item| item.as_ref().clone())).collect();
+        Ok(demodex_protocol::ConversationSnapshot { items, cursor:end, event_count:count as u64 })
+    }
+
     pub fn events(&self, id: &str, after: i64) -> Result<Vec<Event>> {
         let db = self.lock()?;
         let mut query = db.prepare("SELECT seq,at,message FROM events WHERE session_id=?1 AND seq>?2 ORDER BY seq LIMIT 500")?;
@@ -871,6 +901,47 @@ mod tests {
         assert!(!store.get(&b.id)?.starred);
         assert!(store.get(&c.id)?.sort_order < store.get(&a.id)?.sort_order);
         assert_eq!(store.get(&b.id)?.thread_id.as_deref(),Some("b"));
+        Ok(())
+    }
+
+    #[test]
+    fn conversation_snapshot_preserves_projection_cursor_and_raw_events() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        let id = store.create("history", "ws://localhost:1", &[], None)?.id;
+        store.event(&id, &json!({"method":"item/started","params":{"item":{"id":"message","type":"agentMessage","text":""}}}))?;
+        for _ in 0..1100 {
+            store.event(&id, &json!({"method":"item/agentMessage/delta","params":{"itemId":"message","delta":"x"}}))?;
+        }
+        store.event(&id, &json!({"method":"future/unknown","params":{"keep":"original"}}))?;
+        let snapshot = store.conversation(&id)?;
+        assert_eq!(snapshot.event_count, 1102);
+        assert_eq!(snapshot.items.len(), 1);
+        assert_eq!(snapshot.items[0]["text"].as_str().unwrap().len(), 1100);
+        let at = snapshot.items[0]["_demodexAt"].clone();
+        assert!(at.is_string());
+        let mut restored = demodex_protocol::transcript::Transcript::restore(&snapshot.items, snapshot.cursor);
+        assert!(store.events(&id, snapshot.cursor)?.is_empty());
+        store.event(&id, &json!({"method":"item/completed","params":{"item":{"id":"message","type":"agentMessage","text":"done"}}}))?;
+        restored.append(&store.events(&id, snapshot.cursor)?.into_iter().map(|e|json!(e)).collect::<Vec<_>>());
+        let fresh = store.conversation(&id)?;
+        assert_eq!(*restored.chunks[0][0], fresh.items[0]);
+        assert_eq!(fresh.items[0]["_demodexAt"], at);
+        assert_eq!(store.events(&id, snapshot.cursor - 1)?[0].message["method"], "future/unknown");
+        Ok(())
+    }
+
+    #[test]
+    fn ordering_separates_targets_at_the_same_path() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        let host = Target { id:"host-old".into(), url:"ws://localhost:1".into(), cwd:"/project".into() };
+        let a = store.create("host", "ws://localhost:1", std::slice::from_ref(&host), None)?;
+        let mut other = host.clone(); other.id = "ssh-other".into();
+        let b = store.create("ssh", "ws://localhost:1", &[other], None)?;
+        let mut host = host; host.id = "host-new".into();
+        let c = store.create("host again", "ws://localhost:1", &[host], None)?;
+        assert_eq!(session_group(&a), session_group(&c));
+        assert_ne!(session_group(&a), session_group(&b));
+        store.reorder_sessions(&[a.id.clone(),c.id.clone()], &[c.id,a.id])?;
         Ok(())
     }
 

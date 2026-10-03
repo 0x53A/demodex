@@ -66,6 +66,12 @@ pub struct Event {
     pub message: serde_json::Value,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ConversationSnapshot {
+    pub items: Vec<serde_json::Value>,
+    pub cursor: i64,
+    pub event_count: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Pending {
     pub key: String,
     pub method: String,
@@ -95,6 +101,7 @@ pub struct SessionDetail {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum Response {
+    Conversation(ConversationSnapshot),
     Sessions(Vec<Session>),
     Session(Session),
     Detail(SessionDetail),
@@ -137,6 +144,7 @@ impl Response {
             Self::Sessions(value) => serde_json::json!(value),
             Self::Session(value) => serde_json::json!(value),
             Self::Detail(value) => serde_json::json!(value),
+            Self::Conversation(value) => serde_json::json!(value),
             Self::Events(value) => serde_json::json!(value),
             Self::Environments(value) => serde_json::json!(value),
             Self::Environment(value) => serde_json::json!(value),
@@ -156,6 +164,7 @@ impl Response {
             | Operation::HostSession { .. }
             | Operation::EnvironmentSession { .. } => Self::Session(serde_json::from_value(value)?),
             Operation::Detail { .. } => Self::Detail(serde_json::from_value(value)?),
+            Operation::Conversation { .. } => Self::Conversation(serde_json::from_value(value)?),
             Operation::Events { .. } => Self::Events(serde_json::from_value(value)?),
             Operation::Environments => Self::Environments(serde_json::from_value(value)?),
             Operation::CreateEnvironment { .. } => {
@@ -221,6 +230,7 @@ pub enum Operation {
     },
     Runtime,
     RuntimeModels,
+    Conversation { id: String },
     DefaultPrompt,
     PromptSettings,
     SavePromptSettings { expected_revision: u64, settings: PromptSettings },
@@ -294,6 +304,8 @@ pub enum Operation {
     ReadMessageFile { id: String, item: String, destination: String, executor: String },
     /// Original shared file, encoded as base64.
     UploadFile { id: String, name: String, data: String },
+    /// Read a previously uploaded image on its captured executor.
+    ReadUploadedImage { id: String, path: String },
     UploadImage {
         id: String,
         bytes: Vec<u8>,

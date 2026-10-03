@@ -100,7 +100,7 @@ impl Orchestrator {
         }
         for (id, config) in self.manager.store.ssh_targets()? {
             let owner = self.manager.store.ssh_target_owner(&id)?;
-            targets.push(json!({"id":id,"name":config.name,"kind":"ssh","cwd":config.cwd,"destination":config.destination,"port":config.port,"identity_file":config.identity_file,"available":true,"users":self.manager.store.target_users(&id)?,"owner":owner}));
+            targets.push(json!({"id":id,"name":config.name,"kind":"ssh","cwd":config.cwd,"destination":config.destination,"port":config.port,"identity_file":config.identity_file,"known_hosts_file":config.known_hosts_file,"available":true,"users":self.manager.store.target_users(&id)?,"owner":owner}));
         }
         Ok(json!(targets))
     }
@@ -1413,6 +1413,16 @@ impl Orchestrator {
         Ok(())
     }
 
+    fn record_image_upload(&self, id: &str, path: String, bytes: &[u8], image: bool) -> Result<String> {
+        if image {
+            use sha2::{Digest, Sha256};
+            let targets = self.manager.store.staged_targets(id)?.unwrap_or(self.manager.store.get(id)?.targets);
+            let target = targets.first().context("No upload executor attached")?;
+            self.manager.store.record_uploaded_image(id, &path, target, &Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())?;
+        }
+        Ok(path)
+    }
+
     pub async fn upload_image(&self, id: &str, bytes: &[u8]) -> Result<String> {
         let extension = crate::uploads::extension(bytes)?;
         self.upload_file(id, bytes, &format!("image.{extension}"), true).await
@@ -1437,7 +1447,7 @@ impl Orchestrator {
         if primary.id == "host" {
             ensure!(self.is_host_mode(), "Host execution is not configured");
             return if image {
-                crate::uploads::save(&self.root, bytes, crate::uploads::extension(bytes)?)
+                self.record_image_upload(id, crate::uploads::save(&self.root, bytes, crate::uploads::extension(bytes)?)?, bytes, image)
             } else { crate::uploads::save_file(&self.root, bytes, name) };
         }
         if primary.id.starts_with("ssh-") {
@@ -1445,7 +1455,7 @@ impl Orchestrator {
             let engine = ssh
                 .get(&primary.id)
                 .context("Reconnect the session before uploading to SSH")?;
-            return engine.upload_file(&primary.cwd, bytes, name).await;
+            return self.record_image_upload(id, engine.upload_file(&primary.cwd, bytes, name).await?, bytes, image);
         }
         if let Some(container_id) = primary.id.strip_prefix("container-") {
             use std::io::Write;
@@ -1459,7 +1469,7 @@ impl Orchestrator {
             let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
                 .open(directory.join(name))?;
             file.write_all(bytes)?;
-            return Ok(format!("/workspace/{directory_name}/{name}"));
+            return self.record_image_upload(id, format!("/workspace/{directory_name}/{name}"), bytes, image);
         }
         let environment = primary
             .id
@@ -1502,7 +1512,7 @@ impl Orchestrator {
         })
         .await
         .context("VM image upload timed out; inspect its command receipt before retrying")??;
-        Ok(path)
+        self.record_image_upload(id, path, bytes, image)
     }
 
     pub async fn connect_session(&self, id: &str) -> Result<()> {

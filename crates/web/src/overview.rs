@@ -20,10 +20,13 @@ pub fn locations(session: &Value) -> Vec<(String, String, bool)> {
     {
         return vec![(environment.into(), text(context, "path").into(), true)];
     }
-    targets
-        .iter()
-        .map(|t| (text(t, "id").into(), text(t, "cwd").into(), false))
-        .collect()
+    let preferred = demodex_protocol::location::preferred(targets.iter().map(|t|text(t,"id")), None);
+    targets.iter().filter(|t|Some(text(t,"id")) == preferred)
+        .map(|t| (text(t,"id").into(), text(t,"cwd").into(), false)).collect()
+}
+
+pub fn project(session: &Value) -> (String, String) {
+    locations(session).first().map(|(id,path,_)|(demodex_protocol::location::target_id(id).into(), format!("/{}",path.split('/').filter(|p|!p.is_empty()).collect::<Vec<_>>().join("/")))).unwrap_or_default()
 }
 
 pub fn forest(sessions: &[Value]) -> Folder {
@@ -31,8 +34,7 @@ pub fn forest(sessions: &[Value]) -> Folder {
     let mut ordered: Vec<_> = sessions.iter().collect();
     ordered.sort_by_key(|s| (s["starred"] != true, s["sort_order"].as_i64().unwrap_or(0)));
     for session in ordered {
-        // Show each session once: reported project, otherwise its primary directory.
-        // Executor generations are transport identities, not folder groups.
+        // Target grouping is handled by view; forest builds one target's paths.
         let mut folder = &mut root;
         if let Some((_, path, _)) = locations(session).first() {
             for part in path.split('/').filter(|part| !part.is_empty()) {
@@ -132,7 +134,7 @@ fn session_view(
     html! {<li class="tree-agent" key={id.clone()} data-session-id={id.clone()}><button class={classes!("session",chosen.then_some("chosen"))} aria-current={chosen.then_some("page")} onclick={Callback::from(move |_|select.emit(id.clone()))}>
         <strong class={classes!("session-title",status_class(status))}>{title(session)}</strong>
         <small class="agent-identity"><span class="agent-icon" aria-hidden="true">{text(&session["presentation"],"icon")}</span>{identity(session)}</small>
-        <small class="session-state"><span class={classes!("agent-status",status_class(status))}>{status}</span>
+        <small class="session-state"><span class={classes!("agent-status",status_class(status))}>{status}</span>{crate::usage::cache_indicator(session,false)}
         {" · "}<span class="session-executors">{if array(&session["targets"]).is_empty(){"No executors".into()}else{array(&session["targets"]).iter().map(|target|environment_label(text(target,"id"),environments)).collect::<Vec<_>>().join(" · ")}}</span></small>
         {crate::usage::context(session,false)}
         <span class="session-activity-slots"><span>
@@ -158,7 +160,7 @@ fn folder_view(
     select: &Callback<String>,
     edit: &Callback<String>,
     run: &Callback<Operation>,
-    create: &Callback<MouseEvent>,
+    create: &Callback<(String, String)>,
     disabled: bool,
     reorder_mode: bool,
 ) -> Html {
@@ -171,8 +173,9 @@ fn folder_view(
         name.push_str(child);
         folder = next;
     }
+    let create_here = { let create = create.clone(); let location = folder.sessions.first().map(project).unwrap_or_default(); Callback::from(move |_|create.emit(location.clone())) };
     html! {<li class="tree-folder"><div class="folder-name"><span aria-hidden="true">{"▱ "}</span>{name}</div><ul>
-        {if !folder.sessions.is_empty(){html!{<li class="folder-add-session"><crate::ui::AddButton onclick={create.clone()} {disabled}>{"+ Session"}</crate::ui::AddButton></li>}}else{Html::default()}}
+        {if !folder.sessions.is_empty(){html!{<li class="folder-add-session"><crate::ui::AddButton onclick={create_here} {disabled}>{"+ Session"}</crate::ui::AddButton></li>}}else{Html::default()}}
         {for folder.sessions.iter().map(|s|session_view(s,&folder.sessions,environments,selected,select,edit,run,disabled,reorder_mode))}
         {for folder.children.iter().map(|(name,child)|folder_view(name.clone(),child,environments,selected,select,edit,run,create,disabled,reorder_mode))}
     </ul></li>}
@@ -188,22 +191,23 @@ pub fn view(
     disabled: bool,
     reorder_mode: bool,
     flat: bool,
-    create: Callback<MouseEvent>,
+    create: Callback<(String, String)>,
 ) -> Html {
-    let tree = forest(sessions);
+    let mut targets: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    for session in sessions { targets.entry(project(session).0).or_default().push(session.clone()); }
     if flat {
         let mut ordered=sessions.to_vec();
-        ordered.sort_by_key(|s|(s["starred"]!=true,s["sort_order"].as_i64().unwrap_or(0)));
+        ordered.sort_by_key(|s|(project(s),s["starred"]!=true,s["sort_order"].as_i64().unwrap_or(0)));
         return html!{<nav class="session-tree session-list" aria-label="Sessions as list"><ul>
             {for ordered.iter().map(|session|{
-                let path=locations(session).first().map(|(_,path,_)|path.clone());
-                let peers=ordered.iter().filter(|other|locations(other).first().map(|(_,path,_)|path.clone())==path).cloned().collect::<Vec<_>>();
+                let path=project(session);
+                let peers=ordered.iter().filter(|other|project(other)==path).cloned().collect::<Vec<_>>();
                 session_view(session,&peers,environments,selected,&select,&edit,&run,disabled,reorder_mode)
             })}
         </ul>{if sessions.is_empty(){html!{<p class="muted">{"No sessions on this server yet. Choose New Session to start one."}</p>}}else{Html::default()}}</nav>};
     }
     html! {<nav class="session-tree" aria-label="Sessions by project">
-        {if sessions.is_empty(){html!{<p class="muted">{"No sessions on this server yet. Choose New Session to start one."}</p>}}else{html!{<ul>{folder_view("/".into(),&tree,environments,selected,&select,&edit,&run,&create,disabled,reorder_mode)}</ul>}}}
+        {if sessions.is_empty(){html!{<p class="muted">{"No sessions on this server yet. Choose New Session to start one."}</p>}}else{html!{<ul>{for targets.iter().map(|(target,sessions)|html!{<li class="target-folder" data-target-id={target.clone()}><div class="folder-name">{environment_label(target,environments)}</div><ul>{folder_view("/".into(),&forest(sessions),environments,selected,&select,&edit,&run,&create,disabled,reorder_mode)}</ul></li>})}</ul>}}}
     </nav>}
 }
 
@@ -228,6 +232,52 @@ pub fn context_view(session: &Value, environments: &[Value]) -> Html {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn old_and_new_host_sessions_share_one_target_and_project_group() {
+        let mut groups: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+        for generation in 0..100 {
+            let environment = if generation == 0 { "host".to_owned() } else { format!("host-{generation:032x}") };
+            let session = json!({
+                "id":format!("session-{generation}"),
+                "targets":[{"id":environment,"cwd":"/workspace/project"}],
+                "presentation":{"context":{"environment_id":environment,"path":"/workspace/project"}}
+            });
+            let (target, path) = project(&session);
+            assert_eq!(path, "/workspace/project");
+            groups.entry(target).or_default().push(session);
+        }
+        assert_eq!(groups.len(), 1);
+        let tree = forest(&groups["host"]);
+        assert_eq!(tree.children["workspace"].children["project"].sessions.len(), 100);
+    }
+
+    #[test]
+    fn remote_generations_share_project_groups_but_distinct_targets_do_not() {
+        let mut groups: BTreeMap<(String, String), usize> = BTreeMap::new();
+        for kind in ["ssh", "vm", "container", "external"] {
+            for target in ["76b8efe0-c965-4dce-811b-c3b76389813f", "769c319a-e739-4cf8-ba39-28fe564f46d3"] {
+                for generation in 0..100 {
+                    let environment = format!("{kind}-{target}-00000000-0000-0000-0000-{generation:012x}");
+                    let session = json!({"targets":[{"id":environment,"cwd":"/workspace/project"}]});
+                    *groups.entry(project(&session)).or_default() += 1;
+                }
+            }
+        }
+        assert_eq!(groups.len(), 8);
+        assert!(groups.values().all(|count| *count == 100));
+    }
+
+    #[test]
+    fn project_uses_reported_target_then_host_then_first() {
+        let mut session = json!({"targets":[{"id":"ssh-first","cwd":"/project"},{"id":"host-old","cwd":"/project"}],"presentation":{}});
+        assert_eq!(project(&session), ("host".into(), "/project".into()));
+        session["presentation"]["context"] = json!({"environment_id":"ssh-first","path":"/project/sub"});
+        assert_eq!(project(&session), ("ssh-first".into(), "/project/sub".into()));
+        session["targets"][1]["id"] = json!("ssh-second");
+        session["presentation"]["context"]["environment_id"] = json!("gone");
+        assert_eq!(project(&session), ("ssh-first".into(), "/project".into()));
+    }
+
     #[test]
     fn stars_sort_first_and_keep_their_own_manual_order() {
         let tree = forest(&[

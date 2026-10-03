@@ -145,6 +145,17 @@ Subsystem sftp internal-sftp
                     ssh_popup.get_by_label(label,exact=True).fill(value)
                 ssh_popup.get_by_role('button',name='Check and add SSH executor',exact=True).click()
                 expect(dialog.locator('.target-picker')).to_contain_text('Private machine',timeout=30000)
+                dialog.get_by_role('button',name='Close',exact=True).click()
+                page.set_viewport_size({'width':1200,'height':850})
+                private_target=next(t for t in api('/targets') if t['name']=='Private machine')
+                assert private_target['known_hosts_file']==config['known_hosts_file']
+                group=page.locator(f'.target-folder[data-target-id="{private_target["id"]}"]')
+                group.get_by_role('button',name='+ Session',exact=True).click()
+                creation=page.get_by_role('dialog',name='New Session',exact=True)
+                expect(creation.locator('.staged-ssh')).to_contain_text('Private machine')
+                expect(creation.locator('.staged-ssh code')).to_have_text(str(root))
+                expect(creation.locator('.creation-target input:checked')).to_have_count(0)
+                expect(creation.get_by_label('Sandbox',exact=True)).to_have_value('danger-full-access')
                 browser.close()
             private_target=next(t for t in api('/targets') if t['name']=='Private machine')
             assert private_target['owner']==private['id']
@@ -170,11 +181,13 @@ Subsystem sftp internal-sftp
                     page.get_by_role('button',name='Attach image',exact=True).click()
                 chooser.value.set_files({'name':'capture.png','mimeType':'image/png','buffer':png})
                 expect(prompt).to_have_value(re.compile(r'.*/\.demodex-upload-[^/]+/image\.png.*'),timeout=30000)
-                image_path=Path(prompt.input_value().split('"')[1])
+                image_path=Path(prompt.input_value().split('](<')[1].split('>)')[0])
                 assert image_path.read_bytes()==png
                 assert image_path.parent.parent==root
                 assert image_path.stat().st_mode & 0o777==0o600
                 assert image_path.parent.stat().st_mode & 0o777==0o700
+                expect(page.locator('.composer-images img')).to_have_count(1,timeout=20000)
+                page.wait_for_function('document.querySelector(".composer-images img").naturalWidth > 0')
                 from wormhole_client import call as actor_call
                 original=b"original HEIC bytes" * 300000
                 uploaded=actor_call(f'http://127.0.0.1:{api_port}',token,{'UploadFile':{

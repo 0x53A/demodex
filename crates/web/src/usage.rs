@@ -28,6 +28,35 @@ pub fn context(session: &Value, detailed: bool) -> Html {
     }
 }
 
+// This is an age estimate, not cache telemetry or a prediction of billed usage.
+const POSSIBLY_COLD_AFTER: i64 = 30 * 60;
+pub fn cold_input_tokens(session: &Value, now: i64) -> Option<i64> {
+    if matches!(text(session,"status"), "working" | "active" | "running" | "connecting") { return None; }
+    let usage = &session["context_usage"];
+    let reported = usage["reported_at"].as_i64().filter(|n|*n > 0)?;
+    let input = usage["input_tokens"].as_i64().filter(|n|*n >= 1024)?;
+    (now.saturating_sub(reported) >= POSSIBLY_COLD_AFTER).then_some(input)
+}
+fn token_count(tokens: i64) -> String {
+    let digits = tokens.to_string();
+    let mut result = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len()-index).is_multiple_of(3) { result.push(','); }
+        result.push(digit);
+    }
+    result
+}
+pub fn cache_indicator(session: &Value, detailed: bool) -> Html {
+    let Some(input) = cold_input_tokens(session, (js_sys::Date::now()/1000.0) as i64) else { return Html::default(); };
+    let description = format!("Possibly cold · Last request: {} input tokens. Sending again may require uncached processing.", token_count(input));
+    let explanation = "No token usage reported for at least 30 minutes. Cache expiry is not reported by Codex; this is an estimate, not the next request's token count.";
+    if detailed {
+        html!{<div class="cache-info" role="note" title={explanation}><span aria-hidden="true">{"❄ "}</span>{description}</div>}
+    } else {
+        html!{<span class="cache-indicator" role="img" aria-label={description.clone()} title={format!("{description} {explanation}")}>{"❄"}</span>}
+    }
+}
+
 fn timestamp(seconds: &Value) -> String {
     seconds
         .as_f64()
@@ -97,6 +126,22 @@ pub fn weekly(runtime: &Value, connected: bool) -> Html {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn cold_estimate_uses_last_input_and_age_and_never_marks_active_work() {
+        let mut session = json!({"status":"idle","context_usage":{"input_tokens":123456,"cached_input_tokens":120000,"used_tokens":150000,"reported_at":1000}});
+        assert_eq!(cold_input_tokens(&session, 2799), None);
+        assert_eq!(cold_input_tokens(&session, 2800), Some(123456));
+        assert_eq!(cold_input_tokens(&session, 999), None);
+        session["status"] = json!("working");
+        assert_eq!(cold_input_tokens(&session, 5000), None);
+        session["status"] = json!("disconnected");
+        assert_eq!(cold_input_tokens(&session, 5000), Some(123456));
+        session["context_usage"]["input_tokens"] = Value::Null;
+        assert_eq!(cold_input_tokens(&session, 5000), None);
+        assert_eq!(cold_input_tokens(&json!({}), 5000), None);
+        assert_eq!(token_count(123456), "123,456");
+    }
+
     #[test]
     fn context_percentage_uses_reported_window_without_assuming_model_capacity() {
         assert_eq!(
