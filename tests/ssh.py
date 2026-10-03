@@ -175,6 +175,15 @@ Subsystem sftp internal-sftp
                 assert image_path.parent.parent==root
                 assert image_path.stat().st_mode & 0o777==0o600
                 assert image_path.parent.stat().st_mode & 0o777==0o700
+                from wormhole_client import call as actor_call
+                original=b"original HEIC bytes" * 300000
+                uploaded=actor_call(f'http://127.0.0.1:{api_port}',token,{'UploadFile':{
+                    'id':sid,'name':"camera's 🦆.HEIC",'data':base64.b64encode(original).decode()}})
+                shared_path=Path(uploaded['path'])
+                assert shared_path.name=="camera's 🦆.HEIC"
+                assert shared_path.parent.parent==root
+                assert shared_path.read_bytes()==original
+                assert shared_path.stat().st_mode & 0o777==0o600
                 browser.close()
             url=executors[-1]['execServerUrl']
             try:
@@ -223,6 +232,10 @@ Subsystem sftp internal-sftp
                 return r,b''.join(base64.b64decode(ch['chunk']) for ch in r['chunks'])
             start('reported-shell','',argv=[remote_shell['path'],'-c','printf shell-ready'])
             assert finish('reported-shell')[1]==b'shell-ready'
+            # Preserve nested quoting through the login shell; command stdin is EOF.
+            literal = "backslashes \\n \\\\ quotes '\" $HOME $(false) `false` | ;\nü"
+            start('literal-environment','printf "%s" "$VALUE"; cat',env={'VALUE':literal})
+            assert finish('literal-environment')[1]==literal.encode()
             p=start('command','pwd; printf "%s\\n" "$1" "$VALUE"; sleep 0.2; printf done > completed',argv=['sh','-c','pwd; printf "%s\\n" "$1" "$VALUE"; sleep 0.2; printf done > completed','sh','literal; $(touch bad)'],env={'VALUE':'env spaces'})
             assert (root/'completed').read_text()=='done', 'process/start returned before completion'
             result,data=finish('command')

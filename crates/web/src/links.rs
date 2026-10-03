@@ -297,14 +297,14 @@ impl Component for FilePopup {
                         let regular=check["metadata"]["isFile"]==true;
                         let enabled=attached && regular && check["state"]=="found" && !self.reading && !self.loading;
                         let show=executor.clone();let save=executor.clone();
-                        html!{<div class={classes!("file-match",(!attached).then_some("executor-unavailable"))}>
-                            <div class="file-match-heading"><strong title={executor.clone()}>{check["executor_name"].as_str().filter(|name|!name.is_empty()).unwrap_or(&executor)}</strong><span class="file-actions"><button type="button" title="Show file" aria-label="Show file" disabled={!enabled} onclick={ctx.link().callback(move |_|Msg::Read(show.clone(),true))}>{"◉"}</button><button type="button" title="Download file" aria-label="Download file" disabled={!enabled} onclick={ctx.link().callback(move |_|Msg::Read(save.clone(),false))}>{"↓"}</button></span></div>
+                        html!{<crate::ui::Group class={classes!("file-match",(!attached).then_some("executor-unavailable"))}>
+                            <div class="file-match-heading"><strong title={executor.clone()}>{check["executor_name"].as_str().filter(|name|!name.is_empty()).unwrap_or(&executor)}</strong><span class="file-actions"><crate::ui::IconButton title="Show file" label="Show file" disabled={!enabled} onclick={ctx.link().callback(move |_|Msg::Read(show.clone(),true))}>{"◉"}</crate::ui::IconButton><crate::ui::IconButton title="Download file" label="Download file" disabled={!enabled} onclick={ctx.link().callback(move |_|Msg::Read(save.clone(),false))}>{"↓"}</crate::ui::IconButton></span></div>
                             <div class="link-destination">{text(check,"path")}</div>
                             {if check["state"]=="found" {html!{<><div class="file-metadata"><span>{format!("Created: {}",date(&check["metadata"]["createdAtMs"]))}</span><span>{format!("Modified: {}",date(&check["metadata"]["modifiedAtMs"]))}</span><span>{check["metadata"]["size"].as_u64().map(|n|format!("{n} bytes")).unwrap_or_else(||"Size unknown".into())}</span></div>{if !regular{html!{<p>{"Not a regular file; preview and download unavailable"}</p>}}else{Html::default()}}</>}}
                             else{html!{<p class="file-check-state">{match text(check,"state"){"not-found"=>"Not found", "timed-out"=>"Timed out", "pending"=>"Checking…", "not-checked"=>"Not checked", _=>"Check failed"}}{if check["state"]!="not-found"{format!(" · {}",text(check,"error"))}else{String::new()}}</p>}}}
                             <small class="file-check-time">{checked(check)}</small>
                             {if !attached{html!{<p class="muted">{"Original executor is no longer attached, has been replaced, or the session is disconnected."}</p>}}else{Html::default()}}
-                        </div>}
+                        </crate::ui::Group>}
                     })}</div>
                 </>}
             }else if !self.loading {html!{<p>{self.files["note"].as_str().unwrap_or("No metadata snapshot for this link. Checks run when an assistant message completes.")}</p>}}else{Html::default()}}

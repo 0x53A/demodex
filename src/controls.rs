@@ -19,7 +19,7 @@ pub fn start_settings(settings: &Value) -> Value {
     )
 }
 
-fn validate_model(choice: &ModelChoice, catalog: &[Value]) -> Result<Value> {
+pub(crate) fn validate_model(choice: &ModelChoice, catalog: &[Value]) -> Result<Value> {
     let model = catalog
         .iter()
         .find(|m| m["model"] == choice.model)
@@ -39,6 +39,36 @@ fn validate_model(choice: &ModelChoice, catalog: &[Value]) -> Result<Value> {
         );
     }
     Ok(json!({"model":choice.model,"effort":choice.effort,"serviceTier":choice.service_tier}))
+}
+
+pub(crate) async fn model_catalog(rpc: &crate::rpc::Rpc) -> Result<Value> {
+    let mut models = Vec::new();
+    let mut cursor = Value::Null;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let result = rpc
+            .call(
+                "model/list",
+                json!({"cursor":cursor,"limit":100,"includeHidden":false}),
+            )
+            .await?;
+        models.extend(
+            result["data"]
+                .as_array()
+                .context("model/list returned no model catalog")?
+                .iter()
+                .cloned(),
+        );
+        cursor = result["nextCursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+        ensure!(
+            seen.len() < 100 && seen.insert(cursor.to_string()),
+            "model catalog pagination did not finish"
+        );
+    }
+    Ok(json!({"data":models}))
 }
 
 fn same_model_settings(accepted: &Value, requested: &Value) -> bool {
@@ -109,34 +139,7 @@ impl Manager {
 
     pub async fn model_catalog(&self, id: &str) -> Result<Value> {
         let live = self.runtime(id).await?;
-        let mut models = Vec::new();
-        let mut cursor = Value::Null;
-        let mut seen = std::collections::HashSet::new();
-        loop {
-            let result = live
-                .rpc
-                .call(
-                    "model/list",
-                    json!({"cursor":cursor,"limit":100,"includeHidden":false}),
-                )
-                .await?;
-            models.extend(
-                result["data"]
-                    .as_array()
-                    .context("model/list returned no model catalog")?
-                    .iter()
-                    .cloned(),
-            );
-            cursor = result["nextCursor"].clone();
-            if cursor.is_null() {
-                break;
-            }
-            ensure!(
-                seen.len() < 100 && seen.insert(cursor.to_string()),
-                "model catalog pagination did not finish"
-            );
-        }
-        Ok(json!({"data":models}))
+        model_catalog(&live.rpc).await
     }
 
     pub async fn control_snapshot(&self, id: &str) -> Result<Value> {
@@ -170,8 +173,18 @@ impl Manager {
         Ok(snapshot)
     }
 
+    #[cfg(test)]
     pub async fn change_model(&self, id: &str, choice: ModelChoice) -> Result<Value> {
-        let _settings = self.connecting.lock().await;
+        let settings = self.connecting.lock().await;
+        self.change_model_locked(id, choice, &settings).await
+    }
+
+    pub(crate) async fn change_model_locked(
+        &self,
+        id: &str,
+        choice: ModelChoice,
+        _settings: &tokio::sync::MutexGuard<'_, ()>,
+    ) -> Result<Value> {
         let live = self.runtime(id).await?;
         Self::require_idle(&live).await?;
         let catalog = self.model_catalog(id).await?;

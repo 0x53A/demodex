@@ -8,6 +8,24 @@ use serde::{Deserialize, Serialize};
 pub struct CodexRecord(pub serde_json::Value);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ModelPromptOverride {
+    pub text: String,
+    pub reviewed_default: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PromptSettings {
+    pub models: std::collections::BTreeMap<String, ModelPromptOverride>,
+    pub append: String,
+    pub integration: Option<ModelPromptOverride>,
+    pub include_project: bool,
+}
+impl Default for PromptSettings {
+    fn default() -> Self {
+        Self { models: Default::default(), append: String::new(), integration: None, include_project: true }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Session {
     pub id: String,
     pub name: String,
@@ -109,6 +127,7 @@ macro_rules! serde_wire {
     };
 }
 serde_wire!(CodexRecord);
+serde_wire!(PromptSettings);
 serde_wire!(Response);
 
 impl Response {
@@ -201,7 +220,13 @@ pub enum Operation {
         after: i64,
     },
     Runtime,
+    RuntimeModels,
     DefaultPrompt,
+    PromptSettings,
+    SavePromptSettings { expected_revision: u64, settings: PromptSettings },
+    InstructionFiles { target: Option<Selection> },
+    SessionPromptSettings { id: String },
+    ApplySessionPromptSettings { id: String, include_project: Option<bool> },
     CreateSessionWithPrompt { input: SelectedSession, prompt: String },
     HostSessionWithPrompt { input: HostSession, prompt: String },
     StartRuntime,
@@ -267,6 +292,8 @@ pub enum Operation {
     },
     MessageFiles { id: String, item: String },
     ReadMessageFile { id: String, item: String, destination: String, executor: String },
+    /// Original shared file, encoded as base64.
+    UploadFile { id: String, name: String, data: String },
     UploadImage {
         id: String,
         bytes: Vec<u8>,
@@ -381,6 +408,8 @@ pub struct SelectedSession {
     pub name: String,
     pub targets: Vec<Selection>,
     pub sandbox: Option<Sandbox>,
+    pub include_project: Option<bool>,
+    pub model: Option<ModelChoice>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, WormholeTransmaterializable)]

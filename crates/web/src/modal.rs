@@ -7,10 +7,15 @@ pub struct Props {
     pub title: String,
     #[prop_or_default]
     pub compact: bool,
+    /// Keep navigation and actions stationary while dynamic contents change.
+    #[prop_or_default]
+    pub stable_size: bool,
     #[prop_or_default]
     pub dismiss_outside: bool,
     #[prop_or_default]
     pub icon_close: bool,
+    #[prop_or_default]
+    pub close_disabled: bool,
     pub onclose: Callback<()>,
     pub children: Children,
 }
@@ -33,6 +38,7 @@ impl Component for Modal {
         }
     }
     fn update(&mut self, ctx: &Context<Self>, _: ()) -> bool {
+        if ctx.props().close_disabled { return false; }
         if let Some(dialog) = self.dialog.cast::<HtmlDialogElement>() {
             dialog.close();
         }
@@ -91,7 +97,7 @@ impl Component for Modal {
         });
         let reference = self.dialog.clone();
         let close = ctx.props().onclose.clone();
-        let dismiss = ctx.props().dismiss_outside;
+        let dismiss = ctx.props().dismiss_outside && !ctx.props().close_disabled;
         let outside = Callback::from(move |event: MouseEvent| {
             if !dismiss { return; }
             if let Some(dialog) = reference.cast::<HtmlDialogElement>() {
@@ -103,9 +109,9 @@ impl Component for Modal {
                 if x < r.left() || x > r.right() || y < r.top() || y > r.bottom() { close.emit(()); }
             }
         });
-        html! {<dialog class={classes!("session-modal", ctx.props().compact.then_some("content-sized"))} ref={self.dialog.clone()} aria-label={ctx.props().title.clone()} onkeydown={trap_focus}
+        html! {<dialog class={classes!("session-modal", ctx.props().compact.then_some("content-sized"), ctx.props().stable_size.then_some("stable-sized"))} ref={self.dialog.clone()} aria-label={ctx.props().title.clone()} onkeydown={trap_focus}
             onclick={outside} oncancel={ctx.link().callback(|e:Event|{e.prevent_default();})}>
-            <div class="modal-heading"><h2>{&ctx.props().title}</h2><button type="button" aria-label="Close" autofocus=true onclick={ctx.link().callback(|_|())}>{if ctx.props().icon_close {"×"} else {"Close"}}</button></div>
+            <div class="modal-heading"><h2>{&ctx.props().title}</h2>{if ctx.props().icon_close {html!{<crate::ui::IconButton label="Close" disabled={ctx.props().close_disabled} autofocus=true onclick={ctx.link().callback(|_|())}>{"×"}</crate::ui::IconButton>}}else{html!{<button type="button" disabled={ctx.props().close_disabled} autofocus=true onclick={ctx.link().callback(|_|())}>{"Close"}</button>}}}</div>
             <div class="modal-body">{ctx.props().children.clone()}</div>
         </dialog>}
     }

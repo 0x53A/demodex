@@ -13,9 +13,9 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    process::Command,
+    process::{Child, Command},
     sync::{Mutex, mpsc},
     task::JoinHandle,
 };
@@ -129,19 +129,24 @@ impl Config {
             .kill_on_drop(true);
         c
     }
-    fn command(&self, script: &str) -> Command {
+    fn command(&self) -> Command {
         let mut command = self.transport();
         command
             .arg("--")
             .arg(&self.destination)
-            .arg(format!("exec sh -c {}", quote(script)));
-        command.stdin(Stdio::null());
+            .arg(REMOTE_SCRIPT_LAUNCHER);
         command
     }
     async fn output(&self, script: &str) -> Result<Vec<u8>> {
-        let output = tokio::time::timeout(Duration::from_secs(20), self.command(script).output())
-            .await
-            .context("SSH check timed out")??;
+        let output = tokio::time::timeout(Duration::from_secs(20), async {
+            spawn_script(self.command(), script)
+                .await?
+                .wait_with_output()
+                .await
+                .map_err(anyhow::Error::from)
+        })
+        .await
+        .context("SSH check timed out")??;
         ensure!(
             output.status.success(),
             "SSH failed: {}",
@@ -183,6 +188,25 @@ impl Config {
             json!({"boot":parts[3].trim(),"info":{"shell":{"name":parts[2].rsplit('/').next().unwrap_or("sh"),"path":parts[2]},"cwd":sftp::path_uri(parts[0]),"userHomeDir":sftp::path_uri(parts[1]),"platformOs":"linux","tempDir":"file:///tmp","temporaryDirectories":["file:///tmp"],"capabilities":{}}}),
         )
     }
+}
+
+// sshd passes its command through the account's login shell, which may be fish.
+// Keep that command constant: POSIX quoting of arbitrary scripts is not portable
+// to fish, and a login-shell parse error can print the command (including secrets).
+// Read the script completely before executing it so child commands receive EOF,
+// never the remaining script as their stdin. The protocol does not expose stdin.
+const REMOTE_SCRIPT_LAUNCHER: &str =
+    r#"exec sh -c 'demodex_script=$(cat) || exit; exec sh -c "$demodex_script"'"#;
+
+async fn spawn_script(mut command: Command, script: &str) -> Result<Child> {
+    let mut child = command.stdin(Stdio::piped()).spawn()?;
+    let mut stdin = child.stdin.take().context("Missing SSH script input")?;
+    stdin
+        .write_all(script.as_bytes())
+        .await
+        .context("SSH script transfer failed; remote outcome unknown")?;
+    drop(stdin);
+    Ok(child)
 }
 
 // Codex recognizes bash, zsh and sh on Linux, but not login shells such as fish.
@@ -274,7 +298,8 @@ impl Engine {
         );
         Ok(())
     }
-    pub async fn upload(&self, cwd: &str, bytes: &[u8], extension: &str) -> Result<String> {
+    pub async fn upload_file(&self, cwd: &str, bytes: &[u8], name: &str) -> Result<String> {
+        crate::uploads::validate_name(name)?;
         self.check_directory(cwd).await?;
         tokio::time::timeout(Duration::from_secs(45), async {
             let mut files = sftp::Sftp::connect(&self.backend.config).await?;
@@ -284,7 +309,7 @@ impl Engine {
                 uuid::Uuid::new_v4()
             );
             files.mkdir(&directory, 0o700).await?;
-            let path = format!("{directory}/image.{extension}");
+            let path = format!("{directory}/{name}");
             files.write(&path, bytes, true).await?;
             Ok::<_, anyhow::Error>(path)
         })
@@ -555,7 +580,10 @@ impl Backend {
             let mut script=format!("test \"$(cat /proc/sys/kernel/random/boot_id)\" = {} || {{ printf '%s' 'SSH host rebooted; replace the executor' >&2; exit 255; }}; cd {} || exit 255; exec env {}-- ",quote(self.boot.as_str().context("Missing boot identity")?),quote(&cwd),if !p["envPolicy"].is_null(){"-i "}else{""});
             for (key,value) in env {ensure!(!key.is_empty() && !key.contains(['=','\0']) && !value.contains('\0'),"Invalid environment variable");script.push_str(&quote(&format!("{key}={value}")));script.push(' ');}
             for arg in argv{script.push_str(&quote(arg.as_str().unwrap()));script.push(' ');}
-            let mut child=self.config.command(&script).spawn()?;
+            let mut child=tokio::select! {
+                child=spawn_script(self.config.command(),&script)=>child?,
+                _=cancelled.recv()=>bail!("Local SSH cancelled; remote command outcome unknown. Remote termination is best effort"),
+            };
             let mut stdout=child.stdout.take().context("Missing stdout")?;let mut stderr=child.stderr.take().context("Missing stderr")?;
             let mut a=[0;16384];let mut b=[0;16384];let mut open_a=true;let mut open_b=true;
             while open_a || open_b {tokio::select!{
@@ -771,6 +799,51 @@ fn fingerprint(value: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn script_transport_preserves_literals_and_stdin_across_login_shells() -> Result<()> {
+        let literal = "private sentinel: \\n \\\\ ' \" $HOME $(false) `false` | ;\nü";
+        // Exceed a pipe buffer so the test also exercises complete script transfer.
+        let large = "x".repeat(96 * 1024);
+        let script = format!(
+            "# {large}\nVALUE={}; export VALUE; printf '%s' \"$VALUE\"; cat; printf diagnostic >&2; exit 7",
+            quote(literal),
+        );
+        for shell in ["sh", "bash", "fish", "zsh"] {
+            if std::process::Command::new(shell)
+                .arg("--version")
+                .output()
+                .is_err()
+            {
+                assert_ne!(shell, "sh", "sh is required");
+                continue;
+            }
+            let mut command = Command::new(shell);
+            command
+                .arg("-c")
+                .arg(REMOTE_SCRIPT_LAUNCHER)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(10), async {
+                spawn_script(command, &script)
+                    .await?
+                    .wait_with_output()
+                    .await
+                    .map_err(anyhow::Error::from)
+            })
+            .await??;
+            assert_eq!(
+                output.status.code(),
+                Some(7),
+                "{shell}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stdout, literal.as_bytes(), "{shell}");
+            assert_eq!(output.stderr, b"diagnostic", "{shell}");
+        }
+        Ok(())
+    }
+
     #[test]
     fn registry_survives_restart_and_rejects_unsafe_configuration() -> Result<()> {
         let dir = tempfile::tempdir()?;

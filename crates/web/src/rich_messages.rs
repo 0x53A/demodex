@@ -301,7 +301,7 @@ fn nodes<'a>(
                     Tag::Link { dest_url, .. } => {
                         if let Some((index, link)) = links.iter().enumerate().find(|(_,link)| link.destination == dest_url.as_ref()) {
                             let chosen=link.clone(); let open=open.clone();
-                            html!{<button type="button" class="message-link markdown-link" onclick={Callback::from(move |_|open.emit(chosen.clone()))}><span aria-hidden="true">{format!("{} {} ",crate::links::icon(&link.kind),index+1)}</span>{for children}</button>}
+                            html!{<button type="button" class="message-link markdown-link" title={link.destination.clone()} onclick={Callback::from(move |_|open.emit(chosen.clone()))}><span aria-hidden="true">{format!("{} {} ",crate::links::icon(&link.kind),index+1)}</span>{for children}</button>}
                         } else { html!{<span class="markdown-link">{for children}</span>} }
                     },
                     Tag::Image { .. } => {

@@ -209,8 +209,8 @@ impl Component for Notifications {
             && self.remote["enabled"] == true
             && self.local["permission"] == "granted";
         let available = self.local["supported"] == true;
-        html! {<section class="runtime-panel push-settings" aria-label="Push notifications">
-            <crate::ui::SectionTitle>{"Push notifications"}</crate::ui::SectionTitle>
+        html! {<crate::ui::Group class="runtime-panel push-settings" label="Push notifications" title="Push notifications">
+
             <p class="muted">{if has_binding{format!("This installation: {}",self.local["binding"]["server_url"].as_str().unwrap_or("unknown server"))}else{"Push is off on this installation.".into()}}</p>
             {if !available && !self.busy {html!{<p class="control-warning">{"Push is unavailable here. On iPhone or iPad, install Demodex on the Home Screen first."}</p>}}else{Html::default()}}
             {if self.local["permission"]=="denied" {html!{<p class="control-warning">{"Notifications are blocked in browser or device settings."}</p>}}else{Html::default()}}
@@ -223,7 +223,7 @@ impl Component for Notifications {
             </div>
             {if !self.message.is_empty(){html!{<p role="status">{&self.message}</p>}}else{Html::default()}}
             <p class="muted">{"Agents can send notifications explicitly; every notification remains in chat. Agent notifications require a newly created Codex thread."}</p>
-        </section>}
+        </crate::ui::Group>}
     }
 }
 async fn command(client: &Client, operation: Operation) -> Result<Value, String> {

@@ -48,6 +48,40 @@ Exact transport dependency versions constrain consumers with separate lockfiles.
 
 ## Library and native clients
 
+Protocol v33 also adds a paginated RuntimeModels read and an optional validated
+model, reasoning effort and service tier to managed-session creation. The choice
+is persisted before `thread/start` so prompt-layer composition uses the selected
+model. Deploy matching daemon and clients.
+New Session defaults to inheriting the runtime profile's model, reasoning effort
+and service tier; choosing a model explicitly enables individual settings.
+Prompt reconnects hold lifecycle and session-settings locks through idle checks,
+unsubscribe and resume. Effort/tier-only and no-op model updates do not reconnect.
+
+Protocol v32 adds server prompt layers: per-model replacements, an appendix shared
+by all models, and an editable Demodex integration layer. Settings live in SQLite,
+use revision-checked mutation receipts, and never modify the Codex profile. Model
+lists are paginated from the runtime; default text comes from its current catalogue
+cache or bundled catalogue. Diffs use the latest fetched defaults; saved baseline
+fingerprints retain change notices until an override is reviewed and saved.
+Profile instruction overrides are shown separately from the model's default.
+New managed sessions and explicit reconnects resolve the current layers. Applying
+from Session controls requires idle state, no pending decisions, queue, active goal
+or background terminals; it unsubscribes before reconnecting, never starts a turn,
+and reports empty-thread resume failures without replacing the thread. Model changes
+reconnect when managed prompt layers apply. Legacy complete session overrides remain
+until explicitly replaced through Apply prompts. Project-file inclusion is a server
+default with per-session overrides; global AGENTS.md inclusion has no independent
+Codex API switch and is shown as unavailable. File previews use the selected executor
+with no host fallback, are read-only, and are bounded to 256 KiB per file, 32 project
+files / 1 MiB and 15 seconds. Previews describe current discovery; connection-time
+instruction source paths reported by Codex are displayed separately. Deploy matching
+daemon and clients; receipt encoding remains v16. Run `uv run tests/prompt_settings.py`
+for disposable real-Codex and browser checks without inference. `DEMODEX_WEB` selects
+an isolated frontend build for that suite.
+
+Protocol v31 adds reported credit balances to Runtime.weekly_usage for the usage
+popup. Deploy matching daemon and clients; receipt encoding remains v16.
+
 Protocol v30 adds scoped Session and Runtime change notices. Session content notices
 invalidate only the selected session's event cursor; state notices also refresh
 session summaries and the matching detail. Periodic runtime notices refresh runtime
@@ -114,7 +148,7 @@ Blank managed-session names become "Untitled session". Deploy matching daemon
 and clients together; receipt encoding remains v16.
 New Session can stage a private SSH executor: Create and SSH attachment are
 separate receipted operations, never retried automatically. A failed attachment
-leaves the created session and SSH draft available in Session controls.
+leaves the created session without the SSH attachment; failed SSH form data is discarded.
 Server Settings also exposes explicit shared SSH registration.
 
 Protocol v21 added server-wide Codex feature overrides and explicit runtime restart
@@ -286,8 +320,10 @@ Legacy shared SSH targets remain available to existing sessions; SSH targets cre
 The adapter runs locally and speaks the Codex executor protocol. Foreground
 commands use standard OpenSSH; file operations use the server's existing SFTP v3
 subsystem. No Python, remote helper executable or custom server is installed.
-Linux, a POSIX-compatible login shell, sh, env (including `env -0`) and cat are
-required remotely. Credentials and known_hosts belong to the daemon user.
+Linux, a POSIX-compatible or fish login shell, sh, env (including `env -0`) and
+cat are required remotely. Scripts travel over SSH stdin to a fixed launcher;
+the login shell never parses command or environment values. Command stdin remains
+EOF. Credentials and known_hosts belong to the daemon user.
 Host-key verification and batch authentication are mandatory. The app-server
 must share the daemon's network namespace. The adapter rejects browser Origins
 and checks the connecting socket's Linux UID.
@@ -567,3 +603,29 @@ modal stay within bounded containers. The drawing itself has no interactive
 content; its enclosing button opens the larger preview. Preserve source controls,
 keyboard accessibility and modal close/outside-click behavior. Native tests live
 in svg.rs; rich-message browser checks cover actual SVG namespaces and preview UI.
+
+## System share intake (protocol v33)
+
+The installed PWA declares one share target for text, URLs and original files.
+Its service worker handles share POSTs locally, staging input in scope-local
+IndexedDB for at most 24 hours (expired records are removed on access). This is
+a bounded inbound inbox, separate from the static-only Cache Storage and with
+no credentials or conversation history. Selection shows New session and connected,
+non-archived sessions on the current server. Sharing appends to a draft, never
+submits a turn. New-session cancellation retains the incoming share.
+
+UploadFile is an authenticated, receipted Wormhole operation. Preserve bytes and
+original safe basenames, including HEIC; no image decoding or conversion. The
+selected executor receives private files; unsupported targets fail without host
+fallback. Base64 payloads are limited to 32 MiB decoded per file, matching SFTP;
+the browser warns above 4 MiB and bounds intake to 10 files/64 MiB per share,
+128 MiB/10 pending shares total. Receipts retain filename/digest/path, not bytes.
+The existing UploadImage contract remains unchanged. Protocol v33 requires
+matching daemon and clients; durable response receipt encoding remains v16.
+Uploads record request IDs before execution and are never replayed on reload,
+reconnect or interruption. Confirmed paths and text can be recovered into a draft.
+There is no unauthenticated HTTP upload route.
+Run `uv run tests/share.py` after building the default frontend and
+`uv run tools/build-web.py --public-url /demodex/ --dist web/.share-subpath-dist`.
+The browser fixture exercises real service-worker POSTs; Android OS share-sheet
+registration still requires an installed-device smoke test.

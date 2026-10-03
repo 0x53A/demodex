@@ -1,4 +1,5 @@
 mod background;
+mod prompts;
 mod notifications;
 mod subagents;
 mod controls;

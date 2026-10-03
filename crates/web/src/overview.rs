@@ -144,9 +144,9 @@ fn session_view(
             None=>html!{<small class="muted background-unknown">{"Background terminals unknown"}</small>},
         }}
         </span><span>{if let Some(n)=session["active_subagents"].as_u64().filter(|n|*n>0){html!{<small class="subagent-count" title="Latest subagent activity reported by Codex">{format!("{n} active subagent{}",if n==1{""}else{"s"})}</small>}}else{Html::default()}}</span></span>
-    </button><button type="button" class="session-archive-action" aria-label={label} title={action_title} disabled={disabled||unavailable} onclick={Callback::from(move |_|run.emit(Operation::Archive{id:archive_id.clone(),archived:!archived}))}>{if archived {"Restore"} else {"×"}}</button>
-    <button type="button" class={classes!("session-star-action",starred.then_some("starred"))} aria-label={format!("{} {}",if starred {"Unstar"}else{"Star"},title(session))} aria-pressed={starred.to_string()} title={if starred {"Unstar session"}else{"Star session"}} disabled={disabled} onclick={Callback::from(move |_|star_run.emit(Operation::StarSession{id:star_id.clone(),starred:!starred}))}>{if starred {"★"}else{"☆"}}</button>
-    <button type="button" class="session-edit-action" aria-label={format!("Edit {}",title(session))} title="Session controls" onclick={Callback::from(move |_|edit.emit(edit_id.clone()))}>{"✎"}</button>
+    </button><crate::ui::IconButton class="session-archive-action" label={label} title={action_title} disabled={disabled||unavailable} onclick={Callback::from(move |_|run.emit(Operation::Archive{id:archive_id.clone(),archived:!archived}))} destructive={!archived}>{if archived {"↶"} else {"×"}}</crate::ui::IconButton>
+    <crate::ui::IconButton class={classes!("session-star-action",starred.then_some("starred"))} label={format!("{} {}",if starred {"Unstar"}else{"Star"},title(session))} pressed={starred.to_string()} title={if starred {"Unstar session"}else{"Star session"}} disabled={disabled} onclick={Callback::from(move |_|star_run.emit(Operation::StarSession{id:star_id.clone(),starred:!starred}))}>{if starred {"★"}else{"☆"}}</crate::ui::IconButton>
+    <crate::ui::IconButton class="session-edit-action" label={format!("Edit {}",title(session))} title="Session controls" onclick={Callback::from(move |_|edit.emit(edit_id.clone()))}>{"✎"}</crate::ui::IconButton>
     {handle}</li>}
 }
 
@@ -158,6 +158,7 @@ fn folder_view(
     select: &Callback<String>,
     edit: &Callback<String>,
     run: &Callback<Operation>,
+    create: &Callback<MouseEvent>,
     disabled: bool,
     reorder_mode: bool,
 ) -> Html {
@@ -171,8 +172,9 @@ fn folder_view(
         folder = next;
     }
     html! {<li class="tree-folder"><div class="folder-name"><span aria-hidden="true">{"▱ "}</span>{name}</div><ul>
+        {if !folder.sessions.is_empty(){html!{<li class="folder-add-session"><crate::ui::AddButton onclick={create.clone()} {disabled}>{"+ Session"}</crate::ui::AddButton></li>}}else{Html::default()}}
         {for folder.sessions.iter().map(|s|session_view(s,&folder.sessions,environments,selected,select,edit,run,disabled,reorder_mode))}
-        {for folder.children.iter().map(|(name,child)|folder_view(name.clone(),child,environments,selected,select,edit,run,disabled,reorder_mode))}
+        {for folder.children.iter().map(|(name,child)|folder_view(name.clone(),child,environments,selected,select,edit,run,create,disabled,reorder_mode))}
     </ul></li>}
 }
 
@@ -185,10 +187,23 @@ pub fn view(
     run: Callback<Operation>,
     disabled: bool,
     reorder_mode: bool,
+    flat: bool,
+    create: Callback<MouseEvent>,
 ) -> Html {
     let tree = forest(sessions);
+    if flat {
+        let mut ordered=sessions.to_vec();
+        ordered.sort_by_key(|s|(s["starred"]!=true,s["sort_order"].as_i64().unwrap_or(0)));
+        return html!{<nav class="session-tree session-list" aria-label="Sessions as list"><ul>
+            {for ordered.iter().map(|session|{
+                let path=locations(session).first().map(|(_,path,_)|path.clone());
+                let peers=ordered.iter().filter(|other|locations(other).first().map(|(_,path,_)|path.clone())==path).cloned().collect::<Vec<_>>();
+                session_view(session,&peers,environments,selected,&select,&edit,&run,disabled,reorder_mode)
+            })}
+        </ul>{if sessions.is_empty(){html!{<p class="muted">{"No sessions on this server yet. Choose New Session to start one."}</p>}}else{Html::default()}}</nav>};
+    }
     html! {<nav class="session-tree" aria-label="Sessions by project">
-        {if sessions.is_empty(){html!{<p class="muted">{"No sessions on this server yet. Choose New Session to start one."}</p>}}else{html!{<ul>{folder_view("/".into(),&tree,environments,selected,&select,&edit,&run,disabled,reorder_mode)}</ul>}}}
+        {if sessions.is_empty(){html!{<p class="muted">{"No sessions on this server yet. Choose New Session to start one."}</p>}}else{html!{<ul>{folder_view("/".into(),&tree,environments,selected,&select,&edit,&run,&create,disabled,reorder_mode)}</ul>}}}
     </nav>}
 }
 

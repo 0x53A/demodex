@@ -61,7 +61,7 @@ impl Server {
                 _ = async {
                 if let Ok(stream) = upgraded.await {
                     let socket = WebSocketStream::from_raw_socket(TokioIo::new(stream), Role::Server,
-                        Some(WebSocketConfig::default().max_message_size(Some(8 * 1024 * 1024)))).await;
+                        Some(WebSocketConfig::default().max_message_size(Some(48 * 1024 * 1024)).max_frame_size(Some(48 * 1024 * 1024)))).await;
                     if let Err(error) = endpoint.connect(socket, identity).await {
                         tracing::debug!("Wormhole connection ended: {error:#}");
                     }

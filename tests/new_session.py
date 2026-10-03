@@ -32,14 +32,16 @@ if '--fixture' in sys.argv:
                     log.write(json.dumps(request) + '\n')
                 method, params = request['method'], request.get('params', {})
                 result = {}
-                if method == 'account/read': result = {'account': {'type': 'chatgpt', 'email': 'fixture@example.test', 'planType': 'pro'}}
+                if method == 'account/read': result = {'account': None if Path(os.environ['DEMODEX_FIXTURE_CWD'], 'signed-out').exists() else {'type': 'chatgpt', 'email': 'fixture@example.test', 'planType': 'pro'}}
+                elif method == 'account/login/start': result = {'type':'chatgptDeviceCode','verificationUrl':'https://example.test/device','userCode':'TEST-CODE'}
                 elif method == 'config/read': result = {'config': {}}
                 elif method == 'experimentalFeature/list': result = {'data':[{'name':f'fixture_feature_{n}','stage':'experimental','enabled':False,'description':'A short feature description.'} for n in range(30)],'nextCursor':None}
                 elif method in ('thread/start', 'thread/resume'):
+                    if Path(os.environ['DEMODEX_FIXTURE_CWD'], 'delay-create').exists(): time.sleep(1)
                     result = {'thread': {'id': params.get('threadId', str(uuid.uuid4())), 'turns': []}, 'sandbox': {'type': 'dangerFullAccess' if params.get('sandbox') == 'danger-full-access' else 'readOnly'}}
                 elif method == 'thread/read': result = {'thread': {'id':params['threadId'],'name':'Saved Codex title','cwd':os.environ['DEMODEX_FIXTURE_CWD'],'status': {'type': 'idle'}}}
                 elif method == 'thread/goal/get': result = {'goal': None}
-                elif method == 'account/rateLimits/read': result = {'rateLimits': {'limitId':'codex','primary':{'usedPercent':20,'windowDurationMins':300,'resetsAt':int(time.time())+3600},'secondary':{'usedPercent':30,'windowDurationMins':10080,'resetsAt':int(time.time())+93780}}}
+                elif method == 'account/rateLimits/read': result = {'rateLimits': {'limitId':'codex','credits':{'hasCredits':True,'unlimited':False,'balance':'12.50'},'primary':{'usedPercent':20,'windowDurationMins':300,'resetsAt':int(time.time())+3600},'secondary':{'usedPercent':30,'windowDurationMins':10080,'resetsAt':int(time.time())+93780}}}
                 elif method == 'thread/list':
                     assert not params.get('searchTerm'), params
                     page = int(params.get('cursor') or 0)
@@ -49,8 +51,9 @@ if '--fixture' in sys.argv:
                               [{'id':'aBcD-5678','name':'Late CaSeSensitive title','preview':'A searchable snippet'}] if page == 11 else
                               [{'id':f'unrelated-{page}','name':'Unrelated'}],
                               'nextCursor':str(page+1) if page < 11 else None}
-                elif method == 'thread/backgroundTerminals/list': result = {'data':[{'processId':'p1','itemId':'i1','command':'sleep 60','cwd':'/remote/project'}],'nextCursor':None}
-                elif method in ('thread/queue/list', 'model/list'): result = {'data': [], 'nextCursor': None}
+                elif method == 'thread/backgroundTerminals/list': result = {'data':[] if Path(os.environ['DEMODEX_FIXTURE_CWD'], 'no-background').exists() else [{'processId':'p1','itemId':'i1','command':'sleep 60','cwd':'/remote/project'}],'nextCursor':None}
+                elif method == 'model/list': result = {'data':[{'id':'fixture','model':'fixture','displayName':'Fixture model','defaultReasoningEffort':'high','supportedReasoningEfforts':[{'reasoningEffort':'high'}],'serviceTiers':[{'id':'priority','name':'Priority'}]}], 'nextCursor':None}
+                elif method == 'thread/queue/list': result = {'data': [], 'nextCursor': None}
                 ws.send(json.dumps({'id': request['id'], 'result': result}))
         except ConnectionClosed: pass
     with unix_serve(handle, endpoint) as server: server.serve_forever()
@@ -109,6 +112,8 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
             expect(page.locator('.weekly-usage summary')).to_contain_text('Weekly: 70% remaining')
             page.locator('.weekly-usage summary').click()
             expect(page.locator('.weekly-details')).to_contain_text('5h · 80% remaining')
+            expect(page.locator('.weekly-details')).to_contain_text('Reset:')
+            expect(page.locator('.usage-credits')).to_contain_text('12.50 credits remaining')
             page.locator('.weekly-usage summary').click()
             page.get_by_role('button',name='Server settings',exact=True).click()
             settings=page.get_by_role('dialog',name='Server settings',exact=True)
@@ -125,11 +130,30 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
             expect(page.get_by_label('SSH destination',exact=True)).to_be_visible()
             page.get_by_role('dialog',name='Add SSH executor',exact=True).get_by_role('button',name='Close',exact=True).click()
 
+            for opener,title,fields in [
+                ('+ Add SSH executor','Add SSH executor', [('SSH executor name','Cancelled'),('SSH destination','cancelled@host'),('Remote working directory','/cancelled')]),
+                ('+ Register external executor','Register external executor', [('Executor name','Cancelled'),('Executor WebSocket URL','ws://cancelled:1234'),('Default working directory','/cancelled')]),
+                ('+ Create VM','New VM', [('Environment name','Cancelled'),('Memory (MiB)','8192'),('CPUs','4')]),
+                ('+ Create container','New container', [('Container name','Cancelled'),('Local container image','cancelled:latest'),('Container memory (MiB)','8192'),('Container CPUs','4')]),
+            ]:
+                settings.get_by_role('button',name=opener,exact=True).click()
+                editor=page.get_by_role('dialog',name=title,exact=True)
+                for label,value in fields: editor.get_by_label(label,exact=True).fill(value)
+                editor.get_by_role('button',name='Close',exact=True).click()
+                settings.get_by_role('button',name=opener,exact=True).click()
+                for label,_ in fields: expect(editor.get_by_label(label,exact=True)).to_have_value('')
+                editor.get_by_role('button',name='Close',exact=True).click()
+
             expect(page.locator('main').get_by_role('button',name='Create session',exact=True)).to_have_count(0)
             page.get_by_role('button',name='+ Create VM',exact=True).click()
             expect(page.get_by_label('Environment name',exact=True)).to_be_visible()
             page.get_by_label('Memory (MiB)',exact=True).fill('12')
             assert not page.get_by_label('Memory (MiB)',exact=True).evaluate('e=>e.checkValidity()')
+            vm_popup=page.get_by_role('dialog',name='New VM',exact=True)
+            vm_popup.get_by_label('Environment name',exact=True).fill('Validation fixture')
+            vm_popup.get_by_role('button',name='Create and start',exact=True).click()
+            expect(vm_popup.get_by_label('Memory (MiB)',exact=True)).to_be_focused()
+            expect(vm_popup.locator('.field-error')).to_be_visible()
             page.get_by_label('Memory (MiB)',exact=True).fill('4096')
             page.get_by_role('dialog',name='New VM',exact=True).get_by_role('button',name='Close',exact=True).click()
             for width,height,label in [(1200,850,'desktop'),(390,844,'mobile')]:
@@ -145,15 +169,41 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
             page.get_by_role('dialog',name='Server settings',exact=True).get_by_role('button',name='Close',exact=True).click()
             page.get_by_role('button',name='+ New Session',exact=True).click()
             dialog=page.get_by_role('dialog',name='New Session',exact=True)
+            page.set_viewport_size({'width':390,'height':540})
+            footer=dialog.locator('.form-actions').first
+            submit=dialog.get_by_role('button',name='Create session',exact=True)
+            assert submit.bounding_box()['y']+submit.bounding_box()['height'] <= 540
+            before=footer.bounding_box()
+            dialog.locator('.form-fields').first.evaluate('e=>e.scrollTop=e.scrollHeight')
+            assert footer.bounding_box()==before
+            dialog.locator('.form-fields').first.evaluate('e=>e.scrollTop=0')
+            page.set_viewport_size({'width':1200,'height':850})
             dialog.get_by_label('This host · host',exact=True).click()
             expect(dialog.get_by_label('This host · host',exact=True)).to_be_checked()
+            expect(dialog.get_by_role('button',name='🔍 Search sessions',exact=True)).to_have_count(0)
+            host_group=dialog.locator('.creation-target').filter(has=page.get_by_label('This host · host',exact=True))
+            expect(host_group.get_by_label('This host (primary) working directory',exact=True)).to_be_visible()
+            expect(host_group.get_by_role('button',name='Remove',exact=False)).to_have_count(0)
             dialog.get_by_role('button',name='Browse…',exact=True).click()
             directory=page.get_by_role('dialog',name='Choose working directory',exact=True)
             entry=directory.get_by_role('button',name='picker 🦆',exact=True)
             entry.hover()
             assert entry.evaluate('e=>{const s=getComputedStyle(e);return [s.borderTopColor,s.borderRightColor,s.borderBottomColor,s.borderLeftColor].every(c=>c==="rgb(255, 121, 47)")}')
+            before=directory.bounding_box()
+            navigation=directory.locator('.directory-navigation').bounding_box()
+            choose=directory.get_by_role('button',name='Use this directory',exact=True).bounding_box()
             entry.click()
             expect(directory.get_by_label('Directory path',exact=True)).to_have_value(str(root/'picker 🦆'))
+            expect(directory.get_by_role('button',name='child',exact=True)).to_be_visible()
+            assert directory.bounding_box()==before
+            assert directory.locator('.directory-navigation').bounding_box()==navigation
+            assert directory.get_by_role('button',name='Use this directory',exact=True).bounding_box()==choose
+            directory.get_by_role('button',name='child',exact=True).click()
+            expect(directory.get_by_text('No subdirectories',exact=True)).to_be_visible()
+            assert directory.bounding_box()==before
+            assert directory.get_by_role('button',name='Use this directory',exact=True).bounding_box()==choose
+            directory.get_by_role('button',name='Up',exact=True).click()
+            expect(directory.get_by_role('button',name='child',exact=True)).to_be_visible()
             page.screenshot(path=str(ROOT/'target'/'directory-picker.png'))
             directory.get_by_role('button',name='Use this directory',exact=True).click()
             expect(dialog.get_by_label('This host (primary) working directory',exact=True)).to_have_value(str(root/'picker 🦆'))
@@ -172,9 +222,23 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
             expect(dialog.get_by_label('This host · host',exact=True)).not_to_be_checked()
             dialog.get_by_label('Build machine (primary) working directory',exact=True).fill('/remote/project')
             dialog.get_by_label('Sandbox',exact=True).select_option('read-only')
+            expect(dialog.get_by_label('Model',exact=True)).to_have_value('')
+            expect(dialog.get_by_label('Reasoning effort',exact=True)).to_be_disabled()
+            expect(dialog.get_by_label('Service tier',exact=True)).to_be_disabled()
+            dialog.get_by_label('Model',exact=True).select_option('fixture')
+            expect(dialog.get_by_label('Reasoning effort',exact=True)).to_have_value('high')
+            dialog.get_by_label('Service tier',exact=True).select_option('priority')
             dialog.get_by_label('Resume existing session',exact=True).click()
             expect(dialog.get_by_label('Existing Codex thread ID',exact=True)).to_have_value('')
-            expect(dialog.get_by_role('button',name='Resume session',exact=True)).to_be_disabled()
+            expect(dialog.get_by_role('button',name='Resume session',exact=True)).to_be_enabled()
+            dialog.get_by_role('button',name='Resume session',exact=True).click()
+            expect(dialog.get_by_label('Existing Codex thread ID',exact=True)).to_be_focused()
+            expect(dialog.get_by_label('Existing Codex thread ID',exact=True)).to_have_attribute('aria-invalid','true')
+            expect(dialog.locator('.field-error')).to_contain_text('required')
+            page.set_viewport_size({'width':1920,'height':1080})
+            assert dialog.locator('.modal-body').evaluate('e=>e.scrollHeight<=e.clientHeight+1')
+            assert dialog.locator('.resume-actions').evaluate('e=>{const a=e.querySelector("label").getBoundingClientRect(),b=e.querySelector("button").getBoundingClientRect();return b.left>=a.right && b.top<a.bottom}')
+            page.set_viewport_size({'width':1200,'height':850})
             dialog.get_by_label('Existing Codex thread ID',exact=True).fill('discard-this-draft')
             dialog.get_by_label('Resume existing session',exact=True).uncheck()
             dialog.get_by_label('Resume existing session',exact=True).check()
@@ -207,6 +271,12 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
             expect(picker).to_have_count(0)
             expect(dialog.get_by_label('Existing Codex thread ID',exact=True)).to_have_value('saved-thread')
             expect(dialog.get_by_label('Working directory (optional)',exact=True)).to_have_value('/previous/project')
+            dialog.get_by_role('button',name='🔍 Search sessions',exact=True).click()
+            expect(picker.get_by_label('Search saved sessions',exact=True)).to_have_value('')
+            picker.get_by_label('Search saved sessions',exact=True).fill('discard query')
+            picker.get_by_role('button',name='Close',exact=True).click()
+            expect(dialog.get_by_label('Existing Codex thread ID',exact=True)).to_have_value('saved-thread')
+
             expect(dialog.get_by_label('Session name (optional)',exact=True)).to_have_value('Saved project')
             for width,height,label in [(1200,850,'desktop'),(390,844,'mobile')]:
                 page.set_viewport_size({'width':width,'height':height})
@@ -232,11 +302,44 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
             assert detail['target_selection']==[{'id':target_id,'cwd':'/remote/project'}], detail
             assert len(session['targets'])==1 and not session['targets'][0]['id'].startswith('host-'),session
             assert not detail['targets_pending']
+            starts=[c for c in map(json.loads,(root/'calls.jsonl').read_text().splitlines()) if c['method']=='thread/start' and c['params'].get('model')=='fixture']
+            assert starts and starts[-1]['params']['config']['model_reasoning_effort']=='high',starts
+            assert starts[-1]['params']['serviceTier']=='priority',starts[-1]
             page.get_by_label('Message',exact=True).fill('Unsent conversation draft')
             expect(page.locator('aside .background-count').first).to_contain_text('1 background terminal running')
             expect(page.locator('.jump-latest')).to_have_count(0)
             page.get_by_role('button',name='Session controls',exact=True).click()
             rename_controls = page.get_by_role('dialog',name='Session controls',exact=True)
+            accepted_name=rename_controls.get_by_label('Name in Demodex',exact=True).input_value()
+            accepted_sandbox=rename_controls.get_by_label('Session sandbox',exact=True).input_value()
+            expect(rename_controls.get_by_label('Model',exact=True)).to_be_enabled()
+            accepted_model=rename_controls.get_by_label('Model',exact=True).input_value()
+            rename_controls.get_by_label('Model',exact=True).select_option('fixture')
+            rename_controls.get_by_label('Service tier',exact=True).select_option('priority')
+            rename_controls.get_by_label('Build machine (primary) working directory',exact=True).fill('/cancelled')
+            rename_controls.get_by_label('Name in Demodex',exact=True).fill('Cancelled rename')
+            rename_controls.get_by_label('Goal objective',exact=True).fill('Cancelled goal')
+            rename_controls.get_by_label('Token budget (optional)',exact=True).fill('999')
+            rename_controls.get_by_label('Session sandbox',exact=True).select_option('workspace-write')
+            rename_controls.get_by_role('button',name='+ Add SSH executor to this session',exact=True).click()
+            editor=page.get_by_role('dialog',name='Add session SSH executor',exact=True)
+            editor.get_by_label('SSH destination',exact=True).fill('cancelled@host')
+            editor.get_by_role('button',name='Close',exact=True).click()
+            expect(rename_controls.get_by_label('Name in Demodex',exact=True)).to_have_value('Cancelled rename')
+            rename_controls.get_by_role('button',name='Close',exact=True).click()
+            page.get_by_role('button',name='Session controls',exact=True).click()
+            expect(rename_controls.get_by_label('Model',exact=True)).to_be_enabled()
+            expect(rename_controls.get_by_label('Model',exact=True)).to_have_value(accepted_model)
+            expect(rename_controls.get_by_label('Service tier',exact=True)).to_have_value('')
+            expect(rename_controls.get_by_label('Build machine (primary) working directory',exact=True)).to_have_value('/remote/project')
+            expect(rename_controls.get_by_label('Name in Demodex',exact=True)).to_have_value(accepted_name)
+            expect(rename_controls.get_by_label('Goal objective',exact=True)).to_have_value('')
+            expect(rename_controls.get_by_label('Token budget (optional)',exact=True)).to_have_value('')
+            expect(rename_controls.get_by_label('Session sandbox',exact=True)).to_have_value(accepted_sandbox)
+            rename_controls.get_by_role('button',name='+ Add SSH executor to this session',exact=True).click()
+            expect(editor.get_by_label('SSH destination',exact=True)).to_have_value('')
+            editor.get_by_role('button',name='Close',exact=True).click()
+
             old_name = rename_controls.get_by_label('Name in Demodex',exact=True).input_value()
             rename_controls.get_by_label('Name in Demodex',exact=True).fill('Renamed in controls')
             rename_controls.get_by_role('button',name='Rename session',exact=True).click()
@@ -252,6 +355,17 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
             first_card=page.locator(f'[data-session-id="{session["id"]}"]')
             second_card=page.locator(f'[data-session-id="{second["id"]}"]')
             expect(second_card).to_be_visible()
+            toggle=page.get_by_role('button',name='List',exact=True)
+            toggle.click()
+            expect(toggle).to_have_attribute('aria-pressed','true')
+            expect(page.locator('aside .folder-name')).to_have_count(0)
+            expect(page.locator('aside .tree-agent')).to_have_count(2)
+            expect(first_card.locator('.session')).to_have_attribute('aria-current','page')
+            page.reload()
+            expect(toggle).to_have_attribute('aria-pressed','true')
+            expect(page.locator('aside .folder-name')).to_have_count(0)
+            page.get_by_role('group',name='Session layout').get_by_role('button',name='Tree',exact=True).click()
+            expect(page.locator('aside .folder-name')).to_have_count(1)
             page.get_by_role('button',name='Reorder',exact=True).click()
             second_card.get_by_role('button',name='Reorder Same folder',exact=True).press('ArrowUp')
             def sibling_order():
@@ -319,15 +433,18 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
                 page.get_by_role('button',name='+ New Session',exact=True).click()
                 dialog.get_by_label('Session name (optional)',exact=True).fill('Keep this draft')
                 dialog.get_by_label('Resume existing session',exact=True).click()
-                expect(dialog.get_by_label('Session name (optional)',exact=True)).to_have_value('Keep resume draft')
+                expect(dialog.get_by_label('Session name (optional)',exact=True)).to_have_value('')
                 expect(dialog.get_by_label('Existing Codex thread ID',exact=True)).to_have_value('')
-                expect(dialog.get_by_role('button',name='Resume session',exact=True)).to_be_disabled()
-                expect(dialog.get_by_label('Resume sandbox',exact=True)).to_have_value('workspace-write')
+                expect(dialog.get_by_role('button',name='Resume session',exact=True)).to_be_enabled()
+                expect(dialog.get_by_label('Resume sandbox',exact=True)).to_have_value('')
                 dialog.get_by_label('Resume existing session',exact=True).uncheck()
                 dialog.press('Escape')
                 expect(dialog).to_have_count(0)
                 page.get_by_role('button',name='+ New Session',exact=True).click()
-                expect(dialog.get_by_label('Session name (optional)',exact=True)).to_have_value('Keep this draft')
+                expect(dialog.get_by_label('Session name (optional)',exact=True)).to_have_value('')
+                expect(dialog.get_by_label('Resume existing session',exact=True)).not_to_be_checked()
+                expect(dialog.get_by_label('Sandbox',exact=True)).to_have_value('')
+                expect(dialog.get_by_label('Build machine · external',exact=True)).not_to_be_checked()
                 dialog.get_by_role('button',name='Close',exact=True).click()
                 assert page.evaluate('document.body.scrollWidth <= innerWidth')
             page.locator('.session').filter(has_text='Remote only').click()
@@ -340,7 +457,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
             empty=next(s for s in api('/sessions') if s['name']=='Untitled session')
             assert empty['targets']==[] and api('/sessions/'+empty['id'])['target_selection']==[]
             # Staged SSH is private, starts only after Create, and failed
-            # attachment leaves exactly one session plus an editable retry form.
+            # attachment leaves exactly one session, with no retained SSH form.
             page.get_by_role('button',name='+ New Session',exact=True).click()
             dialog.get_by_label('Session name (optional)',exact=True).fill('SSH draft')
             dialog.get_by_role('button',name='+ Add SSH',exact=True).click()
@@ -352,12 +469,14 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
             expect(dialog.get_by_role('button',name='Create session',exact=True)).to_be_disabled()
             dialog.get_by_label('Sandbox',exact=True).select_option('danger-full-access')
             dialog.get_by_role('button',name='Create session',exact=True).click()
+            expect(dialog).to_have_count(0)
+            expect(page.locator('.global-error')).to_be_visible()
+            page.get_by_role('button',name='Session controls',exact=True).click()
             controls=page.get_by_role('dialog',name='Session controls',exact=True)
             expect(controls).to_be_visible()
-            expect(controls.get_by_role('alert')).to_be_visible()
             controls.get_by_role('button',name='+ Add SSH executor to this session',exact=True).click()
             ssh_popup=page.get_by_role('dialog',name='Add session SSH executor',exact=True)
-            expect(ssh_popup.get_by_label('SSH destination',exact=True)).to_have_value('-invalid')
+            expect(ssh_popup.get_by_label('SSH destination',exact=True)).to_have_value('')
             ssh_popup.get_by_role('button',name='Close',exact=True).click()
             assert len([s for s in api('/sessions') if s['name']=='SSH draft'])==1
             for width,height,label in [(1200,850,'desktop'),(390,844,'mobile')]:
@@ -381,6 +500,28 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
             }""")
             assert geometry['height']==geometry['filled']==geometry['empty'], geometry
             assert abs(geometry['top'])<1 and abs(geometry['right'])<1, geometry
+            corner=card.locator('.session-archive-action')
+            corner.hover()
+            assert corner.evaluate('e=>{const r=e.getBoundingClientRect();return document.elementFromPoint(r.left+.5,r.top+r.height/2)===e}')
+            new_button=page.get_by_role('button',name='+ New Session',exact=True)
+            normal=new_button.evaluate('e=>getComputedStyle(e).backgroundColor')
+            new_button.hover()
+            assert new_button.evaluate('e=>getComputedStyle(e).backgroundColor')!=normal
+            new_button.click()
+            expect(dialog).to_be_visible()
+            dialog.get_by_role('button',name='Close',exact=True).click()
+            # Restore stays a compact icon with an accessible action name.
+            (root/'no-background').touch()
+            api('/sessions/'+second['id']+'/archive',{'archived':True})
+            archive=page.locator('.archived-sessions')
+            archive.locator('summary').click()
+            restore=archive.locator('.session-archive-action')
+            expect(restore).to_have_text('↶')
+            assert restore.get_attribute('aria-label').startswith('Restore ')
+            assert 'destructive' not in restore.get_attribute('class')
+            assert restore.bounding_box()['width']==corner.bounding_box()['width']
+            restore.click()
+            expect(page.locator('.archived-sessions')).to_have_count(0)
             page.screenshot(path=str(ROOT/'target'/'session-overview.png'))
             assert not errors,errors
             imported_id = str(uuid.uuid4())
@@ -399,10 +540,70 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
                 assert second_page['data'][0]['id'] == 'aBcD-5678' and second_page['nextCursor'] is None, second_page
             first = search('does not exist')
             assert search('does not exist', first['nextCursor']) == {'data':[], 'nextCursor':None}
+            # A late create still completes its submitted SSH attempt, but must
+            # not select its session, refill or close the new opening.
+            page.get_by_role('button',name='+ New Session',exact=True).click()
+            dialog.get_by_label('Session name (optional)',exact=True).fill('Delayed SSH creation')
+            dialog.get_by_role('button',name='+ Add SSH',exact=True).click()
+            staged=page.get_by_role('dialog',name='Add SSH',exact=True)
+            staged.get_by_label('SSH executor name',exact=True).fill('Submitted SSH')
+            staged.get_by_label('SSH destination',exact=True).fill('-invalid')
+            staged.get_by_label('Remote working directory',exact=True).fill('/submitted')
+            staged.get_by_role('button',name='Add to session',exact=True).click()
+            dialog.get_by_role('button',name='+ Add SSH',exact=True).click()
+            expect(staged.get_by_label('SSH destination',exact=True)).to_have_value('')
+            staged.get_by_label('SSH destination',exact=True).fill('cancelled@host')
+            staged.get_by_role('button',name='Close',exact=True).click()
+            expect(dialog.locator('.staged-ssh')).to_contain_text('-invalid')
+            dialog.get_by_label('Sandbox',exact=True).select_option('danger-full-access')
+            (root/'delay-create').touch()
+            dialog.get_by_role('button',name='Create session',exact=True).click()
+            expect(dialog.get_by_role('button',name='Create session',exact=True)).to_be_disabled()
+            dialog.get_by_role('button',name='Close',exact=True).click()
+            page.get_by_role('button',name='+ New Session',exact=True).click()
+            expect(dialog.get_by_label('Session name (optional)',exact=True)).to_be_enabled(timeout=15000)
+            expect(dialog).to_be_visible()
+            expect(dialog.get_by_label('Session name (optional)',exact=True)).to_have_value('')
+            expect(dialog.locator('.staged-ssh')).to_have_count(0)
+            expect(dialog.get_by_role('alert')).to_have_count(0)
+            delayed=next(s for s in api('/sessions') if s['name']=='Delayed SSH creation')
+            assert api('/sessions/'+delayed['id'])['target_selection']==[]
+            (root/'delay-create').unlink()
+            dialog.get_by_role('button',name='Close',exact=True).click()
+            expect(page.locator('.global-error')).to_be_visible()
+
+            # Reload drops form edits but preserves the conversation draft.
+            page.get_by_label('Message',exact=True).fill('Survive reload')
+            page.get_by_role('button',name='+ New Session',exact=True).click()
+            dialog.get_by_label('Session name (optional)',exact=True).fill('Discard on reload')
+            page.reload()
+            expect(page.get_by_label('Message',exact=True)).to_have_value('Survive reload')
+            page.get_by_role('button',name='+ New Session',exact=True).click()
+            expect(dialog.get_by_label('Session name (optional)',exact=True)).to_have_value('')
+            dialog.get_by_role('button',name='Close',exact=True).click()
+
+            # Device authorization is an ongoing sign-in, not a form draft.
+            (root/'signed-out').touch()
+            page.get_by_role('button',name='Server settings',exact=True).click()
+            settings.get_by_role('button',name='Sign in with ChatGPT',exact=True).click()
+            expect(settings).to_contain_text('TEST-CODE')
+            settings.get_by_role('button',name='Close',exact=True).click()
+            page.get_by_role('button',name='Server settings',exact=True).click()
+            expect(settings).to_contain_text('TEST-CODE')
+            calls=[json.loads(line) for line in (root/'calls.jsonl').read_text().splitlines()]
+            assert sum(c['method']=='account/login/start' for c in calls)==1
+            (root/'signed-out').unlink()
+            settings.get_by_role('button',name='Close',exact=True).click()
+            page.get_by_role('button',name='Server settings',exact=True).click()
+            expect(settings).not_to_contain_text('TEST-CODE')
+            assert not errors,errors
             browser.close()
         calls=[json.loads(line) for line in (root/'calls.jsonl').read_text().splitlines()]
         starts=[call for call in calls if call['method']=='thread/start']
-        assert len(starts)==4 and sorted(len(call['params']['environments']) for call in starts)==[0,0,1,1], starts
+        assert len(starts)==5 and sorted(len(call['params']['environments']) for call in starts)==[0,0,0,1,1], starts
+        inherited=[c['params'] for c in starts if 'model' not in c['params']]
+        assert len(inherited)==4,starts
+        assert all('serviceTier' not in p and 'model_reasoning_effort' not in (p.get('config') or {}) for p in inherited),inherited
         assert not any(call['method']=='turn/start' for call in calls)
         daemon.terminate();daemon.wait(timeout=20)
         daemon=launch()
@@ -413,7 +614,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-new-session-') as temporary:
         assert restored['session']['sort_order'] < api('/sessions/'+second['id'])['session']['sort_order']
         assert restored['target_selection']==detail['target_selection']
         assert restored['session']['targets'][0]['id']!=session['targets'][0]['id']
-        print('PASS: New Session modal, remote-only creation, folder merging, mobile drafts, validation and runtime reconnect')
+        print('PASS: New Session modal, remote-only creation, folder merging, dialog resets, late replies, login retention and runtime reconnect')
     except BaseException:
         try: page.screenshot(path='/tmp/demodex-picker-failure.png')
         except Exception: pass

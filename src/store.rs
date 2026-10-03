@@ -1,6 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::Value;
+use serde_json::{Value,json};
 use std::{path::Path, sync::Mutex};
 
 pub use demodex_protocol::Target;
@@ -100,6 +100,7 @@ impl Store {
                session_id TEXT PRIMARY KEY REFERENCES sessions(id));
              CREATE TABLE IF NOT EXISTS session_model (
                session_id TEXT PRIMARY KEY REFERENCES sessions(id), selection TEXT, effective TEXT);
+             CREATE TABLE IF NOT EXISTS prompt_settings (id TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS session_prompt (
                session_id TEXT PRIMARY KEY REFERENCES sessions(id), text TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS context_tool_receipts (
@@ -807,6 +808,36 @@ impl Store {
         Ok(())
     }
 }
+
+
+impl crate::store::Store {
+    pub(crate) fn prompt_record(&self, id: &str) -> Result<Value> {
+        let text: Option<String> = self.0.lock().unwrap().query_row("SELECT value FROM prompt_settings WHERE id=?1", [id], |r| r.get(0)).optional()?;
+        Ok(text.map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or(Value::Null))
+    }
+    pub(crate) fn put_prompt_record(&self, id: &str, value: &Value) -> Result<()> {
+        self.0.lock().unwrap().execute("INSERT INTO prompt_settings VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET value=excluded.value", params![id, value.to_string()])?;
+        Ok(())
+    }
+    pub(crate) fn prompt_settings(&self) -> Result<(u64, demodex_protocol::PromptSettings)> {
+        let value = self.prompt_record("server")?;
+        Ok((value["revision"].as_u64().unwrap_or(0), if value.is_null() { demodex_protocol::PromptSettings::default() } else { serde_json::from_value(value["settings"].clone())? }))
+    }
+    pub(crate) fn set_prompt_settings(&self, expected: u64, settings: &demodex_protocol::PromptSettings) -> Result<u64> {
+        crate::prompts::validate(settings)?;
+        let mut connection = self.0.lock().unwrap();
+        let tx = connection.transaction()?;
+        let old: Option<String> = tx.query_row("SELECT value FROM prompt_settings WHERE id='server'", [], |r|r.get(0)).optional()?;
+        let revision = old.map(|s|serde_json::from_str::<Value>(&s)).transpose()?.and_then(|v|v["revision"].as_u64()).unwrap_or(0);
+        ensure!(expected == revision, "Prompt settings changed in another window. Reload before saving.");
+        let revision=revision.checked_add(1).context("Prompt revision exhausted")?;
+        tx.execute("INSERT INTO prompt_settings VALUES('server',?1) ON CONFLICT(id) DO UPDATE SET value=excluded.value", [json!({"revision":revision,"settings":settings}).to_string()])?;
+        tx.commit()?;
+        Ok(revision)
+    }
+}
+impl Store { pub(crate) fn remove_legacy_prompt(&self,id:&str)->Result<()> { self.0.lock().unwrap().execute("DELETE FROM session_prompt WHERE session_id=?1",[id])?;Ok(()) } }
+
 
 #[cfg(test)]
 mod tests {

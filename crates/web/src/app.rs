@@ -1,5 +1,10 @@
 #[path = "new_session.rs"]
 mod new_session;
+#[path = "dialogs.rs"]
+mod dialogs;
+use dialogs::RequestOrigin;
+#[path = "share.rs"]
+mod share;
 
 use crate::{
     client::{Client, Wake},
@@ -50,6 +55,7 @@ fn input(event: InputEvent) -> String {
 }
 
 pub struct App {
+    share: share::State,
     saved: Saved,
     host_input: String,
     token: String,
@@ -77,6 +83,9 @@ pub struct App {
     controls: Value,
     models: Value,
     model_error: String,
+    model_serial: u64,
+    new_models: Value,
+    new_model_error: String,
     background: Value,
     show_background: bool,
     show_controls: bool,
@@ -84,6 +93,9 @@ pub struct App {
     show_new_session: bool,
     show_saved_search: bool,
     new_target_setup: String,
+    staged_ssh: Option<demodex_protocol::SshTarget>,
+    dialog_epoch: u64,
+    error_epoch: Option<u64>,
     show_server_settings: bool,
     show_diagnostics: bool,
     pending: Vec<Value>,
@@ -112,6 +124,7 @@ pub struct App {
 }
 
 pub enum Msg {
+    Share(share::ShareMsg),
     HostInput(String),
     Token(String),
     Connect,
@@ -137,11 +150,15 @@ pub enum Msg {
     SavedSearch(bool),
     NewTargetSetup(String),
     StageSsh,
+    RemoveStagedSsh,
     ServerSettings(bool),
     Background(bool),
     Diagnostics(bool),
     LoadModels,
-    ModelsLoaded(u64, String, Result<Value, String>),
+    ModelsLoaded(u64, u64, String, Result<Value, String>),
+    LoadNewModels,
+    NewModelsLoaded(u64, Result<Value, String>),
+    NewModel(String),
     ControlField(String, String),
     EnterSends(bool),
     Field(String, String),
@@ -155,7 +172,7 @@ pub enum Msg {
     Queue,
     Run(Operation),
     InvalidForm(String),
-    Completed(u64, Operation, String, Result<Value, String>),
+    Completed(u64, RequestOrigin, Operation, String, Result<Value, String>),
     LoadSaved(bool),
     SavedThreads(u64, u64, Result<Value, String>, bool),
     ChooseThread(Value),
@@ -233,7 +250,9 @@ impl App {
         };
     }
     fn persist(&mut self) -> bool {
-        let ok = serde_json::to_string(&self.saved)
+        let mut saved = self.saved.clone();
+        dialogs::discard_saved_dialogs(&mut saved);
+        let ok = serde_json::to_string(&saved)
             .ok()
             .is_some_and(|s| storage_set("demodex-rust-view", &s));
         self.storage_error = if ok {
@@ -269,6 +288,13 @@ impl App {
         }
     }
     fn request(&mut self, ctx: &Context<Self>, operation: Operation) {
+        let origin = RequestOrigin {
+            epoch: self.dialog_epoch,
+            ssh: if matches!(operation, Operation::CreateSession { .. }) { self.staged_ssh.clone() } else { None },
+        };
+        self.request_from(ctx, operation, origin);
+    }
+    fn request_from(&mut self, ctx: &Context<Self>, operation: Operation, origin: RequestOrigin) {
         let Some(client) = self.client.clone().filter(|_| self.connected) else {
             self.error = "Connect to a host first".into();
             return;
@@ -278,6 +304,7 @@ impl App {
         }
         self.busy = true;
         self.error.clear();
+        self.error_epoch = None;
         let generation = self.generation;
         let id = uuid::Uuid::new_v4().to_string();
         if operation.is_mutation() {
@@ -292,7 +319,7 @@ impl App {
                 .call(operation.clone(), id.clone())
                 .await
                 .map_err(|e| format!("{e:#}"));
-            Msg::Completed(generation, operation, id, result)
+            Msg::Completed(generation, origin, operation, id, result)
         });
     }
     fn pwa(&mut self) {
@@ -312,7 +339,17 @@ impl App {
     }
     fn field(&self, ctx: &Context<Self>, name: &str, label: &str, placeholder: &str) -> Html {
         let key = name.to_owned();
-        html! {<label>{label.to_owned()}<input value={self.saved.field(name)} placeholder={placeholder.to_owned()} oninput={ctx.link().callback(move |e|Msg::Field(key.clone(),input(e)))}/></label>}
+        use crate::ui::Rule;
+        let rule=if name=="thread_id" {Rule::Required}
+            else if name=="cwd" {Rule::OptionalPath}
+            else if name.ends_with("_cwd") {Rule::Path}
+            else if name.ends_with("_port") {Rule::Port}
+            else if matches!(name,"target_url") {Rule::ExecutorUrl}
+            else if name.ends_with("_destination") || name=="container_image" {Rule::Required}
+            else if matches!(name,"new_session_name"|"session_name") {Rule::OptionalName}
+            else if name.ends_with("_name") {Rule::Name}
+            else {Rule::Text};
+        html! {<label>{label.to_owned()}<crate::ui::Input kind={if name=="target_url"{"url"}else{"text"}} value={self.saved.field(name)} aria_label={label.to_owned()} placeholder={placeholder.to_owned()} {rule} oninput={ctx.link().callback(move |e|Msg::Field(key.clone(),input(e)))}/></label>}
     }
     fn sandbox(&self, ctx: &Context<Self>, key: &str, label: &str) -> Html {
         let name = key.to_owned();
@@ -367,7 +404,9 @@ impl Component for App {
             }
             saved.selected = route.selected.clone();
         }
-        saved.separate_creation_fields();
+        // Dialogs are closed after reload. Restore conversation drafts/receipts,
+        // but discard legacy persisted form drafts for every host.
+        dialogs::discard_saved_dialogs(&mut saved);
         // Retain the existing token when migrating a same-origin Svelte installation.
         let token = storage_get(&format!("demodex-token:{}", saved.host))
             .or_else(|| {
@@ -420,6 +459,7 @@ impl Component for App {
             }),
         ];
         let mut app = Self {
+            share: share::State::default(),
             host_input: saved.host.clone(),
             saved,
             token,
@@ -447,6 +487,9 @@ impl Component for App {
             controls: Value::Null,
             models: Value::Null,
             model_error: String::new(),
+            model_serial: 0,
+            new_models: Value::Null,
+            new_model_error: String::new(),
             background: Value::Null,
             show_background: false,
             show_controls: false,
@@ -454,6 +497,9 @@ impl Component for App {
             show_new_session: false,
             show_saved_search: false,
             new_target_setup: String::new(),
+            staged_ssh: None,
+            dialog_epoch: 0,
+            error_epoch: None,
             show_server_settings: false,
             show_diagnostics: false,
             pending: vec![],
@@ -480,6 +526,7 @@ impl Component for App {
             updating: false,
             update_error: String::new(),
         };
+        share::startup(ctx);
         app.pwa();
         let restored = push_route.or_else(|| window()
             .history()
@@ -507,6 +554,7 @@ impl Component for App {
         app
     }
     fn update(&mut self, ctx: &Context<Self>, msg: Msg) -> bool {
+        let previous_dialogs = self.dialogs();
         let previous_navigation = self.navigation();
         let navigates = matches!(
             &msg,
@@ -517,6 +565,7 @@ impl Component for App {
                 | Msg::Connected(_, Ok(_))
         );
         match msg {
+            Msg::Share(msg) => self.share_update(ctx, msg),
             Msg::History(route) => {
                 self.new_target_setup.clear();
                 self.show_server_settings = false;
@@ -558,10 +607,12 @@ impl Component for App {
             }
             Msg::NewTargetSetup(kind) => self.new_target_setup = kind,
             Msg::StageSsh => {
-                self.saved.fields.insert("new_ssh".into(), "true".into());
+                self.staged_ssh = Some(self.new_ssh_payload());
                 self.new_target_setup.clear();
             }
+            Msg::RemoveStagedSsh => self.staged_ssh = None,
             Msg::NewSession(open) => {
+                if !open { self.share.creating = false; }
                 self.show_saved_search = false;
                 self.new_target_setup.clear();
                 self.show_new_session = open;
@@ -570,6 +621,7 @@ impl Component for App {
                     self.show_controls = false;
                     self.show_background = false;
                     self.show_diagnostics = false;
+                    ctx.link().send_message(Msg::LoadNewModels);
                     ctx.link().send_message(Msg::Refresh);
                 }
             }
@@ -864,6 +916,9 @@ impl Component for App {
                         Resource::Detail => {
                             self.target_selection = value["target_selection"].clone();
                             self.targets_pending = value["targets_pending"] == true;
+                            if value["controls"]["connected"] == true && self.controls["connected"] != true {
+                                ctx.link().send_message(Msg::LoadModels);
+                            }
                             self.controls = value["controls"].clone();
                             self.background = value["background"].clone();
                             self.pending = array(&value["pending"]);
@@ -970,6 +1025,7 @@ impl Component for App {
                 self.show_background = false;
                 self.show_controls = open;
                 if open {
+                    self.saved.fields.insert("session_sandbox".into(), text(&self.current, "sandbox").into());
                     ctx.link().send_message(Msg::LoadModels);
                 }
             }
@@ -977,9 +1033,12 @@ impl Component for App {
                 if let Some(client) = self.client.clone().filter(|_| self.connected) {
                     let generation = self.generation;
                     let id = self.saved.selected.clone();
+                    self.model_serial += 1;
+                    let serial = self.model_serial;
                     ctx.link().send_future(async move {
                         Msg::ModelsLoaded(
                             generation,
+                            serial,
                             id.clone(),
                             client
                                 .read(Operation::Models { id })
@@ -991,8 +1050,8 @@ impl Component for App {
                     self.model_error = "Connect to the server to load available models.".into();
                 }
             }
-            Msg::ModelsLoaded(generation, id, result) => {
-                if generation != self.generation || id != self.saved.selected {
+            Msg::ModelsLoaded(generation, serial, id, result) => {
+                if generation != self.generation || id != self.saved.selected || serial != self.model_serial {
                     return false;
                 }
                 match result {
@@ -1005,6 +1064,50 @@ impl Component for App {
                         self.model_error = error;
                     }
                 }
+            }
+            Msg::LoadNewModels => {
+                if let Some(client) = self.client.clone().filter(|_| self.connected) {
+                    let generation = self.generation;
+                    self.new_models = Value::Null;
+                    self.new_model_error.clear();
+                    ctx.link().send_future(async move {
+                        Msg::NewModelsLoaded(
+                            generation,
+                            client
+                                .read(Operation::RuntimeModels)
+                                .await
+                                .map_err(|e| format!("{e:#}")),
+                        )
+                    });
+                } else {
+                    self.new_model_error = "Connect to the server to load available models.".into();
+                }
+            }
+            Msg::NewModelsLoaded(generation, result) => {
+                if generation != self.generation {
+                    return false;
+                }
+                match result {
+                    Ok(value) => {
+                        self.new_models = value;
+                        self.new_model_error.clear();
+                    }
+                    Err(error) => {
+                        self.new_models = Value::Null;
+                        self.new_model_error = error;
+                    }
+                }
+            }
+            Msg::NewModel(model) => {
+                self.saved.fields.insert("new_model".into(), model.clone());
+                let effort = array(&self.new_models["data"])
+                    .iter()
+                    .find(|entry| text(entry, "model") == model)
+                    .map(|entry| text(entry, "defaultReasoningEffort"))
+                    .unwrap_or("")
+                    .to_owned();
+                self.saved.fields.insert("new_effort".into(), effort);
+                self.saved.fields.insert("new_tier".into(), String::new());
             }
             Msg::ControlField(name, value) => {
                 let prefix = format!("control:{}:", self.saved.selected);
@@ -1156,11 +1259,12 @@ impl Component for App {
                 }
                 self.request(ctx, operation)
             }
-            Msg::Completed(generation, operation, id, result) => {
+            Msg::Completed(generation, origin, operation, id, result) => {
                 if generation != self.generation {
                     return false;
                 }
                 self.busy = false;
+                let same_dialog = origin.epoch == self.dialog_epoch;
                 let notice = match &operation {
                     Operation::Prompt { id, .. } => Notice::Session { id: id.clone(), state: true },
                     _ => Notice::Changed,
@@ -1172,38 +1276,38 @@ impl Component for App {
                             self.saved.receipts.remove(&self.saved.host);
                         }
                         match operation {
-                            Operation::RenameSession { id, .. } => {
+                            Operation::RenameSession { id, .. } if same_dialog => {
                                 self.saved.fields.remove(&format!("rename:{id}"));
                             }
                             Operation::CreateSession { .. } => {
-                                if self.saved.field("new_ssh") == "true" {
-                                    let input = self.new_ssh_payload();
-                                    for suffix in ["name","destination","port","identity","known_hosts","cwd"] {
-                                        self.saved.fields.insert(format!("ssh_{suffix}"),self.saved.field(&format!("new_ssh_{suffix}")));
-                                    }
-                                    self.saved.fields.remove("new_ssh");
-                                    ctx.link().send_message(Msg::Select(text(&value,"id").into()));
-                                    ctx.link().send_message(Msg::Run(Operation::RegisterSessionSshTarget{id:text(&value,"id").into(),input}));
-                                    ctx.link().send_message(Msg::Controls(true));
-                                } else {
+                                if same_dialog && self.share.creating {
+                                    if origin.ssh.is_some() { self.share.created = Some(text(&value, "id").into()); }
+                                    else { ctx.link().send_message(Msg::Share(share::ShareMsg::Choose(text(&value,"id").into(),true))); }
+                                }
+                                if same_dialog {
                                     ctx.link().send_message(Msg::Select(text(&value, "id").into()));
                                 }
-                                // Leave the independent resume draft intact.
-                                self.saved
-                                    .fields
-                                    .insert("new_session_name".into(), String::new());
-                                self.saved.fields.remove("new_targets");
+                                if let Some(input) = origin.ssh {
+                                    // Submitted SSH belongs to this operation, not a later form.
+                                    self.request_from(ctx, Operation::RegisterSessionSshTarget {
+                                        id: text(&value, "id").into(), input,
+                                    }, RequestOrigin { epoch: origin.epoch, ssh: None });
+                                }
+                            }
+                            Operation::RegisterSessionSshTarget { ref id, .. } if self.share.created.as_ref()==Some(id) => {
+                                ctx.link().send_message(Msg::Share(share::ShareMsg::Choose(id.clone(),true)));
                             }
                             Operation::HostSession { .. }
                             | Operation::ExternalSession { .. }
-                            | Operation::EnvironmentSession { .. } => {
+                            | Operation::EnvironmentSession { .. } if same_dialog => {
                                 ctx.link()
                                     .send_message(Msg::Select(text(&value, "id").into()));
+                                if self.share.creating { ctx.link().send_message(Msg::Share(share::ShareMsg::Choose(text(&value,"id").into(),true))); }
                                 for key in ["session_name", "thread_id", "cwd"] {
                                     self.saved.fields.remove(key);
                                 }
                             }
-                            Operation::CreateEnvironment { .. } => {
+                            Operation::CreateEnvironment { .. } if same_dialog => {
                                 if self.show_new_session && self.new_target_setup == "vm" {
                                     let mut targets = self.new_session_targets();
                                     targets.push(json!({"id":format!("vm-{}",text(&value,"id")),"cwd":"/workspace"}));
@@ -1213,7 +1317,7 @@ impl Component for App {
                                 self.new_target_setup.clear();
                                 self.target_notice = "VM created and started. Select it in a session's Execution targets.".into();
                             }
-                            Operation::CreateContainer { .. } => {
+                            Operation::CreateContainer { .. } if same_dialog => {
                                 if self.show_new_session && self.new_target_setup == "container" {
                                     let mut targets = self.new_session_targets();
                                     targets.push(json!({"id":format!("container-{}",text(&value,"id")),"cwd":"/workspace"}));
@@ -1224,23 +1328,23 @@ impl Component for App {
                                 self.target_notice = "Container created and started. Select it in a session's Execution targets.".into();
                                 self.saved.fields.remove("container_name");
                             }
-                            Operation::SelectTargets { id, .. } | Operation::ChangeTargets { id, .. } => {
+                            Operation::SelectTargets { id, .. } | Operation::ChangeTargets { id, .. } if same_dialog => {
                                 self.saved.fields.remove(&format!("target-draft:{id}"));
                             }
-                            Operation::CheckSshTarget { .. } => {
+                            Operation::CheckSshTarget { .. } if same_dialog => {
                                 self.target_notice = "SSH connection verified.".into();
                             }
-                            Operation::ReconnectSshTarget { .. } => {
+                            Operation::ReconnectSshTarget { .. } if same_dialog => {
                                 self.target_notice="SSH executor replaced. Reconnect each attached session to use it.".into();
                             }
-                            Operation::RegisterSshTarget { .. } => {
+                            Operation::RegisterSshTarget { .. } if same_dialog => {
                                 self.new_target_setup.clear();
                                 self.target_notice="Shared SSH executor verified and registered.".into();
                                 for key in ["name","destination","port","identity","known_hosts","cwd"] {
                                     self.saved.fields.remove(&format!("shared_ssh_{key}"));
                                 }
                             }
-                            Operation::RegisterSessionSshTarget { .. } => {
+                            Operation::RegisterSessionSshTarget { .. } if same_dialog => {
                                 if self.new_target_setup == "session-ssh" { self.new_target_setup.clear(); }
                                 self.target_notice="SSH target verified and attached. Send a message to apply it before resuming a goal or queue.".into();
                                 for key in [
@@ -1254,7 +1358,7 @@ impl Component for App {
                                     self.saved.fields.remove(key);
                                 }
                             }
-                            Operation::RegisterTarget { .. } => {
+                            Operation::RegisterTarget { .. } if same_dialog => {
                                 self.new_target_setup.clear();
                                 for key in ["target_name", "target_url", "target_cwd"] {
                                     self.saved.fields.remove(key);
@@ -1288,12 +1392,12 @@ impl Component for App {
                                 ctx.link().send_message(Msg::Page(String::new()));
                             }
                             Operation::Login => self.login = value,
-                            Operation::Model { id, .. } => {
+                            Operation::Model { id, .. } if same_dialog => {
                                 for field in ["model", "effort", "tier"] {
                                     self.saved.fields.remove(&format!("control:{id}:{field}"));
                                 }
                             }
-                            Operation::Goal { id, input } => {
+                            Operation::Goal { id, input } if same_dialog => {
                                 // Status actions do not submit the objective/budget draft.
                                 // Pausing or resuming must leave those unsaved edits intact.
                                 if matches!(input.action.as_str(), "save" | "start") {
@@ -1318,6 +1422,15 @@ impl Component for App {
                             self.upload_anchor = None;
                         }
                         self.error = error;
+                        self.error_epoch = Some(origin.epoch);
+                        if same_dialog {
+                            // Failed SSH attempts are never offered as a retry draft.
+                            match operation {
+                                Operation::RegisterSessionSshTarget { .. } => self.clear_setup("session-ssh"),
+                                Operation::RegisterSshTarget { .. } => self.clear_setup("shared-ssh"),
+                                _ => {}
+                            }
+                        }
                         if operation.is_mutation() {
                             self.receipt = id;
                         }
@@ -1326,6 +1439,7 @@ impl Component for App {
                 self.reads.notice(notice, &self.saved.selected);
             }
             Msg::LoadSaved(more) => {
+                if !self.show_saved_search { return false; }
                 if more && (self.saved_search_loading || self.cursor.is_none()) {
                     return false;
                 }
@@ -1354,7 +1468,7 @@ impl Component for App {
                 }
             }
             Msg::SavedThreads(generation, serial, result, more) => {
-                if generation != self.generation || serial != self.saved_search_serial {
+                if generation != self.generation || serial != self.saved_search_serial || !self.show_saved_search {
                     return false;
                 }
                 self.saved_search_loading = false;
@@ -1424,7 +1538,7 @@ impl Component for App {
                     },
                 );
             }
-            Msg::InvalidForm(error) => self.error = error,
+            Msg::InvalidForm(error) => { self.error = error; self.error_epoch = None; },
             Msg::Dismiss => self.error.clear(),
             Msg::Resize => return self.follow,
             Msg::Latest => {
@@ -1454,6 +1568,7 @@ impl Component for App {
         }
         self.start_reads(ctx);
         if navigates {
+            self.show_new_session = false;
             self.new_target_setup.clear();
             self.show_server_settings = false;
             self.show_background = false;
@@ -1463,6 +1578,7 @@ impl Component for App {
         if navigates && self.navigation() != previous_navigation {
             self.record_navigation(false);
         }
+        self.finish_dialogs(previous_dialogs);
         self.persist();
         true
     }
@@ -1484,7 +1600,7 @@ impl Component for App {
                         {if self.connected{html!{<button class="server-settings-toggle" onclick={ctx.link().callback(|_|Msg::ServerSettings(true))}>{"Server settings"}</button>}}else{Html::default()}}
                     </header>
                     {if self.connections_page {html!{<crate::modal::Modal title="Connections" compact=true onclose={ctx.link().callback(|_|Msg::BackToHost)}>
-                        <section class="connections">
+                        <crate::ui::Group class="connections" title="Saved servers">
                             <p class="muted">{"Saved on this device, including access tokens. Select a connection to connect."}</p>
                             {for self.connections.iter().map(|connection|{
                                 let url = connection.url.clone(); let edit = url.clone(); let remove = url.clone();
@@ -1498,23 +1614,24 @@ impl Component for App {
                                 </div>}
                             })}
                             <crate::ui::AddButton disabled={self.connecting||self.busy} onclick={ctx.link().callback(|_|Msg::NewConnection)}>{"+ connection"}</crate::ui::AddButton>
-                        </section>
-                        {if !self.error.is_empty() && !self.connection_editor{html!{<div class="error" role="alert"><pre>{&self.error}</pre></div>}}else{Html::default()}}
+                        </crate::ui::Group>
+                        {if !self.connection_editor{self.modal_error(ctx)}else{Html::default()}}
                     </crate::modal::Modal>}}else{Html::default()}}
                     {if self.connections_page && self.connection_editor {html!{<crate::modal::Modal title={if self.editing_connection.is_some(){"Edit connection"}else{"Add connection"}} compact=true onclose={ctx.link().callback(|_|Msg::CloseConnectionEditor)}>
-                        <form class="connection-form" onsubmit={ctx.link().callback(|e:SubmitEvent|{e.prevent_default();Msg::Connect})}>
-                            <label>{"Connection name (optional)"}<input disabled={self.connecting||self.busy} value={self.connection_name.clone()} oninput={ctx.link().callback(|e|Msg::ConnectionName(input(e)))}/></label>
-                            <label>{"Host URL"}<input required=true type="url" disabled={self.connecting||self.busy} value={self.host_input.clone()} oninput={ctx.link().callback(|e|Msg::HostInput(input(e)))}/></label>
-                            <label>{"Access token (optional with Tailscale)"}<input disabled={self.connecting||self.busy} type="password" value={self.token.clone()} oninput={ctx.link().callback(|e|Msg::Token(input(e)))}/></label>
+                        <crate::ui::Form class="connection-form" onsubmit={ctx.link().callback(|e:SubmitEvent|{e.prevent_default();Msg::Connect})} actions={html!{<button type="submit" class="primary" disabled={self.connecting||self.busy}>{if self.connecting{"Connecting…"}else{"Save and connect"}}</button>}}>
+                            <crate::ui::Group title="Server"><label>{"Connection name (optional)"}<input disabled={self.connecting||self.busy} value={self.connection_name.clone()} oninput={ctx.link().callback(|e|Msg::ConnectionName(input(e)))}/></label>
+                            <label>{"Host URL"}<crate::ui::Input required=true kind="url" disabled={self.connecting||self.busy} value={self.host_input.clone()} oninput={ctx.link().callback(|e|Msg::HostInput(input(e)))} aria_label="Host URL" rule={crate::ui::Rule::HostUrl}/></label>
+                            </crate::ui::Group><crate::ui::Group title="Authentication"><label>{"Access token (optional with Tailscale)"}<input disabled={self.connecting||self.busy} type="password" value={self.token.clone()} oninput={ctx.link().callback(|e|Msg::Token(input(e)))}/></label>
                             <p class="muted">{"Leave blank to use your Tailscale identity. Connections are saved after a successful connection."}</p>
-                            <button type="submit" class="primary" disabled={self.connecting||self.busy}>{if self.connecting{"Connecting…"}else{"Save and connect"}}</button>
-                        </form>
-                        {if !self.error.is_empty(){html!{<div class="error" role="alert"><pre>{&self.error}</pre></div>}}else{Html::default()}}
+                            </crate::ui::Group>
+                        </crate::ui::Form>
+                        {self.modal_error(ctx)}
                     </crate::modal::Modal>}}else{Html::default()}}
                     {if self.show_server_settings {html!{<crate::modal::Modal title="Server settings" compact=true onclose={ctx.link().callback(|_|Msg::ServerSettings(false))}>
                         {self.environment_view(ctx)}
-                        {if !self.error.is_empty(){html!{<div class="error" role="alert"><pre>{&self.error}</pre><button onclick={ctx.link().callback(|_|Msg::Dismiss)}>{"Dismiss"}</button>{if !self.receipt.is_empty(){self.button(ctx,"Check command receipt",Operation::Receipt{id:self.receipt.clone()})}else{Html::default()}}</div>}}else{Html::default()}}
+                        {self.modal_error(ctx)}
                     </crate::modal::Modal>}}else{Html::default()}}
+                    {self.share_view(ctx)}
                     {self.new_session_view(ctx)}
                     {self.target_setup_view(ctx)}
                     {if !self.connection_storage_error.is_empty(){html!{<div class="app-notice" role="alert">{self.connection_storage_error.clone()}</div>}}else{Html::default()}}
@@ -1524,10 +1641,13 @@ impl Component for App {
                     {if !self.connected&&!self.sessions.is_empty(){html!{<div class="app-notice" role="status">{"Connection lost — showing the last known session state. Reconnecting does not replay commands."}</div>}}else{Html::default()}}
                     <div class={classes!("layout",detail.then_some("detail"))}>
                         <aside>
-                            <div class="section-title"><h2>{"Sessions"}</h2><button type="button" class="reorder-toggle" aria-pressed={self.reorder_mode.to_string()} onclick={ctx.link().callback(|_|Msg::ReorderMode)}>{if self.reorder_mode{"Done reordering"}else{"Reorder"}}</button></div>
+                            <div class="section-title"><h2>{"Sessions"}</h2><div class="session-view-switch" role="group" aria-label="Session layout">
+                                <button type="button" aria-pressed={(self.saved.field("session_view")!="flat").to_string()} onclick={ctx.link().callback(|_|Msg::Field("session_view".into(),"tree".into()))}>{"Tree"}</button>
+                                <button type="button" aria-pressed={(self.saved.field("session_view")=="flat").to_string()} onclick={ctx.link().callback(|_|Msg::Field("session_view".into(),"flat".into()))}>{"List"}</button>
+                            </div><button type="button" class="reorder-toggle" aria-pressed={self.reorder_mode.to_string()} onclick={ctx.link().callback(|_|Msg::ReorderMode)}>{if self.reorder_mode{"Done reordering"}else{"Reorder"}}</button></div>
                             <button class="new-session-nav primary" disabled={!self.connected} onclick={ctx.link().callback(|_|Msg::NewSession(true))}>{"+ New Session"}</button>
-                            {crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]!=true).map(|s|{let mut s=s.clone();s["goal"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["goal"].clone()}else{Value::Null};s["active_subagents"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["active_subagents"].clone()}else{Value::Null};s["background_count"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["count"].clone()}else{Value::Null};s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode)}
-                            {if self.sessions.iter().any(|s|s["archived"]==true){html!{<details class="archived-sessions"><summary>{format!("Archived sessions ({})",self.sessions.iter().filter(|s|s["archived"]==true).count())}</summary>{crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]==true).map(|s|{let mut s=s.clone();s["background_count"]=Value::Null;s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode)}</details>}}else{Html::default()}}
+                            {crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]!=true).map(|s|{let mut s=s.clone();s["goal"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["goal"].clone()}else{Value::Null};s["active_subagents"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["active_subagents"].clone()}else{Value::Null};s["background_count"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["count"].clone()}else{Value::Null};s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode,self.saved.field("session_view")=="flat",ctx.link().callback(|_|Msg::NewSession(true)))}
+                            {if self.sessions.iter().any(|s|s["archived"]==true){html!{<details class="archived-sessions"><summary>{format!("Archived sessions ({})",self.sessions.iter().filter(|s|s["archived"]==true).count())}</summary>{crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]==true).map(|s|{let mut s=s.clone();s["background_count"]=Value::Null;s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode,self.saved.field("session_view")=="flat",ctx.link().callback(|_|Msg::NewSession(true)))}</details>}}else{Html::default()}}
                         </aside>
                         <main class={(!self.saved.selected.is_empty()).then_some("chat-main")}>
                             {if !self.saved.selected.is_empty(){self.chat_view(ctx)}else{html!{<section class="empty"><span class="eyebrow">{"SERVER OVERVIEW"}</span><h1>{"Your agents, by project."}</h1><p>{"Select an agent in the folder tree to open its conversation. Only folders with sessions appear."}</p><p class="muted">{"Each agent keeps its icon and generated name. Status shows who is working, waiting for you, or disconnected."}</p><button disabled={!self.connected} onclick={ctx.link().callback(|_|Msg::NewSession(true))}>{"New Session"}</button></section>}}}
@@ -1553,10 +1673,10 @@ impl App {
             <button disabled={self.reads.busy()||!self.connected} onclick={ctx.link().callback(|_|Msg::Refresh)}>{"Refresh"}</button>
             {if let Some(error)=self.background["error"].as_str(){html!{<p class="error">{format!("Background terminals unavailable: {error}")}</p>}}else if self.background["data"].is_array(){html!{<>
                 {if rows.is_empty(){html!{<p>{"No background terminals running."}</p>}}else{html!{<>
-                    {for rows.iter().map(|row|html!{<section class="background-terminal">
+                    {for rows.iter().map(|row|html!{<crate::ui::Group class="background-terminal">
                         <div class="background-command"><pre>{text(row,"command")}</pre><code>{text(row,"cwd")}</code><small class="muted">{"Running · Machine unknown"}</small></div>
                         {self.button(ctx,"Stop terminal",stop(vec![(text(row,"processId").into(),text(row,"itemId").into())]))}
-                    </section>})}
+                    </crate::ui::Group>})}
                     {self.button(ctx,&format!("Stop all {} listed terminals",rows.len()),stop(rows.iter().map(|row|(text(row,"processId").into(),text(row,"itemId").into())).collect()))}
                     <details class="background-diagnostics"><summary>{"Diagnostics"}</summary>{for rows.iter().map(|row|html!{<p>{format!("{} · Process {} · Item {}",text(row,"command"),text(row,"processId"),text(row,"itemId"))}</p>})}</details>
                 </>}}}
@@ -1566,11 +1686,41 @@ impl App {
     }
 
     fn modal_error(&self, ctx: &Context<Self>) -> Html {
-        if self.error.is_empty() {
+        if self.error.is_empty() || self.error_epoch.is_some_and(|epoch| epoch != self.dialog_epoch) {
             return Html::default();
         }
         html! {<div class="error" role="alert"><pre>{&self.error}</pre><button onclick={ctx.link().callback(|_|Msg::Dismiss)}>{"Dismiss"}</button>{if !self.receipt.is_empty(){self.button(ctx,"Check command receipt",Operation::Receipt{id:self.receipt.clone()})}else{Html::default()}}</div>}
     }
+    fn composer_model_picker(&self, ctx: &Context<Self>, working: bool) -> Html {
+        let effective = &self.controls["settings"]["effective"];
+        let field = |name: &str, fallback: &str| self.saved.fields
+            .get(&format!("control:{}:{name}", self.saved.selected)).cloned()
+            .unwrap_or_else(|| fallback.into());
+        let selected = field("model", text(effective,"model"));
+        let effort = field("effort", text(effective,"effort"));
+        let tier = field("tier", text(effective,"serviceTier"));
+        let models = array(&self.models["data"]);
+        let disabled = self.busy || !self.connected || self.controls["connected"] != true
+            || self.current["archived"] == true || working || models.is_empty();
+        let normalize_tier = |value: &str| if value == "default" { String::new() } else { value.to_owned() };
+        let pending = selected != text(effective,"model") || effort != text(effective,"effort")
+            || normalize_tier(&tier) != normalize_tier(text(effective,"serviceTier"));
+        let operation = Operation::Model { id:self.saved.selected.clone(), input:demodex_protocol::ModelChoice {
+            model:selected.clone(), effort:effort.clone(), service_tier:if tier.is_empty() || tier=="default" {None}else{Some(tier)},
+        }};
+        html! {<div class="composer-model-picker">
+            <label>{"Model"}<select key={selected.clone()} aria-label="Composer model" disabled={disabled}
+                title={if working {"Wait until idle to change the model"}else{"Choose a model, then apply it"}}
+                onchange={ctx.link().callback(|e:Event|Msg::ControlField("model".into(),e.target_unchecked_into::<web_sys::HtmlSelectElement>().value()))}>
+                <option value="" selected={selected.is_empty()}>{"Model unavailable"}</option>
+                {if !selected.is_empty() && !models.iter().any(|m|text(m,"model")==selected){html!{<option value={selected.clone()} selected=true>{selected.clone()}</option>}}else{Html::default()}}
+                {for models.iter().map(|m|html!{<option value={text(m,"model").to_owned()} selected={text(m,"model")==selected}>{text(m,"displayName")}</option>})}
+            </select></label>
+            {if pending {html!{<button type="button" disabled={disabled||selected.is_empty()||effort.is_empty()} onclick={ctx.link().callback(move |_|Msg::Run(operation.clone()))}>{"Apply model"}</button>}}else{Html::default()}}
+            {if !self.model_error.is_empty(){html!{<button type="button" title={self.model_error.clone()} disabled={self.busy||!self.connected} onclick={ctx.link().callback(|_|Msg::LoadModels)}>{"Retry models"}</button>}}else{Html::default()}}
+        </div>}
+    }
+
     fn controls_view(&self, ctx: &Context<Self>, working: bool) -> Html {
         let prefix = format!("control:{}:", self.saved.selected);
         let fields = self
@@ -1587,8 +1737,8 @@ impl App {
     fn chat_view(&self, ctx: &Context<Self>) -> Html {
         let enter_sends = self.saved.enter_sends;
         let close = html! {
-            <button type="button" class="session-close" aria-label="Close session view"
-                title="Close session view" onclick={ctx.link().callback(|_|Msg::Page(String::new()))}>{"×"}</button>
+            <crate::ui::IconButton class="session-close" label="Close session view"
+                title="Close session view" onclick={ctx.link().callback(|_|Msg::Page(String::new()))}>{"×"}</crate::ui::IconButton>
         };
         if self.current.is_null() {
             return html! {<><div class="session-heading"><span>{"Loading session…"}</span>{close}</div></>};
@@ -1622,7 +1772,7 @@ impl App {
                 </section>}}else{Html::default()}}
                 {if !self.queue_error.is_empty(){html!{<p class="muted">{format!("Message queue unavailable: {}",self.queue_error)}</p>}}else{Html::default()}}
             </div>
-            <form class="composer" onsubmit={ctx.link().callback(|e:SubmitEvent|{e.prevent_default();Msg::Send})}><label class="sr-only" for="prompt">{"Message"}</label><textarea id="prompt" ref={self.prompt_ref.clone()} value={self.saved.draft()} placeholder="Give the agent a task…" aria-describedby="composer-shortcut" onkeydown={ctx.link().batch_callback(move |e:web_sys::KeyboardEvent| {
+            <form class="composer" onsubmit={ctx.link().callback(|e:SubmitEvent|{e.prevent_default();Msg::Send})}><label class="sr-only" for="prompt">{"Message"}</label><textarea id="prompt" ref={self.prompt_ref.clone()} value={self.saved.draft()} placeholder="Give the agent a task…" aria-describedby="composer-shortcut" enterkeyhint={if enter_sends {"send"} else {"enter"}} onkeydown={ctx.link().batch_callback(move |e:web_sys::KeyboardEvent| {
                 if e.key()=="Enter" && e.shift_key() != enter_sends && !e.ctrl_key() && !e.alt_key() && !e.meta_key() && !e.is_composing() && e.key_code()!=229 {
                     e.prevent_default();
                     if !e.repeat() { return Some(Msg::Send); }
@@ -1637,6 +1787,7 @@ impl App {
                 let input=e.target_unchecked_into::<HtmlInputElement>();
                 let file=input.files().and_then(|files|files.get(0)); input.set_value(""); file.map(Msg::UploadImage)
             })}/><div class="composer-actions"><label class="checkbox composer-enter-sends"><input type="checkbox" checked={enter_sends} onchange={ctx.link().callback(|e:Event|Msg::EnterSends(e.target_unchecked_into::<HtmlInputElement>().checked()))}/>{"Enter sends"}</label><button type="button" disabled={self.busy||!self.connected||(self.targets_pending&&working)} onclick={ctx.link().callback(|_|Msg::ChooseImage)}>{if self.busy && self.upload_anchor.is_some(){"Uploading…"}else{"Attach image"}}</button><button class="primary" title="Send now; during work, steer the current turn" disabled={!self.can_send()}>{"Send"}</button><button type="button" title="Start a separate turn after the current turn finishes" disabled={!self.can_send()||!(working||waiting)} onclick={ctx.link().callback(|_|Msg::Queue)}>{"Queue for later"}</button>{if working||waiting{self.button(ctx,"Interrupt",Operation::Interrupt{id:id.clone()})}else{html!{<button type="button" disabled=true>{"Interrupt"}</button>}}}
+                {self.composer_model_picker(ctx,working||waiting)}
                 <button type="button" class="controls-toggle" onclick={ctx.link().callback(|_|Msg::Controls(true))}>{"Session controls"}</button>
                 {if self.controls["goal"].is_object(){html!{<button type="button" class="goal-indicator" title={text(&self.controls["goal"],"objective").to_owned()} onclick={ctx.link().callback(|_|Msg::Controls(true))}>{format!("Goal · {}{}",text(&self.controls["goal"],"status"),if self.connected{""}else{" · stale"})}</button>}}else{Html::default()}}
                 <button type="button" class="background-toggle" onclick={ctx.link().callback(|_|Msg::Background(true))}>{self.background["data"].as_array().map(|rows|format!("Background terminals ({})",rows.len())).unwrap_or_else(||"Background terminals · unknown".into())}</button>
@@ -1647,24 +1798,25 @@ impl App {
                 <div class="compact-controls">
                 {self.rename_session_view(ctx)}
                 {self.controls_view(ctx,working||waiting)}
-                <section class="control-section" aria-label="Execution settings"><crate::ui::SectionTitle>{"Execution"}</crate::ui::SectionTitle>
+                {if let Some(client)=self.client.clone(){let targets=array(&self.target_selection);if targets.is_empty(){html!{<crate::prompt_settings::InstructionPreview client={client} target={None::<demodex_protocol::Selection>}/>}}else{html!{<>{for targets.iter().map(|t|html!{<div role="group" aria-label={format!("Instructions · {}",text(t,"cwd"))}><p class="muted">{text(t,"cwd")}</p><crate::prompt_settings::InstructionPreview client={client.clone()} target={serde_json::from_value::<demodex_protocol::Selection>(t.clone()).ok()}/></div>})}</>}}}else{Html::default()}}
+                <crate::ui::Group class="control-section" label="Execution settings" title="Execution">
                 {self.target_picker(ctx,working||waiting)}
                 <section class="session-settings"><h3>{"Sandbox permissions"}</h3>{for array(&self.current["targets"]).iter().map(|t|html!{<p class="muted">{"Working directory: "}<code>{text(t,"cwd")}</code></p>})}
                     <section class="runtime-panel"><p>{"Active sandbox: "}<strong>{sandbox_name(text(&self.current["effective_sandbox"],"type"))}</strong></p>{self.sandbox(ctx,"session_sandbox","Session sandbox")}
                     {if self.saved.field("session_sandbox") != text(&self.current,"sandbox") {html!{<p class="sandbox-pending" role="status">{"Selection not applied. Active sandbox remains as shown above."}</p>}}else{Html::default()}}
                     {if self.saved.field("session_sandbox").is_empty(){html!{<p class="muted">{"No override preserves the current policy on a connected session; it does not enable full access."}</p>}}else{Html::default()}}
-                    {if !working && !waiting && self.current["archived"]!=true{self.checked_button(ctx,"Apply sandbox",sandbox_choice(&self.saved.field("session_sandbox")).map(|sandbox|Operation::Sandbox{id:id.clone(),input:demodex_protocol::SandboxChoice{sandbox}}))}else{html!{<p class="muted control-warning" role="status">{if self.current["archived"]==true{"Restore the session before changing sandbox settings."}else{"Session active — wait until idle to change sandbox settings."}}</p>}}}</section>
+                    <crate::ui::Actions>{if !working && !waiting && self.current["archived"]!=true{self.checked_button(ctx,"Apply sandbox",sandbox_choice(&self.saved.field("session_sandbox")).map(|sandbox|Operation::Sandbox{id:id.clone(),input:demodex_protocol::SandboxChoice{sandbox}}))}else{html!{<p class="muted control-warning" role="status">{if self.current["archived"]==true{"Restore the session before changing sandbox settings."}else{"Session active — wait until idle to change sandbox settings."}}</p>}}}</crate::ui::Actions></section>
                 </section>
 
-                </section>
-                <section class="control-section" aria-label="Session context"><crate::ui::SectionTitle>{"Context and identity"}</crate::ui::SectionTitle>
+                </crate::ui::Group>
+                <crate::ui::Group class="control-section" label="Session context" title="Context and identity">
                     {crate::usage::context(&self.current,true)}
                     {crate::overview::context_view(&self.current,&self.targets)}
                     <button onclick={ctx.link().callback(|_|Msg::Diagnostics(true))}>{format!("Protocol events ({})",self.events.len())}</button>
-                </section>
-                <section class="session-archive control-section" aria-label="Archive session"><crate::ui::SectionTitle>{"Session history"}</crate::ui::SectionTitle>
+                </crate::ui::Group>
+                <crate::ui::Group class="session-archive control-section" label="Archive session" title="Session history">
                     {if self.current["archived"]==true{html!{<><p class="muted">{"Archived on this server. Restore this session to resume work."}</p>{self.button(ctx,"Restore session",Operation::Archive{id:id.clone(),archived:false})}</>}}else{html!{<><p class="muted">{"Archive a stopped session without deleting its history."}</p>{if matches!(status,"idle"|"connected"|"disconnected") && !working && !waiting && self.queued.is_empty() && self.controls["goal"]["status"]!="active" {self.button(ctx,"Archive session",Operation::Archive{id:id.clone(),archived:true})}else{html!{<><button disabled=true>{"Archive session"}</button><p class="muted control-warning" role="status">{"Stop the current turn, pause any active goal, and remove queued messages before archiving."}</p></>}}}</>}}}
-                </section>
+                </crate::ui::Group>
 
                 {self.modal_error(ctx)}
                 </div>
@@ -1757,6 +1909,11 @@ impl App {
             {if requires_full_access{html!{<p class="muted control-warning" role="status">{"SSH and containers require danger-full-access."}</p>}}else{Html::default()}}
             {if self.targets_pending{html!{<p role="status">{if active {"Executors and directories saved for the next new turn. Current turn access is unchanged."} else {"Executors and directories saved. Send a message to apply them before resuming a goal or queue."}}</p>}}else{Html::default()}}
             {if active && self.targets_pending {html!{<div class="effective-targets"><strong>{"Current turn executors"}</strong><ul>{for array(&self.current["targets"]).iter().map(|target|html!{<li>{crate::overview::environment_label(text(target,"id"),&self.targets)}{" · "}<code>{text(target,"cwd")}</code></li>})}</ul></div>}}else{Html::default()}}
+            <crate::ui::Form onsubmit={ctx.link().callback(move |event:SubmitEvent|{
+                let interrupting=event.submitter().is_some_and(|button|button.get_attribute("data-target-mode").as_deref()==Some("interrupt"));
+                Msg::Run(if interrupting{interrupt.clone()}else{operation.clone()})
+            })} actions={html!{<><button type="submit" disabled={locked}>{if active{"Save for next turn"}else{"Save executors and directories"}}</button>
+                {if active{html!{<button type="submit" data-target-mode="interrupt" disabled={locked}>{"Interrupt and save"}</button>}}else{Html::default()}}</>}}>
             <fieldset disabled={locked}>
                 {for self.targets.iter().filter(|target|target["owner"].is_null()||text(target,"owner")==self.saved.selected).map(|target|{
                     let id=text(target,"id").to_owned();
@@ -1772,16 +1929,13 @@ impl App {
                     let mut removed=chosen.clone(); removed.remove(index);
                     let mut primary=chosen.clone();
                     let entry=primary.remove(index);primary.insert(0,entry);
-                    html!{<div class="target-directory"><crate::ui::FieldAction><label>{format!("{}{} working directory",name,if index==0{" (primary)"}else{""})}<input value={text(target,"cwd").to_owned()} oninput={ctx.link().callback(move |e:InputEvent|{let mut next=current.clone();next[index]["cwd"]=json!(input(e));Msg::TargetDraft(json!(next))})}/></label>
+                    html!{<div class="target-directory"><crate::ui::FieldAction><label>{format!("{}{} working directory",name,if index==0{" (primary)"}else{""})}<crate::ui::Input aria_label={format!("{}{} working directory",name,if index==0{" (primary)"}else{""})} value={text(target,"cwd").to_owned()} oninput={ctx.link().callback(move |e:InputEvent|{let mut next=current.clone();next[index]["cwd"]=json!(input(e));Msg::TargetDraft(json!(next))})} rule={crate::ui::Rule::Path}/></label>
                         <crate::directory_picker::DirectoryPicker key={format!("{}:{}",self.generation,text(target,"id"))} client={self.connected.then(||self.client.clone()).flatten()} target={text(target,"id").to_owned()} path={text(target,"cwd").to_owned()} onchoose={ctx.link().callback({let targets=chosen.clone();let id=text(target,"id").to_owned();move |path:String|{let mut next=targets.clone();if let Some(target)=next.iter_mut().find(|t|t["id"]==id){target["cwd"]=json!(path);}Msg::TargetDraft(json!(next))}})}/></crate::ui::FieldAction>
                         {if index>0{html!{<button type="button" onclick={ctx.link().callback(move |_|Msg::TargetDraft(json!(primary)))}>{"Make primary"}</button>}}else{Html::default()}}
-                        <button type="button" onclick={ctx.link().callback(move |_|Msg::TargetDraft(json!(removed)))}>{"Remove"}</button>
+                        <crate::ui::IconButton label={format!("Remove {name}")} title="Remove executor" onclick={ctx.link().callback(move |_|Msg::TargetDraft(json!(removed)))}>{"×"}</crate::ui::IconButton>
                     </div>}
                 })}
-                {self.button(ctx,if active {"Save for next turn"} else {"Save executors and directories"},operation)}
-                {if active {self.button(ctx,"Interrupt and save",interrupt)}else{Html::default()}}
-            </fieldset>
-            <crate::ui::AddButton onclick={ctx.link().callback(|_|Msg::NewTargetSetup("session-ssh".into()))}>{"+ Add SSH executor to this session"}</crate::ui::AddButton>
+</fieldset></crate::ui::Form>
             {for self.targets.iter().filter(|target|text(target,"owner")==self.saved.selected).map(|target|{
                 let id=text(target,"id").to_owned();
                 html!{<section class="environment-card"><h3>{text(target,"name")}</h3><p>{format!("Private SSH executor · {}",text(target,"destination"))}</p>
@@ -1790,6 +1944,7 @@ impl App {
                     {if array(&target["users"]).is_empty(){self.button(ctx,"Forget executor",Operation::ForgetTarget{id})}else{Html::default()}}
                 </section>}
             })}
+            <crate::ui::AddButton onclick={ctx.link().callback(|_|Msg::NewTargetSetup("session-ssh".into()))}>{"+ Add SSH executor to this session"}</crate::ui::AddButton>
             {if !blockers.is_empty(){html!{<p class="muted control-warning" role="status">{blockers.join(" ")}</p>}}else{Html::default()}}
         </section>}
     }
@@ -1805,13 +1960,13 @@ impl App {
         };
         let id = self.saved.selected.clone();
         html! {<>
-            <form class="setup" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();Msg::Run(Operation::RegisterSessionSshTarget{id:id.clone(),input:payload.clone()})})}>
+            <crate::ui::Form class="setup" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();Msg::Run(Operation::RegisterSessionSshTarget{id:id.clone(),input:payload.clone()})})} actions={html!{<button class="primary" disabled={locked||self.current["sandbox"]!="danger-full-access"}>{"Check and add SSH executor"}</button>}}>
                 <fieldset disabled={locked}>
-                    {self.field(ctx,"ssh_name","SSH executor name","Build machine")}{self.field(ctx,"ssh_destination","SSH destination","user@host or SSH config alias")}{self.field(ctx,"ssh_port","SSH port (optional)","22")}{self.field(ctx,"ssh_identity","Identity file on this server (optional)","/home/user/.ssh/id_ed25519")}{self.field(ctx,"ssh_known_hosts","Known hosts file on this server (optional)","/home/user/.ssh/known_hosts")}{self.field(ctx,"ssh_cwd","Remote working directory","/workspace")}
+                    <crate::ui::Group title="Executor">{self.field(ctx,"ssh_name","SSH executor name","Build machine")}{self.field(ctx,"ssh_destination","SSH destination","user@host or SSH config alias")}</crate::ui::Group><crate::ui::Group title="SSH connection">{self.field(ctx,"ssh_port","SSH port (optional)","22")}{self.field(ctx,"ssh_identity","Identity file on this server (optional)","/home/user/.ssh/id_ed25519")}{self.field(ctx,"ssh_known_hosts","Known hosts file on this server (optional)","/home/user/.ssh/known_hosts")}{self.field(ctx,"ssh_cwd","Remote working directory","/workspace")}</crate::ui::Group>
                     {if self.current["sandbox"]!="danger-full-access"{html!{<p class="muted control-warning" role="status">{"Select danger-full-access before adding SSH."}</p>}}else{Html::default()}}
-                    <button class="primary" disabled={self.current["sandbox"]!="danger-full-access"}>{"Check and add SSH executor"}</button>
+
                 </fieldset>
-            </form>
+            </crate::ui::Form>
         </>}
     }
 
@@ -1825,13 +1980,13 @@ impl App {
             known_hosts_file: nonempty(self.saved.field("shared_ssh_known_hosts")),
         };
         html! {<>
-            <form class="setup" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();Msg::Run(Operation::RegisterSshTarget{input:payload.clone()})})}>
+            <crate::ui::Form class="setup" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();Msg::Run(Operation::RegisterSshTarget{input:payload.clone()})})} actions={html!{<button class="primary" disabled={self.busy||!self.connected}>{"Check and add SSH executor"}</button>}}>
                 <fieldset disabled={self.busy||!self.connected}>
-                    {self.field(ctx,"shared_ssh_name","SSH executor name","Build machine")}{self.field(ctx,"shared_ssh_destination","SSH destination","user@host or SSH config alias")}{self.field(ctx,"shared_ssh_port","SSH port (optional)","22")}{self.field(ctx,"shared_ssh_identity","Identity file on this server (optional)","/home/user/.ssh/id_ed25519")}{self.field(ctx,"shared_ssh_known_hosts","Known hosts file on this server (optional)","/home/user/.ssh/known_hosts")}{self.field(ctx,"shared_ssh_cwd","Remote working directory","/workspace")}
+                    <crate::ui::Group title="Executor">{self.field(ctx,"shared_ssh_name","SSH executor name","Build machine")}{self.field(ctx,"shared_ssh_destination","SSH destination","user@host or SSH config alias")}</crate::ui::Group><crate::ui::Group title="SSH connection">{self.field(ctx,"shared_ssh_port","SSH port (optional)","22")}{self.field(ctx,"shared_ssh_identity","Identity file on this server (optional)","/home/user/.ssh/id_ed25519")}{self.field(ctx,"shared_ssh_known_hosts","Known hosts file on this server (optional)","/home/user/.ssh/known_hosts")}{self.field(ctx,"shared_ssh_cwd","Remote working directory","/workspace")}</crate::ui::Group>
 
-                    <button class="primary">{"Check and add SSH executor"}</button>
+
                 </fieldset>
-            </form>
+            </crate::ui::Form>
         </>}
     }
 
@@ -1856,10 +2011,10 @@ impl App {
             url: self.saved.field("target_url"),
             cwd: self.saved.field("target_cwd"),
         };
-        html!{<form class="setup" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();Msg::Run(Operation::RegisterTarget{input:payload.clone()})})}>
-                {self.field(ctx,"target_name","Executor name","Build machine")}{self.field(ctx,"target_url","Executor WebSocket URL","ws://127.0.0.1:4501")}{self.field(ctx,"target_cwd","Default working directory","/workspace")}
-                <button class="primary" disabled={self.busy||!self.connected}>{"Register executor"}</button>
-            </form>}
+        html!{<crate::ui::Form class="setup" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();Msg::Run(Operation::RegisterTarget{input:payload.clone()})})} actions={html!{<button class="primary" disabled={self.busy||!self.connected}>{"Register executor"}</button>}}>
+                <crate::ui::Group title="Executor">{self.field(ctx,"target_name","Executor name","Build machine")}{self.field(ctx,"target_url","Executor WebSocket URL","ws://127.0.0.1:4501")}{self.field(ctx,"target_cwd","Default working directory","/workspace")}</crate::ui::Group>
+
+            </crate::ui::Form>}
     }
 
     pub(super) fn create_container_form(&self, ctx: &Context<Self>) -> Html {
@@ -1871,30 +2026,31 @@ impl App {
             cpus: self.saved.field("container_cpus").parse().unwrap_or(2),
         };
         html! {
-                    <form class="setup" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();Msg::Run(Operation::CreateContainer{input:container.clone()})})}>
-                        {self.field(ctx,"container_name","Container name","Work container")}
+                    <crate::ui::Form class="setup" onsubmit={ctx.link().callback(move |e:SubmitEvent|{e.prevent_default();Msg::Run(Operation::CreateContainer{input:container.clone()})})} actions={html!{<button class="primary" disabled={self.busy||!self.connected}>{"Create and start container"}</button>}}>
+                        <crate::ui::Group title="Container">{self.field(ctx,"container_name","Container name","Work container")}
                         <label for="container_engine">{"Container engine"}</label><select id="container_engine" onchange={ctx.link().callback(|e:Event|Msg::Field("container_engine".into(),e.target_unchecked_into::<HtmlSelectElement>().value()))}>
                             <option value="docker" selected={self.saved.field("container_engine")!="podman"}>{"Docker"}</option>
                             <option value="podman" selected={self.saved.field("container_engine")=="podman"}>{"Podman"}</option>
                         </select>
                         {self.field(ctx,"container_image","Local container image","ubuntu:24.04")}
-                        <div class="resource-fields"><label>{"Container memory (MiB)"}<input type="number" min="256" max="65536" value={self.saved.field("container_memory")} placeholder="4096" oninput={ctx.link().callback(|e:InputEvent|Msg::Field("container_memory".into(),input(e)))}/></label>
-                        <label>{"Container CPUs"}<input type="number" min="1" max="32" value={self.saved.field("container_cpus")} placeholder="2" oninput={ctx.link().callback(|e:InputEvent|Msg::Field("container_cpus".into(),input(e)))}/></label></div>
+                        </crate::ui::Group><crate::ui::Group title="Resources"><div class="resource-fields"><label>{"Container memory (MiB)"}<crate::ui::Input kind="number" min="256" max="65536" value={self.saved.field("container_memory")} placeholder="4096" oninput={ctx.link().callback(|e:InputEvent|Msg::Field("container_memory".into(),input(e)))} aria_label="Container memory (MiB)" rule={crate::ui::Rule::Text}/></label>
+                        <label>{"Container CPUs"}<crate::ui::Input kind="number" min="1" max="32" value={self.saved.field("container_cpus")} placeholder="2" oninput={ctx.link().callback(|e:InputEvent|Msg::Field("container_cpus".into(),input(e)))} aria_label="Container CPUs" rule={crate::ui::Rule::Text}/></label></div>
 
-                        <button class="primary" disabled={self.busy||!self.connected}>{"Create and start container"}</button>
-                    </form>
+                        </crate::ui::Group>
+                    </crate::ui::Form>
         }
     }
 
     fn environment_view(&self, ctx: &Context<Self>) -> Html {
         html! {<div class="server-settings">
-            <section class="runtime-panel account-status"><crate::ui::SectionTitle>{"Codex account"}</crate::ui::SectionTitle>{if self.runtime["running"].as_bool()==Some(true){if !self.runtime["account"].is_null(){html!{<p>{format!("Signed in {} · {} profile",text(&self.runtime["account"],"email"),text(&self.runtime,"profile"))}</p>}}else{self.button(ctx,"Sign in with ChatGPT",Operation::Login)}}else{self.button(ctx,"Start Codex runtime",Operation::StartRuntime)}}
+            <crate::ui::Group class="runtime-panel account-status" title="Codex account">{if self.runtime["running"].as_bool()==Some(true){if !self.runtime["account"].is_null(){html!{<p>{format!("Signed in {} · {} profile",text(&self.runtime["account"],"email"),text(&self.runtime,"profile"))}</p>}}else{self.button(ctx,"Sign in with ChatGPT",Operation::Login)}}else{self.button(ctx,"Start Codex runtime",Operation::StartRuntime)}}
                 {if !self.login.is_null(){html!{<><a href={text(&self.login,"verificationUrl").to_owned()} target="_blank" rel="noopener noreferrer">{"Continue sign-in in your browser"}</a><p>{"Device code: "}<strong>{text(&self.login,"userCode")}</strong></p></>}}else{Html::default()}}
                 {if let Some(error)=self.runtime["error"].as_str(){html!{<p class="muted">{error}</p>}}else{Html::default()}}
-            </section>
+            </crate::ui::Group>
             {if let Some(client)=self.client.clone(){html!{<crate::notifications::Notifications key={format!("{}:{}",self.saved.host,self.generation)} client={client} host={self.saved.host.clone()}/>}}else{Html::default()}}
+            {if let Some(client)=self.client.clone(){html!{<crate::prompt_settings::PromptSettings key={format!("prompts:{}:{}",self.saved.host,self.generation)} client={client}/>}}else{Html::default()}}
             <crate::runtime_features::RuntimeFeatures runtime={self.runtime.clone()} disabled={self.busy||!self.connected} onrun={ctx.link().callback(Msg::Run)}/>
-            <section class="settings-targets"><crate::ui::SectionTitle>{"Executors"}</crate::ui::SectionTitle>
+            <crate::ui::Group class="settings-targets" title="Executors">
             {self.target_registry(ctx)}
             <div class="target-management-grid">
             <section class="container-management"><h3>{"Containers"}</h3>
@@ -1911,7 +2067,7 @@ impl App {
                 {for self.environments.iter().map(|env|{let id=text(env,"id").to_owned();let status=text(env,"status");html!{<section class="environment-card"><h3>{text(env,"name")}</h3><p>{status}</p><div class="environment-actions">{if status=="running"{self.button(ctx,"Stop · keep disk",Operation::StopEnvironment{id})}else{self.button(ctx,"Start",Operation::StartEnvironment{id})}}</div>{if let Some(error)=env["error"].as_str(){html!{<p class="error">{error}</p>}}else{Html::default()}}</section>}})}
                 <crate::ui::AddButton onclick={ctx.link().callback(|_|Msg::NewTargetSetup("vm".into()))}>{"+ Create VM"}</crate::ui::AddButton>
             </section>
-            </div></section>
+            </div></crate::ui::Group>
         </div>}
     }
 }

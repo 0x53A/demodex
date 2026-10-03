@@ -16,6 +16,7 @@ mod rich_messages;
 mod links;
 mod svg;
 mod runtime_features;
+mod prompt_settings;
 mod transcript;
 mod timestamps;
 mod usage;

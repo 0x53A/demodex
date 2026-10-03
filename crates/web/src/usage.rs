@@ -49,6 +49,16 @@ fn reset_in(window: &Value) -> String {
     let minutes = ((reset - js_sys::Date::now()/1000.0).max(0.0)/60.0).ceil() as u64;
     format!("resets in {}d {}h {}m", minutes/1440, minutes%1440/60, minutes%60)
 }
+fn credit_label(credits: &Value) -> String {
+    if credits["unlimited"] == true { return "Unlimited".into(); }
+    if let Some(balance) = credits["balance"].as_str().filter(|s| !s.trim().is_empty()) { return format!("{balance} credits remaining"); }
+    if credits["balance"].is_number() { return format!("{} credits remaining", credits["balance"]); }
+    match credits["hasCredits"].as_bool() {
+        Some(true) => "Available · balance not reported".into(),
+        Some(false) => "No credits available".into(),
+        None => "Not reported".into(),
+    }
+}
 pub fn weekly(runtime: &Value, connected: bool) -> Html {
     let usage = &runtime["weekly_usage"];
     let weekly = array(&usage["windows"]);
@@ -69,10 +79,15 @@ pub fn weekly(runtime: &Value, connected: bool) -> Html {
                 html!{<div class="weekly-window">
                     <strong>{format!("{} · {} · {}",text(window,"name"),period,remaining(window).map(|v|format!("{v}% remaining")).unwrap_or_else(||"unavailable".into()))}</strong>
                     {if let Some(left)=remaining(window){html!{<meter min="0" max="100" value={left.to_string()} aria-label={format!("Remaining {} capacity for {}",period,text(window,"name"))}/>}}else{Html::default()}}
-                    <small title={timestamp(&window["resets_at"])}>{reset_in(window)}</small>
+                    <small>{reset_in(window)}</small><small>{format!("Reset: {}",timestamp(&window["resets_at"]))}</small>
                 </div>}
             })}
             {if windows.is_empty(){html!{<p class="muted">{usage["error"].as_str().unwrap_or("Usage unavailable")}</p>}}else{Html::default()}}
+            <div class="usage-credits"><strong>{"Credits"}</strong>
+                {if array(&usage["credits"]).is_empty(){html!{<p class="muted">{"Credits not reported"}</p>}}else{html!{<>
+                    {for array(&usage["credits"]).iter().map(|entry|html!{<p>{format!("{} · {}",text(entry,"name"),credit_label(&entry["credits"]))}</p>})}
+                </>}}}
+            </div>
             {if usage["checked_at"].is_number(){html!{<small>{format!("Last updated: {}",timestamp(&usage["checked_at"]))}</small>}}else{Html::default()}}
         </div>
     </details>}

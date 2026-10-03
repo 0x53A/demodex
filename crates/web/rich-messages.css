@@ -40,7 +40,7 @@
 .message-destination { margin:6px 0 }
 .link-destination { display:block; white-space:pre-wrap; overflow-wrap:anywhere; unicode-bidi:plaintext; user-select:text; font-family:var(--mono,monospace); font-size:.9em }
 .link-warning { color:#ffbd7f; font-weight:600 }
-.file-match { padding:10px 0; border-bottom:1px solid #41473e }
+
 .file-match-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; overflow-wrap:anywhere }
 .file-actions { display:flex; gap:6px; flex-shrink:0 }
 .file-actions button { min-width:36px; min-height:36px }

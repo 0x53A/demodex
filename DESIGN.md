@@ -261,14 +261,15 @@ It selects registered host, SSH, container, VM or external executors, with expli
 working directories and a primary target. SSH and container executors require
 danger-full-access.
 Inline VM provisioning adds the resulting VM to the draft selection; creating
-the session remains a separate explicit action. Draft fields survive closing.
+the session remains a separate explicit action. Closing discards the session draft.
 Saved host-thread discovery and explicit resume also live in this widget.
-Creation and resume have independent name and sandbox drafts; completing either
-form leaves the other intact. Setup and session-control drafts survive switching
-servers and remain scoped to their original server. Goal status actions preserve
-unsaved objective and budget edits.
+Creation and resume have independent name and sandbox drafts within one opening.
+Closing, completing, or navigating away discards both. Session controls reopen
+from saved settings. Goal status actions preserve unsaved objective and budget
+edits while the dialog stays open.
 Server Settings opens a content-sized modal over the current session or overview.
-Closing it preserves the selected session, transcript position and form drafts.
+Closing it preserves the selected session, transcript position and active sign-in,
+while discarding unsubmitted settings edits.
 It does not reopen automatically on reload. It retains account/login, target
 registration and VM/container lifecycle.
 Use the DDU egui console's density: 10 px section padding, 6–8 px row gaps,
@@ -284,6 +285,29 @@ Creating or reconnecting an SSH-only session does not attach a host or VM target
 The existing diagnostic external app-server API remains available.
 
 ## Compact session workflow
+
+Server Settings contains System prompts. Per-model replacements use a dashed add
+button, model selector, pencil edit button and remove button. The shared appendix
+follows either the current Codex/profile base or the model replacement. Demodex
+integration instructions remain a separate editable layer. Editors offer Edit and
+Diff modes using one draft; the diff compares the latest fetched default on the
+left with an editable replacement on the right. Changed lines are red/green;
+mobile stacks the two sides. Sources, profile overrides and changed-default notices
+are explicit. Reset restores the current baseline; Cancel discards the editor draft.
+Save persists the prompt settings without changing an active conversation.
+
+New Session can inherit or override project-instruction inclusion. Session controls
+offer inclusion checkboxes and an explicit Apply prompts and reconnect action.
+New managed sessions initially use runtime defaults for model, reasoning effort
+and service tier. Choosing a runtime-catalogue model enables explicit effort and
+tier settings; the daemon validates the complete choice. Effort/tier-only changes
+to an existing session do not reconnect it or apply pending prompt edits.
+Global instruction inclusion is shown checked and unavailable because Codex does not
+expose an independent switch. Instruction file previews are read-only and show exact
+paths; these current-file previews are distinct from the source paths Codex reported
+at connection. Prompt settings, editor drafts and previews follow normal dialog and
+connection lifetimes. Tool selection is a separate feature.
+
 The header reads // DEMODEX, Connections, connection status and server name,
 usage, and Server settings. Keep descriptive account prose out of usage.
 Session tree entries lead with the actual title, then generated agent identity,
@@ -323,9 +347,17 @@ Goals appear beside background activity in the overview and composer controls.
 buttons inside those overlays remain solid. `ui::SectionTitle` supplies the
 orange section accent; `ui::FieldAction` aligns directory inputs and Browse.
 Use these components instead of local dashed borders or ad-hoc form rows.
-Creation overlays are content-sized, preserve cancelled drafts, and close on
-success. Resume starts with an empty thread ID; an empty resume form cannot
-submit. Navigation closes nested setup overlays without submitting them.
+Creation overlays are content-sized and close on success. Closing any dialog
+(including navigation) discards its unsubmitted edits; reopening uses defaults
+or saved settings. Nested pickers preserve the still-open parent's draft, and
+accepted staged SSH belongs to the New Session draft until submitted. Form drafts
+are not restored after reload. Conversation drafts and pending decisions remain
+separate. Resume starts with an empty thread ID; an empty resume form cannot submit.
+Late responses cannot refill or close a different dialog opening. Submitted
+operations and their receipts survive dismissal. Failed SSH attempts discard
+form data; a successfully created session remains if SSH attachment fails.
+Server settings retains an active device-login code across closing and reopening;
+closing the dialog does not cancel sign-in or start another attempt.
 
 - Stars are saved on the server and sort first within each project folder.
   Reorder mode exposes left drag handles (mouse, touch, or arrow keys). Drops
@@ -360,7 +392,7 @@ original source. Preserve that choice as new messages arrive. Keep keyed message
 chunks in a stable list container so unrelated updates do not remount them.
 
 Never insert model HTML into the app document. Links are numbered inline buttons
-with icon, index and title, plus a destination list at the end of each message.
+with icon, index and title, an exact-destination hover tooltip, plus a destination list at the end of each message.
 An operator-opened HTTP(S) popup exposes the full parsed URL with its hostname
 bold before navigation. Reject malformed/control characters and embedded
 credentials; explain normalization and Punycode. Unsupported schemes remain
@@ -432,3 +464,67 @@ transform attribute accepts at most 16 operations. Require a valid viewBox or po
 numeric width and height. Fill/stroke accept hex and a limited set of color names;
 fonts are generic serif, sans-serif or monospace. Raw source remains independently
 expandable for both supported and unsupported drawings.
+
+Popup sizing uses the shared Modal component: content-sized forms grow to the
+viewport with 32px margins on desktop and 8px on mobile, then scroll internally.
+Dynamic directory browsers opt into stable sizing, with a scrolling results area
+between fixed navigation and selection controls. Keep these rules shared rather
+than adding dialog-specific height caps.
+New Session groups have a little extra space above their headings. Resume search
+sits beside its checkbox. The host directory sits directly below its checkbox;
+unchecking removes it. Other executor removal uses a labelled ×, and creation
+buttons follow the existing executor entries. The Sessions tree/list toggle saves
+its view preference; flat mode preserves project-scoped reorder constraints.
+Archive restore uses a labelled return-arrow icon with the same corner geometry.
+
+The shared `ui::Group` owns settings chrome: a thin rectangular border, dark
+inset background, 10px padding and 10px separation, with an optional SectionTitle.
+Use it for Server Settings, session controls, new/resumed session field groups,
+connection/authentication and executor editors, and bounded metadata/activity
+panels. Keep form submission and disabled fieldsets with their owning forms.
+Group framing must not depend on being inside Server Settings. Nested headings
+use ordinary text; the orange accent identifies the group's main heading.
+All primary buttons share hover, pressed and keyboard-focus feedback; disabled
+buttons retain their disabled appearance. Server settings retains touch-sized
+controls for coarse pointers. Both directory and saved-session browsers use
+stable popup sizing with independent scrolling results.
+
+Consistency review covers server settings, connections, creation/resume and
+executor editors, session controls/model/goals, session tree/list/archive,
+background terminals, directory/search pickers, chat/composer, approvals/questions,
+and web/file/SVG previews. Conversation content and pending decisions retain their
+purpose-specific structure; shared controls, focus and popup rules still apply.
+
+Folder groups with sessions place a thin shared dashed + Session button directly
+below the path, before session cards. It opens the New Session form.
+The usage popup shows every reported quota window with relative and absolute reset
+times, plus reported credit balances or an explicit unavailable state.
+
+The composer action row always includes the model picker. Selection shares the
+Session controls draft and requires Apply model; active sessions keep the picker
+visible but disabled. Load the catalogue when the selected session connects.
+
+`ui::Form` keeps each dialog's submit actions in a footer outside its scrollable
+fields. Independent sections in Session controls keep their own action rows.
+Validation reports errors beside the field, focuses the first invalid field on
+submit, and never sends the operation until all enabled fields in that form pass.
+Nested dialogs cannot submit their parent form. Operational blockers (busy,
+disconnected, active session, unsupported permissions) remain separate from field
+validation. Use `ui::Input` for names, paths, required fields, URLs, ports and
+numeric limits, with stable accessible labels and error descriptions.
+
+Tree and List are explicit mutually exclusive buttons, with the selected state
+exposed to keyboard and assistive technology. `ui::IconButton` owns icon size,
+accessible name, tooltip, and hover/pressed/focus feedback. Archive uses the red
+destructive variant; Restore and removing an unsaved executor selection are
+neutral. Layout-specific CSS positions buttons without redefining their states.
+
+System shares open a compact intake picker with the exact received text and file
+names, a New session action and connected, non-archived sessions on the current
+server. Offer Choose server without losing the incoming share. The normal New
+Session form supplies execution settings; closing it returns to the share picker.
+Selection appends original text and quoted uploaded file paths to that session's
+draft, preserving existing edits and leaving Send explicit. Keep files unchanged,
+including HEIC, and show a large-upload warning above 4 MiB. Interrupted uploads
+show unconfirmed receipts and never restart automatically. Discard clears the
+local incoming payload; confirmed executor uploads follow existing retention.

@@ -139,13 +139,13 @@ with tempfile.TemporaryDirectory(prefix='demodex-push-') as temp:
             expect(panel.get_by_role('button',name='Send test notification')).to_be_disabled()
             expect(panel.get_by_role('button',name='Disable push',exact=True)).to_have_count(0)
             assert call(host,token,{'PushSettings':{'device_id':device}})['enabled'] is False
-            # Clicking from another selected server preserves its forms and chat drafts.
-            page.evaluate("""()=>{const saved=JSON.parse(sessionStorage.getItem('demodex-rust-view'));saved.host='https://other.example';saved.fields={new_session_name:'Keep other form'};saved.drafts['https://other.example:other-session']='Keep other draft';sessionStorage.setItem('demodex-rust-view',JSON.stringify(saved));}""")
+            # Clicking from another server preserves chat drafts and preferences, not closed forms.
+            page.evaluate("""()=>{const saved=JSON.parse(sessionStorage.getItem('demodex-rust-view'));saved.host='https://other.example';saved.fields={new_session_name:'Discard other form',session_view:'flat'};saved.drafts['https://other.example:other-session']='Keep other draft';sessionStorage.setItem('demodex-rust-view',JSON.stringify(saved));}""")
             page.goto(captures[0]['data']['url'])
             expect(page.locator('.session-heading')).to_contain_text('Notification fixture',timeout=20000)
             assert 'notify_server' not in page.url
             saved=page.evaluate("JSON.parse(sessionStorage.getItem('demodex-rust-view'))")
-            assert saved['host_fields']['https://other.example']['new_session_name']=='Keep other form'
+            assert saved['host_fields']['https://other.example']=={'session_view':'flat'}
             assert saved['drafts']['https://other.example:other-session']=='Keep other draft'
             page.set_viewport_size({'width':390,'height':844})
             page.get_by_role('button',name='Server settings',exact=True).click()

@@ -31,9 +31,22 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         Detail { id } => return Ok(Response::Detail(detail(app, id).await?)),
         Events { id, after } => return Ok(Response::Events(app.manager.store.events(&id, after)?)),
         Runtime => runtime_status(app).await?,
+        RuntimeModels => {
+            let (rpc, _) = app.orchestrator.runtime_rpc().await?;
+            crate::controls::model_catalog(&rpc).await?
+        }
+        PromptSettings => app.orchestrator.prompt_settings_view().await?,
+        SavePromptSettings { expected_revision, settings } => {
+            let revision=app.manager.store.set_prompt_settings(expected_revision,&settings)?;
+            app.manager.changed();
+            json!({"revision":revision})
+        }
+        InstructionFiles { target } => tokio::time::timeout(std::time::Duration::from_secs(15), app.orchestrator.instruction_files(target)).await.context("Instruction preview timed out")??,
+        SessionPromptSettings { id } => app.orchestrator.session_prompt_view(&id)?,
+        ApplySessionPromptSettings { id, include_project } => app.orchestrator.apply_session_prompt(&id,include_project).await?,
         DefaultPrompt => app.orchestrator.default_prompt().await?,
         CreateSessionWithPrompt { input, prompt } => {
-            return Ok(Response::Session(app.orchestrator.selected_session(&input.name, &input.targets, input.sandbox, Some(&prompt)).await?));
+            return Ok(Response::Session(app.orchestrator.selected_session(&input.name, &input.targets, input.sandbox, Some(&prompt), input.include_project, input.model.as_ref()).await?));
         }
         HostSessionWithPrompt { input, prompt } => {
             ensure!(input.thread_id.is_none(), "Prompt overrides require a new thread");
@@ -86,6 +99,10 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         }
         MessageFiles { id, item } => crate::message_files::listing(&app.manager, &id, &item).await?,
         ReadMessageFile { id, item, destination, executor } => crate::message_files::read(&app.manager, &id, &item, &destination, &executor).await?,
+        UploadFile { id, name, data } => {
+            let bytes = crate::uploads::decode_file(&name, &data)?;
+            json!({"path":app.orchestrator.upload_file(&id, &bytes, &name, false).await?})
+        }
         UploadImage { id, bytes } => {
             json!({"path":app.orchestrator.upload_image(&id, &bytes).await?})
         }
@@ -176,6 +193,10 @@ pub async fn execute(app: &App, request_id: &str, operation: Operation) -> Resul
         use sha2::{Digest, Sha256};
         crate::uploads::extension(bytes)?;
         json!({"UploadImage":{"id":id,"sha256":Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect::<String>()}}).to_string()
+    } else if let Operation::UploadFile { id, name, data } = &operation {
+        use sha2::{Digest, Sha256};
+        let bytes = crate::uploads::decode_file(name, data)?;
+        json!({"UploadFile":{"id":id,"name":name,"sha256":Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>()}}).to_string()
     } else {
         serde_json::to_string(&operation)?
     };
@@ -334,7 +355,8 @@ async fn detail(app: &App, id: String) -> Result<SessionDetail> {
         Ok(queued) => (queued, Value::Null),
         Err(error) => (Value::Null, json!(format!("{error:#}"))),
     };
-    let controls = app.manager.control_snapshot(&id).await?;
+    let mut controls = app.manager.control_snapshot(&id).await?;
+    controls["prompts"]=app.orchestrator.session_prompt_view(&id)?;
     let background = app.manager.background_snapshot(&id).await;
     Ok(SessionDetail {
         session,
@@ -402,7 +424,7 @@ async fn models(app: &App, id: String) -> Result<Value> {
     app.manager.model_catalog(&id).await
 }
 async fn change_model(app: &App, id: String, input: controls::ModelChoice) -> Result<Value> {
-    app.manager.change_model(&id, input).await
+    app.orchestrator.change_session_model(&id, input).await
 }
 async fn change_goal(app: &App, id: String, input: controls::GoalAction) -> Result<Value> {
     app.manager.change_goal(&id, input).await
@@ -411,6 +433,8 @@ async fn change_goal(app: &App, id: String, input: controls::GoalAction) -> Resu
 async fn runtime_status(app: &App) -> Result<Value> {
     use futures_util::StreamExt;
     let mut status = app.orchestrator.runtime_status().await?;
+    let (revision,prompts)=app.manager.store.prompt_settings()?;
+    status["prompt_defaults"]=json!({"revision":revision,"include_project":prompts.include_project});
     let sessions = app.manager.store.list()?;
     let managed = app.orchestrator.restart_session_ids().await.unwrap_or_default();
     let mut counts = serde_json::Map::new();
@@ -454,7 +478,7 @@ async fn runtime_login(app: &App) -> Result<Value> {
 
 async fn selected_session(app: &App, input: SelectedSession) -> Result<store::Session> {
     app.orchestrator
-        .selected_session(&input.name, &input.targets, input.sandbox, None)
+        .selected_session(&input.name, &input.targets, input.sandbox, None, input.include_project, input.model.as_ref())
         .await
 }
 

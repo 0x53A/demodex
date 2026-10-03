@@ -477,6 +477,45 @@ mod tests {
         );
         Ok(())
     }
+    #[tokio::test]
+    async fn shared_files_preserve_bytes_names_and_receipts() -> Result<()> {
+        use base64::Engine;
+        let root = tempfile::tempdir()?;
+        let mut app = fixture()?;
+        app.orchestrator = crate::orchestrator::Orchestrator::new(
+            app.manager.clone(), root.path().into(), None, Some(root.path().into()), None);
+        let session = app.manager.store.create("share", "ws://127.0.0.1:1", &[], None)?;
+        app.manager.store.bind_host(&session.id)?;
+        app.manager.store.save_target_selection(&session.id, &[crate::targets::Selection {
+            id: "host".into(), cwd: root.path().to_string_lossy().into_owned(),
+        }], &[])?;
+        // No image decoding/signature gate, and larger than the legacy image limit.
+        let bytes = vec![171; 5 * 1024 * 1024];
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let operation = Operation::UploadFile { id: session.id.clone(), name: "Original photo's 🦆.HEIC".into(), data: data.clone() };
+        let receipt = uuid::Uuid::new_v4().to_string();
+        let first = execute(&app, &receipt, operation.clone()).await?;
+        assert_eq!(first, execute(&app, &receipt, operation).await?);
+        let value: serde_json::Value = serde_json::from_str(&first)?;
+        let path = value["path"].as_str().unwrap();
+        assert!(path.ends_with("Original photo's 🦆.HEIC"));
+        assert_eq!(std::fs::read(path)?, bytes);
+        let stored = app.manager.store.receipt(&receipt)?.unwrap().0;
+        assert!(stored.contains("sha256") && stored.len() < 300);
+        for name in ["../outside", "/absolute", "bad\\path", ".."] {
+            assert!(execute(&app, &uuid::Uuid::new_v4().to_string(), Operation::UploadFile {
+                id: session.id.clone(), name: name.into(), data: data.clone(),
+            }).await.is_err());
+        }
+        assert!(execute(&app, &receipt, Operation::UploadFile {
+            id: session.id.clone(), name: "other.heic".into(), data,
+        }).await.is_err());
+        app.manager.store.save_target_selection(&session.id, &[], &[])?;
+        assert!(execute(&app, &uuid::Uuid::new_v4().to_string(), Operation::UploadFile {
+            id: session.id, name: "no-target.heic".into(), data: "YWJj".into(),
+        }).await.unwrap_err().to_string().contains("Select an execution target"));
+        Ok(())
+    }
     #[test]
     fn identity_requires_private_endpoint_exact_user_and_explicit_origin() {
         let users = vec!["owner@example.com".into()];

@@ -178,7 +178,7 @@ impl Component for SessionControls {
         };
         html! {<section class="session-controls" aria-label="Session controls">
 
-            <form onsubmit={model_submit} class="model-controls"><crate::ui::SectionTitle>{"Model"}</crate::ui::SectionTitle>
+            <crate::ui::Form onsubmit={model_submit} class="model-controls" actions={html!{<><button disabled={model_disabled||selected.is_empty()||effort.is_empty()}>{"Apply model"}</button><button type="button" disabled={props.disabled} onclick={refresh}>{"Refresh models"}</button></>}}><crate::ui::Group title="Model" label="Model settings">
                 <p class="accepted-model">{if effective.is_null(){"Accepted model: unconfirmed".into()}else{format!("{}: {} · {}{}",if props.state["connected"]==true{"Accepted model"}else{"Last known model"},text(effective,"model"),text(effective,"effort"),if text(effective,"serviceTier").is_empty(){String::new()}else{format!(" · {}",text(effective,"serviceTier"))})}}</p>
                 {if !props.model_error.is_empty(){html!{<p role="status" class="error">{props.model_error.clone()}</p>}}else{Html::default()}}
                 <label>{"Model"}<select ref={self.model_ref.clone()} aria-label="Model" disabled={model_disabled} onchange={change_select("model")}>
@@ -189,14 +189,23 @@ impl Component for SessionControls {
                 <p class="muted model-description">{text(&model,"description")}</p>
                 <div class="control-fields"><label>{"Reasoning effort"}<select ref={self.effort_ref.clone()} aria-label="Reasoning effort" disabled={model_disabled} onchange={change_select("effort")}><option value="" selected={effort.is_empty()}>{"Select reasoning effort"}</option>{for array(&model["supportedReasoningEfforts"]).iter().map(|v|html!{<option value={text(v,"reasoningEffort").to_owned()} selected={text(v,"reasoningEffort")==effort}>{text(v,"reasoningEffort")}</option>})}</select></label>
                 <label>{"Service tier"}<select ref={self.tier_ref.clone()} aria-label="Service tier" disabled={model_disabled} onchange={change_select("tier")}><option value="" selected={tier.is_empty()}>{"Default"}</option>{for array(&model["serviceTiers"]).iter().map(|v|html!{<option value={text(v,"id").to_owned()} selected={text(v,"id")==tier}>{text(v,"name")}</option>})}</select></label></div>
-                <button disabled={model_disabled||selected.is_empty()||effort.is_empty()}>{"Apply model"}</button><button type="button" disabled={props.disabled} onclick={refresh}>{"Refresh models"}</button>
+
                 {if props.working{html!{<p class="muted control-warning" role="status">{"Session active — wait until idle to change the model."}</p>}}else{Html::default()}}
-            </form>
-            <form onsubmit={goal_submit} class="goal-controls"><crate::ui::SectionTitle>{"Goal"}</crate::ui::SectionTitle>
+            </crate::ui::Group></crate::ui::Form>
+            <crate::ui::Group title="System prompt">
+                <p class="muted">{"Apply the latest server prompt settings by reconnecting this idle session. Pause goals and clear queued work first. Changing models also reconnects when prompt layers are active."}</p>
+                {if props.state["prompts"]["pending"]==true{html!{<p role="status" class="control-warning">{"New server prompt settings are available."}</p>}}else{Html::default()}}
+                {if props.state["prompts"]["legacy"]==true{html!{<p class="control-warning">{"This session has a legacy complete prompt override. Applying replaces it with the server prompt layers."}</p>}}else{Html::default()}}
+                {if let Some(sources)=props.state["prompts"]["applied"]["instruction_sources"].as_array(){html!{<details><summary>{"Instruction files reported by Codex at connection"}</summary><ul>{for sources.iter().filter_map(Value::as_str).map(|path|html!{<li><code>{path}</code></li>})}</ul></details>}}else{Html::default()}}
+                <label class="checkbox"><input type="checkbox" checked={field("include_project",if props.state["prompts"]["include_project"]==false{"false"}else{"true"})!="false"} onchange={props.onfield.reform(|e:Event|("include_project".into(),e.target_unchecked_into::<web_sys::HtmlInputElement>().checked().to_string()))}/>{"Include project instruction files"}</label>
+                <button type="button" disabled={props.disabled||props.working} onclick={props.onrun.reform({let id=props.id.clone();let include=field("include_project",if props.state["prompts"]["include_project"]==false{"false"}else{"true"})!="false";move |_|Operation::ApplySessionPromptSettings{id:id.clone(),include_project:Some(include)}})}>{"Apply prompts and reconnect"}</button>
+                <button type="button" disabled={props.disabled||props.working} onclick={props.onrun.reform({let id=props.id.clone();move |_|Operation::ApplySessionPromptSettings{id:id.clone(),include_project:None}})}>{"Use server inclusion default and reconnect"}</button>
+            </crate::ui::Group>
+            <crate::ui::Form onsubmit={goal_submit} class="goal-controls" actions={html!{<div class="goal-edit-actions">{if goal.is_null() || text(goal,"status")=="complete" || objective.trim()!=text(goal,"objective").trim() || !budget.is_empty() {html!{<><button class="primary" type="submit" disabled={goal_disabled||props.targets_pending||objective.trim().is_empty()}>{"Start goal"}</button><button type="submit" data-goal-action="save" disabled={goal_disabled||objective.trim().is_empty()}>{"Save paused"}</button></>}}else{Html::default()}}</div>}}><crate::ui::Group title="Goal">
                 {if let Some(error)=props.state["goalError"].as_str(){html!{<p class="error" role="status">{error}</p>}}else if goal.is_null(){html!{<p class="goal-status">{"No goal set"}</p>}}else{html!{<div class="goal-state"><p class="goal-status">{format!("Goal: {}",text(goal,"status"))}</p><p>{text(goal,"objective")}</p><p class="muted">{format!("{} tokens used · {} seconds · {}",goal["tokensUsed"].as_i64().unwrap_or(0),goal["timeUsedSeconds"].as_i64().unwrap_or(0),goal["tokenBudget"].as_i64().map(|v|format!("{v} token budget")).unwrap_or_else(||"No token budget".into()))}</p></div>}}}
                 <label>{"Goal objective"}<textarea disabled={goal_disabled} maxlength="4000" value={objective.clone()} oninput={objective_change}/></label>
-                <label>{"Token budget (optional)"}<input type="number" min="1" step="1" placeholder="Keep current budget" disabled={goal_disabled} value={budget.clone()} oninput={budget_change}/></label>
-                <div class="goal-edit-actions">{if goal.is_null() || text(goal,"status")=="complete" || objective.trim()!=text(goal,"objective").trim() || !budget.is_empty() {html!{<><button class="primary" type="submit" disabled={goal_disabled||props.targets_pending||objective.trim().is_empty()}>{"Start goal"}</button><button type="submit" data-goal-action="save" disabled={goal_disabled||objective.trim().is_empty()}>{"Save paused"}</button></>}}else{Html::default()}}</div>
+                <label>{"Token budget (optional)"}<crate::ui::Input kind="number" min="1" step="1" placeholder="Keep current budget" disabled={goal_disabled} value={budget.clone()} oninput={budget_change} aria_label="Token budget (optional)" rule={crate::ui::Rule::Text}/></label>
+
                 {if props.working{html!{<p class="muted control-warning" role="status">{"Session active — completing, clearing, or resuming an existing goal requires idle. You can set a new objective or pause the goal now."}</p>}}else{Html::default()}}
                 {if props.targets_pending{html!{<p class="muted control-warning" role="status">{"Send a message to apply the selected execution targets before resuming a goal."}</p>}}else{Html::default()}}
                 {if !goal.is_null(){html!{<div class="goal-actions">
@@ -206,7 +215,7 @@ impl Component for SessionControls {
                     {if !props.working{action("clear","Clear goal",goal_disabled)}else{Html::default()}}
                 </div>}}else{Html::default()}}
                 {if goal.is_object() && !objective.trim().is_empty() && objective.trim()!=text(goal,"objective").trim(){html!{<p class="muted control-warning" role="status">{"Replacing the objective resets goal usage accounting."}</p>}}else{Html::default()}}
-            </form>
+            </crate::ui::Group></crate::ui::Form>
 
         </section>}
     }

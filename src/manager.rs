@@ -133,8 +133,17 @@ impl Manager {
         Ok(())
     }
 
+    #[cfg(test)]
     pub async fn connect(self: &Arc<Self>, id: &str) -> Result<()> {
-        let _connecting = self.connecting.lock().await;
+        let settings = self.connecting.lock().await;
+        self.connect_locked(id, &settings).await
+    }
+
+    pub(crate) async fn connect_locked(
+        self: &Arc<Self>,
+        id: &str,
+        _settings: &tokio::sync::MutexGuard<'_, ()>,
+    ) -> Result<()> {
         anyhow::ensure!(
             !self.store.get(id)?.archived,
             "Restore the session before resuming it"
@@ -167,6 +176,10 @@ impl Manager {
                 // The caller supplied the complete editable instruction text.
                 // Retain runtime context/tools, but do not load AGENTS.md again.
                 params["config"]["project_doc_max_bytes"] = json!(0);
+            } else if let Some(prepared) = self.store.prompt_record(&format!("prepared/{id}"))?.as_object() {
+                if let Some(base)=prepared.get("base").filter(|v|v.is_string()) { params["baseInstructions"]=base.clone(); }
+                params["developerInstructions"]=prepared["developer"].clone();
+                params["config"]["project_doc_max_bytes"]=if prepared["include_project"] == false { json!(0) } else { prepared["project_limit"].clone() };
             } else if session.thread_id.is_none() || session.presentation.context_reporting {
                 // Read effective instructions instead of replacing the operator's
                 // configuration with our integration snippet. Never write the profile.
@@ -174,11 +187,13 @@ impl Manager {
                 let existing = config["config"]["developer_instructions"].as_str().unwrap_or("");
                 params["developerInstructions"] = json!(format!("{existing}\n\n{}\n\n{}", crate::session_context::INSTRUCTIONS, crate::ssh::AGENT_INSTRUCTIONS));
             }
+            let instruction_sources;
             let mut active_turn=None;
             let mut subagents=crate::subagents::Activity::default();
             let thread=if let Some(thread)=&session.thread_id {
                 params["threadId"] = json!(thread);
                 let result=rpc.call("thread/resume",params).await?;
+                instruction_sources=result["instructionSources"].clone();
                 self.store.model_effective(id, &crate::controls::start_settings(&result))?;
                 self.store.effective_sandbox(id, &result["sandbox"])?;
                 // Preserve the snapshot so a newly imported conversation has its existing history.
@@ -199,6 +214,7 @@ impl Manager {
                 params["environments"] = environments;
                 params["dynamicTools"] = crate::session_context::tools();
                 let result=rpc.call("thread/start",params).await?;
+                instruction_sources=result["instructionSources"].clone();
                 self.store.model_effective(id, &crate::controls::start_settings(&result))?;
                 self.store.effective_sandbox(id, &result["sandbox"])?;
                 let thread=result["thread"]["id"].as_str().context("missing new thread id")?.to_string();
@@ -206,6 +222,9 @@ impl Manager {
                 self.store.enable_context_reporting(id)?;
                 thread
             };
+            let mut prepared=self.store.prompt_record(&format!("prepared/{id}"))?;
+            if !prepared.is_null() { prepared["instruction_sources"]=instruction_sources; }
+            if !prepared.is_null() && self.store.prompt(id)?.is_none() { self.store.put_prompt_record(&format!("applied/{id}"), &prepared)?; }
             let live=Arc::new(Live {rpc,generation:generation.clone(),thread,turn:Mutex::new(active_turn),subagents:Mutex::new(subagents)});
             self.live.lock().await.insert(id.into(),live.clone());
             self.store.status(id,"connected",None)?; self.changed();

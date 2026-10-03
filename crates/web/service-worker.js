@@ -1,3 +1,4 @@
+// SHARE_INBOX
 /* BUILD is injected by the production build, including each asset's digest. */
 const prefix = `demodex-shell-${encodeURIComponent(self.registration.scope)}-`;
 const cacheName = prefix + BUILD.version;
@@ -41,6 +42,15 @@ self.addEventListener('fetch', event => {
   const request = event.request;
   const url = new URL(request.url);
   const root = new URL(self.registration.scope);
+  if (request.method === 'POST' && url.href === new URL('./share-target', root).href) {
+    event.respondWith((async () => {
+      const destination = new URL(root);
+      try { destination.searchParams.set('share', await demodexShares.receive(request)); }
+      catch (error) { destination.searchParams.set('share_error', error.message || 'Could not receive shared content'); }
+      return Response.redirect(destination.href, 303);
+    })());
+    return;
+  }
   if (request.method !== 'GET' || url.origin !== root.origin || request.headers.has('Authorization')) return;
   // API reads and all writes stay network-only. Nothing is queued for replay.
   if (url.pathname.startsWith(root.pathname + 'api/')) return;

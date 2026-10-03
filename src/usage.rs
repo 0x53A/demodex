@@ -17,45 +17,61 @@ fn now() -> u64 {
 pub fn weekly(response: &Value) -> Value {
     let mut windows = Vec::new();
     let mut all_windows = Vec::new();
-    let mut add = |id: &str, bucket: &Value| {
-        for name in ["primary", "secondary"] {
-            let window = &bucket[name];
-            let Some(duration) = window["windowDurationMins"].as_i64().filter(|v| *v > 0) else {
-                continue;
-            };
-            let Some(used) = window["usedPercent"]
-                .as_i64()
-                .filter(|v| (0..=100).contains(v))
-            else {
-                continue;
-            };
-            let entry = json!({"id":id,"name":bucket["limitName"].as_str().unwrap_or(id),
-                "used_percent":used,"resets_at":window["resetsAt"],"duration_minutes":duration});
-            all_windows.push(entry.clone());
-            if duration == 7 * 24 * 60 { windows.push(entry); }
-        }
-    };
-    if let Some(buckets) = response["rateLimitsByLimitId"]
-        .as_object()
-        .filter(|m| !m.is_empty())
+    let mut credits = Vec::new();
     {
-        if let Some(bucket) = buckets.get("codex") {
-            add("codex", bucket);
-        }
-        for (id, bucket) in buckets {
-            if id != "codex" {
-                add(id, bucket);
+        let mut add = |id: &str, bucket: &Value| {
+            if bucket["credits"].is_object() {
+                credits.push(json!({"id":id,"name":bucket["limitName"].as_str().unwrap_or(id),"credits":bucket["credits"]}));
             }
+            for name in ["primary", "secondary"] {
+                let window = &bucket[name];
+                let Some(duration) = window["windowDurationMins"].as_i64().filter(|v| *v > 0) else {
+                    continue;
+                };
+                let Some(used) = window["usedPercent"]
+                    .as_i64()
+                    .filter(|v| (0..=100).contains(v))
+                else {
+                    continue;
+                };
+                let entry = json!({"id":id,"name":bucket["limitName"].as_str().unwrap_or(id),
+                    "used_percent":used,"resets_at":window["resetsAt"],"duration_minutes":duration});
+                all_windows.push(entry.clone());
+                if duration == 7 * 24 * 60 { windows.push(entry); }
+            }
+        };
+        if let Some(buckets) = response["rateLimitsByLimitId"]
+            .as_object()
+            .filter(|m| !m.is_empty())
+        {
+            if let Some(bucket) = buckets.get("codex") {
+                add("codex", bucket);
+            }
+            for (id, bucket) in buckets {
+                if id != "codex" {
+                    add(id, bucket);
+                }
+            }
+        } else {
+            add(
+                response["rateLimits"]["limitId"]
+                    .as_str()
+                    .unwrap_or("codex"),
+                &response["rateLimits"],
+            );
         }
-    } else {
-        add(
-            response["rateLimits"]["limitId"]
-                .as_str()
-                .unwrap_or("codex"),
-            &response["rateLimits"],
-        );
     }
-    json!({"windows":windows,"all_windows":all_windows,"checked_at":now(),"error":if windows.is_empty(){Some("No weekly usage window reported by Codex")}else{None}})
+    // Some Codex versions report windows in the keyed map but keep the credit
+    // balance only on the legacy top-level bucket. Merge that balance without
+    // duplicating a keyed entry for the same limit.
+    let legacy = &response["rateLimits"];
+    let legacy_id = legacy["limitId"].as_str().unwrap_or("codex");
+    if legacy["credits"].is_object()
+        && !credits.iter().any(|entry| entry["id"] == legacy_id)
+    {
+        credits.push(json!({"id":legacy_id,"name":legacy["limitName"].as_str().unwrap_or(legacy_id),"credits":legacy["credits"]}));
+    }
+    json!({"windows":windows,"all_windows":all_windows,"credits":credits,"checked_at":now(),"error":if windows.is_empty(){Some("No weekly usage window reported by Codex")}else{None}})
 }
 
 struct Cached {
@@ -198,6 +214,22 @@ mod tests {
         assert_eq!(store.get(&id)?.context_usage["used_tokens"], 0);
         assert_eq!(store.events(&id, 0)?.len(), 2);
         Ok(())
+    }
+
+    #[test]
+    fn credits_survive_without_windows_and_do_not_duplicate_legacy_buckets() {
+        let credit = json!({"hasCredits":true,"unlimited":false,"balance":"12.50"});
+        let result = weekly(&json!({"rateLimits":{"credits":credit},"rateLimitsByLimitId":{"codex":{"credits":credit}}}));
+        assert_eq!(result["credits"].as_array().unwrap().len(), 1);
+        assert_eq!(result["credits"][0]["credits"], credit);
+        assert_eq!(weekly(&json!({"rateLimits":{"credits":credit}}))["credits"][0]["credits"], credit);
+        assert!(weekly(&json!({}))["credits"].as_array().unwrap().is_empty());
+        let split = weekly(&json!({
+            "rateLimits":{"limitId":"codex","credits":credit},
+            "rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":1,"windowDurationMins":300}}}
+        }));
+        assert_eq!(split["credits"].as_array().unwrap().len(), 1);
+        assert_eq!(split["credits"][0]["credits"], credit);
     }
 
     #[test]

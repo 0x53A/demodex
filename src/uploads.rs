@@ -8,6 +8,53 @@ use std::{
 
 pub const MAX_BYTES: usize = 4 * 1024 * 1024;
 
+// Matches the bounded whole-file SFTP transport. Files are never decoded or resized.
+pub const MAX_FILE_BYTES: usize = 32 * 1024 * 1024;
+
+pub fn validate_name(name: &str) -> Result<()> {
+    ensure!(
+        !name.is_empty()
+            && name.len() <= 240
+            && name != "."
+            && name != ".."
+            && !name
+                .chars()
+                .any(|c| c.is_control() || c == '/' || c == '\\'),
+        "Shared file needs a filename without path separators (maximum 240 bytes)"
+    );
+    Ok(())
+}
+
+pub fn decode_file(name: &str, data: &str) -> Result<Vec<u8>> {
+    use base64::Engine;
+    validate_name(name)?;
+    ensure!(
+        data.len() <= MAX_FILE_BYTES.div_ceil(3) * 4,
+        "Files are limited to 32 MiB"
+    );
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data)?;
+    ensure!(bytes.len() <= MAX_FILE_BYTES, "Files are limited to 32 MiB");
+    Ok(bytes)
+}
+
+pub fn save_file(root: &Path, bytes: &[u8], name: &str) -> Result<String> {
+    validate_name(name)?;
+    let directory = root.join("uploads").join(uuid::Uuid::new_v4().to_string());
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&directory)?;
+    let path = directory.join(name);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 pub fn extension(bytes: &[u8]) -> Result<&'static str> {
     ensure!(
         !bytes.is_empty() && bytes.len() <= MAX_BYTES,

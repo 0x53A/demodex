@@ -145,6 +145,9 @@ graph LR
             expect(article.locator('mfrac')).to_have_count(2)
             expect(article.locator('a,[href],[src],[srcset],img,image')).to_have_count(0)
             expect(article.locator('.markdown-link')).to_contain_text(['Documentation','Email','https://example.org/autolink','Unsafe'])
+            expect(article.locator('.markdown-link').filter(has_text='Documentation')).to_have_attribute('title','https://example.org/docs')
+            expect(article.locator('.markdown-link').filter(has_text='Email')).to_have_attribute('title','mailto:person@example.org')
+            expect(article.locator('.markdown-link').filter(has_text='Unsafe')).to_have_attribute('title','javascript:alert(1)')
             expect(article.get_by_text('Open image',exact=True)).to_have_count(0)
             expect(article.locator('img,script')).to_have_count(0)
             assert page.evaluate('window.renderingInjected') is None

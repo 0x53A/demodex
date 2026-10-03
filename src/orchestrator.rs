@@ -28,7 +28,7 @@ struct Runtime {
     feature_catalog: Value,
 }
 
-fn validate_prompt(prompt: Option<&str>) -> Result<()> {
+pub(crate) fn validate_prompt(prompt: Option<&str>) -> Result<()> {
     ensure!(prompt.is_none_or(|text| text.len() <= 262144 && !text.contains('\0')), "Prompt must be at most 262144 UTF-8 bytes without NUL characters");
     Ok(())
 }
@@ -44,10 +44,10 @@ struct ContainerRuntime {
 }
 
 pub struct Orchestrator {
-    manager: Arc<Manager>,
-    root: PathBuf,
-    host_workspace: Option<PathBuf>,
-    codex_home: Option<PathBuf>,
+    pub(crate) manager: Arc<Manager>,
+    pub(crate) root: PathBuf,
+    pub(crate) host_workspace: Option<PathBuf>,
+    pub(crate) codex_home: Option<PathBuf>,
     image: Mutex<Option<PathBuf>>,
     runtime: Mutex<Option<Runtime>>,
     usage: crate::usage::RateLimitsCache,
@@ -105,7 +105,7 @@ impl Orchestrator {
         Ok(json!(targets))
     }
 
-    async fn resolve_targets(
+    pub(crate) async fn resolve_targets(
         &self,
         selection: &[crate::targets::Selection],
     ) -> Result<Vec<Target>> {
@@ -865,7 +865,7 @@ impl Orchestrator {
         Ok(json!({"running":true}))
     }
 
-    async fn runtime_rpc(&self) -> Result<(Arc<Rpc>, String)> {
+    pub(crate) async fn runtime_rpc(&self) -> Result<(Arc<Rpc>, String)> {
         let mut runtime = self.runtime.lock().await;
         let active = runtime
             .as_mut()
@@ -1414,8 +1414,14 @@ impl Orchestrator {
     }
 
     pub async fn upload_image(&self, id: &str, bytes: &[u8]) -> Result<String> {
-        use tokio::io::AsyncWriteExt;
         let extension = crate::uploads::extension(bytes)?;
+        self.upload_file(id, bytes, &format!("image.{extension}"), true).await
+    }
+
+    pub async fn upload_file(&self, id: &str, bytes: &[u8], name: &str, image: bool) -> Result<String> {
+        use tokio::io::AsyncWriteExt;
+        crate::uploads::validate_name(name)?;
+        ensure!(bytes.len() <= crate::uploads::MAX_FILE_BYTES, "Files are limited to 32 MiB");
         let _lifecycle = self.jobs.lock().await;
         self.manager.store.get(id)?;
         if self.manager.store.staged_targets(id)?.is_some()
@@ -1430,14 +1436,16 @@ impl Orchestrator {
             .context("Select an execution target before uploading")?;
         if primary.id == "host" {
             ensure!(self.is_host_mode(), "Host execution is not configured");
-            return crate::uploads::save(&self.root, bytes, extension);
+            return if image {
+                crate::uploads::save(&self.root, bytes, crate::uploads::extension(bytes)?)
+            } else { crate::uploads::save_file(&self.root, bytes, name) };
         }
         if primary.id.starts_with("ssh-") {
             let ssh = self.ssh.lock().await;
             let engine = ssh
                 .get(&primary.id)
                 .context("Reconnect the session before uploading to SSH")?;
-            return engine.upload(&primary.cwd, bytes, extension).await;
+            return engine.upload_file(&primary.cwd, bytes, name).await;
         }
         if let Some(container_id) = primary.id.strip_prefix("container-") {
             use std::io::Write;
@@ -1449,25 +1457,27 @@ impl Orchestrator {
             std::fs::create_dir(&directory)?;
             std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
             let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
-                .open(directory.join(format!("image.{extension}")))?;
+                .open(directory.join(name))?;
             file.write_all(bytes)?;
-            return Ok(format!("/workspace/{directory_name}/image.{extension}"));
+            return Ok(format!("/workspace/{directory_name}/{name}"));
         }
         let environment = primary
             .id
             .strip_prefix("vm-")
-            .context("Image upload requires a host or VM as the first selected target")?
+            .context("File upload is unsupported for the first selected target")?
             .to_owned();
         let machines = self.machines.lock().await;
         let machine = machines
             .get(&environment)
             .context("Start the session's VM before uploading")?;
         ensure!(machine.target.is_some(), "VM executor is not ready");
-        // No user text enters the remote shell. Each upload has a new private directory.
+        // Each upload has a private directory; the validated original basename is shell-quoted.
         let directory = format!("/workspace/.demodex-upload-{}", uuid::Uuid::new_v4());
-        let path = format!("{directory}/image.{extension}");
+        let path = format!("{directory}/{name}");
+        let quoted_path = format!("'{}'", path.replace('\'', "'\\''"));
+        let temporary = format!("{directory}/.pending-{}", uuid::Uuid::new_v4());
         let script = format!(
-            "umask 077; mkdir '{directory}' && cat > '{directory}/pending' && mv '{directory}/pending' '{path}'"
+            "umask 077; mkdir '{directory}' && cat > '{temporary}' && mv '{temporary}' {quoted_path}"
         );
         let mut child = self
             .ssh(&environment, machine.ssh_port)
@@ -1497,6 +1507,17 @@ impl Orchestrator {
 
     pub async fn connect_session(&self, id: &str) -> Result<()> {
         let _lifecycle = self.jobs.lock().await;
+        let settings = self.manager.connecting.lock().await;
+        self.connect_session_locked(id, &settings, None).await
+    }
+
+    // Caller holds jobs, then manager.connecting, throughout the transition.
+    pub(crate) async fn connect_session_locked(
+        &self,
+        id: &str,
+        settings: &tokio::sync::MutexGuard<'_, ()>,
+        prepared_prompt: Option<&Value>,
+    ) -> Result<()> {
         if self.manager.live.lock().await.contains_key(id) {
             return Ok(());
         }
@@ -1511,6 +1532,13 @@ impl Orchestrator {
         } else {
             session.endpoint
         };
+        if managed {
+            if let Some(prepared) = prepared_prompt {
+                self.manager.store.put_prompt_record(&format!("prepared/{id}"), prepared)?;
+            } else {
+                self.prepare_session_prompt(id).await?;
+            }
+        }
         crate::ssh::require_local_app_server(&endpoint, &selection)?;
         let targets = self.resolve_targets(&selection).await?;
         if self.manager.store.staged_targets(id)?.is_some() {
@@ -1519,7 +1547,7 @@ impl Orchestrator {
             // the staged selection; reconnecting is not target application.
             self.manager.store.retarget(id, &endpoint, &session.targets)?;
             self.manager.store.stage_target_selection(id, &selection, &targets)?;
-            return self.manager.connect(id).await;
+            return self.manager.connect_locked(id, settings).await;
         }
         self.manager.store.retarget(id, &endpoint, &targets)?;
         // Resuming does not update Codex's selected environments until turn/start.
@@ -1528,7 +1556,40 @@ impl Orchestrator {
                 .store
                 .save_target_selection(id, &selection, &targets)?;
         }
-        self.manager.connect(id).await
+        self.manager.connect_locked(id, settings).await
+    }
+
+    pub(crate) async fn apply_session_prompt(
+        &self,
+        id: &str,
+        include_project: Option<bool>,
+    ) -> Result<Value> {
+        let _lifecycle = self.jobs.lock().await;
+        let settings = self.manager.connecting.lock().await;
+        self.apply_session_prompt_locked(id, include_project, &settings).await
+    }
+
+    pub(crate) async fn change_session_model(
+        &self,
+        id: &str,
+        input: demodex_protocol::ModelChoice,
+    ) -> Result<Value> {
+        let _lifecycle = self.jobs.lock().await;
+        let settings = self.manager.connecting.lock().await;
+        let applied = self.manager.store.prompt_record(&format!("applied/{id}"))?;
+        let managed = self.manager.store.uses_runtime(id)?
+            || self.manager.store.host_sessions()?.iter().any(|s| s == id);
+        let current = self.manager.store.model_settings(id)?;
+        let model_changed = current["effective"]["model"].as_str() != Some(input.model.as_str());
+        let reapply = model_changed && managed && self.manager.store.prompt(id)?.is_none()
+            && (applied["base"].is_string() || !self.manager.store.prompt_settings()?.1.models.is_empty());
+        if reapply { self.require_prompt_change_idle(id).await?; }
+        let result = self.manager.change_model_locked(id, input, &settings).await?;
+        if reapply {
+            let project = self.manager.store.prompt_record(&format!("policy/{id}"))?["include_project"].as_bool();
+            self.apply_session_prompt_locked(id, project, &settings).await?;
+        }
+        Ok(result)
     }
 
     pub async fn selected_session(
@@ -1537,6 +1598,8 @@ impl Orchestrator {
         selection: &[crate::targets::Selection],
         sandbox: Option<crate::store::Sandbox>,
         prompt: Option<&str>,
+        include_project: Option<bool>,
+        model: Option<&demodex_protocol::ModelChoice>,
     ) -> Result<Session> {
         validate_prompt(prompt)?;
         let name = if name.trim().is_empty() { "Untitled session" } else { name };
@@ -1558,6 +1621,15 @@ impl Orchestrator {
         let session = {
             let _lifecycle = self.jobs.lock().await;
             let (rpc, endpoint) = self.runtime_rpc().await?;
+            let model = if let Some(choice) = model {
+                let catalog = crate::controls::model_catalog(&rpc).await?;
+                Some(crate::controls::validate_model(
+                    choice,
+                    catalog["data"].as_array().context("missing model catalog")?,
+                )?)
+            } else {
+                None
+            };
             crate::ssh::require_local_app_server(&endpoint, selection)?;
             let targets = self.resolve_targets(selection).await?;
             for target in &targets {
@@ -1567,17 +1639,22 @@ impl Orchestrator {
                 )
                 .await?;
             }
-            self.manager.store.create_selected(
+            let session = self.manager.store.create_selected(
                 name.trim(),
                 &endpoint,
                 &targets,
                 selection,
                 sandbox,
-            )?
+            )?;
+            if let Some(model) = model {
+                self.manager.store.model_selection(&session.id, &model)?;
+            }
+            session
         };
         if let Some(prompt) = prompt {
             self.manager.store.save_prompt(&session.id, prompt)?;
         }
+        if let Some(include)=include_project { self.manager.store.put_prompt_record(&format!("policy/{}",session.id),&json!({"include_project":include}))?; }
         // Preserve the created session on an uncertain thread/start outcome; never retry it here.
         if let Err(error) = self.connect_session(&session.id).await {
             self.manager
@@ -1930,6 +2007,113 @@ async fn probe_executor(port: u16) -> Result<()> {
     })
     .await
     .context("executor health check timed out")?
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::sync::{Semaphore, mpsc};
+    use tokio_tungstenite::tungstenite::Message;
+
+    #[tokio::test]
+    async fn prompt_transition_blocks_sends_through_unsubscribe_and_resume() -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(10), transition()).await?
+    }
+
+    async fn transition() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        // The runtime knows the model but the local catalogue does not. Inclusion
+        // settings must still work without manufacturing replacement instructions.
+        std::fs::write(root.path().join("models_cache.json"), r#"{"models":[]}"#)?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("ws://{}", listener.local_addr()?);
+        let gate = Arc::new(Semaphore::new(0));
+        let (phases, mut observed) = mpsc::unbounded_channel();
+        let server = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                let mut connections = tokio::task::JoinSet::new();
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let gate = gate.clone();
+                    let phases = phases.clone();
+                    connections.spawn(async move {
+                        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                        while let Some(Ok(Message::Text(raw))) = ws.next().await {
+                            let request: Value = serde_json::from_str(&raw).unwrap();
+                            let method = request["method"].as_str().unwrap();
+                            let result = match method {
+                                "initialize" => json!({}),
+                                "initialized" => continue,
+                                "config/read" => json!({"config":{"model":"fixture"}}),
+                                "model/list" => json!({"data":[{"model":"fixture","isDefault":true}],"nextCursor":null}),
+                                "thread/start" => json!({"thread":{"id":"thread"},"model":"fixture","reasoningEffort":"low","sandbox":{"type":"readOnly"}}),
+                                "thread/read" => json!({"thread":{"status":{"type":"idle"}}}),
+                                "thread/queue/list" | "thread/backgroundTerminals/list" => json!({"data":[],"nextCursor":null}),
+                                "thread/goal/get" => json!({"goal":null}),
+                                "thread/unsubscribe" => {
+                                    phases.send("unsubscribe").unwrap();
+                                    gate.acquire().await.unwrap().forget();
+                                    json!({"status":"unsubscribed"})
+                                }
+                                "thread/resume" => {
+                                    assert!(request["params"].get("baseInstructions").is_none());
+                                    phases.send("resume").unwrap();
+                                    gate.acquire().await.unwrap().forget();
+                                    json!({"thread":{"id":"thread","turns":[],"status":{"type":"idle"}},"model":"fixture","reasoningEffort":"low","sandbox":{"type":"readOnly"}})
+                                }
+                                "turn/start" => {
+                                    phases.send("send").unwrap();
+                                    json!({"turn":{"id":"turn"}})
+                                }
+                                _ => panic!("unexpected method: {method}"),
+                            };
+                            ws.send(Message::Text(json!({"id":request["id"],"result":result}).to_string().into())).await.unwrap();
+                        }
+                    });
+                }
+            }
+        });
+        let manager = Manager::new(crate::store::Store::open(Path::new(":memory:"))?);
+        let orchestrator = Orchestrator::new(manager.clone(), root.path().into(), None, None, Some(root.path().into()));
+        let (rpc, _events) = Rpc::connect(&endpoint).await?;
+        *orchestrator.runtime.lock().await = Some(Runtime {
+            child: Command::new("sleep").arg("60").kill_on_drop(true).spawn()?,
+            executor: None, host_target: None, rpc: Arc::new(rpc), endpoint: endpoint.clone(),
+            feature_overrides: Default::default(), feature_catalog: Value::Null,
+        });
+        let session = manager.store.create_selected("fixture", &endpoint, &[], &[], None)?;
+        orchestrator.connect_session(&session.id).await?;
+        let apply = tokio::spawn({
+            let orchestrator = orchestrator.clone(); let id = session.id.clone();
+            async move { orchestrator.apply_session_prompt(&id, Some(false)).await }
+        });
+        assert_eq!(observed.recv().await, Some("unsubscribe"));
+        assert!(manager.connecting.try_lock().is_err());
+        assert!(orchestrator.jobs.try_lock().is_err());
+        let mut send = tokio::spawn({
+            let manager = manager.clone(); let id = session.id.clone();
+            async move { manager.prompt(&id, "fixture message; no inference").await }
+        });
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut send).await.is_err());
+        gate.add_permits(1);
+        assert_eq!(observed.recv().await, Some("resume"));
+        assert!(manager.connecting.try_lock().is_err());
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut send).await.is_err());
+        gate.add_permits(1);
+        let applied = apply.await??;
+        assert!(applied["applied"]["base"].is_null());
+        assert_eq!(applied["applied"]["include_project"], false);
+        send.await??;
+        assert_eq!(observed.recv().await, Some("send"));
+        manager.disconnect(&session.id, "test complete").await?;
+        if let Some(mut runtime) = orchestrator.runtime.lock().await.take() {
+            runtime.child.kill().await?;
+        }
+        server.abort();
+        Ok(())
+    }
 }
 
 #[cfg(test)]

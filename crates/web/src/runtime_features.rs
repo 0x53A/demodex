@@ -24,7 +24,7 @@ pub fn runtime_features(props: &Props) -> Html {
     let blockers = restart_blockers(&props.runtime);
 
     html! {
-        <section class="runtime-panel feature-settings">
+        <crate::ui::Group class="runtime-panel feature-settings">
             <details class="feature-catalog">
                 <summary><crate::ui::SectionTitle>{"Codex feature flags"}</crate::ui::SectionTitle></summary>
                 <p class="muted">{"Default inherits the Codex profile. Overrides save immediately and apply after restarting Codex."}</p>
@@ -63,7 +63,7 @@ pub fn runtime_features(props: &Props) -> Html {
             </details>
             {if features["restart_required"] == true {html!{<p role="status">{"Saved changes are waiting for a Codex restart."}</p>}} else {Html::default()}}
             {if let Some(error) = features["catalog"]["error"].as_str() {html!{<p class="muted">{error}</p>}} else {Html::default()}}
-        </section>
+        </crate::ui::Group>
     }
 }
 

@@ -34,7 +34,7 @@ def release(root, label):
     index.write_text(re.sub(r'<body(?: data-version="[^"]*")?>', f'<body data-version="{label}">', index.read_text()))
     files = sorted(p for p in root.rglob('*') if p.is_file() and p.name != 'service-worker.js')
     assets = [{'path': './' + p.relative_to(root).as_posix(), 'hash': hashlib.sha256(p.read_bytes()).hexdigest()} for p in files]
-    template = (ROOT / 'crates/web/service-worker.js').read_text()
+    template = (ROOT / 'crates/web/service-worker.js').read_text().replace('// SHARE_INBOX', (ROOT / 'crates/web/public/share-inbox.js').read_text())
     version = hashlib.sha256((json.dumps(assets) + template).encode()).hexdigest()
     (root / 'service-worker.js').write_text('const BUILD = ' + json.dumps({'version': version, 'assets': assets}) + ';\n' + template)
 
@@ -68,7 +68,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-pwa-') as directory:
                 saved = page.evaluate("JSON.parse(sessionStorage.getItem('demodex-rust-view'))")
                 assert saved['drafts'][origin.rstrip('/') + ':pwa-fixture'] == 'Unsubmitted chat draft\nSecond line · λ', saved
                 assert 'fixtureUnknownField' not in saved, 'app never deserialized and persisted the seeded view'
-                assert 'new_session_name' in saved['fields'], saved
+                assert 'new_session_name' not in saved['fields'], saved
             errors = []
             page.on('pageerror', lambda error: errors.append(str(error)))
             page.goto(origin)

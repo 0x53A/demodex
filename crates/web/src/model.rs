@@ -23,6 +23,7 @@ pub struct Navigation {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Saved {
+    pub applied_shares: Vec<String>,
     pub enter_sends: bool,
     pub host: String,
     pub selected: String,

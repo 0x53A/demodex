@@ -59,15 +59,17 @@ impl Component for DirectoryPicker {
         use wasm_bindgen::JsCast;
         let parent=self.listing["parent"].as_str().map(str::to_owned);
         html!{<><button type="button" class="browse-directory" disabled={ctx.props().client.is_none()} onclick={ctx.link().callback(|_|Msg::Open)}>{"Browse…"}</button>
-        {if self.open{html!{<crate::modal::Modal title="Choose working directory" compact=true onclose={ctx.link().callback(|_|Msg::Close)}>
+        {if self.open{html!{<crate::modal::Modal title="Choose working directory" stable_size=true onclose={ctx.link().callback(|_|Msg::Close)}>
             <div class="directory-navigation"><input aria-label="Directory path" disabled={self.loading} value={self.path.clone()} oninput={ctx.link().callback(|e:InputEvent|Msg::Path(e.target().unwrap().unchecked_into::<web_sys::HtmlInputElement>().value()))} onkeydown={ctx.link().callback(move |e:KeyboardEvent|{if e.key()=="Enter"{e.prevent_default();Msg::Browse(e.target().unwrap().unchecked_into::<web_sys::HtmlInputElement>().value())}else{Msg::None}})}/>
             <button type="button" disabled={self.loading} onclick={ctx.link().callback({let path=self.path.clone();move |_|Msg::Browse(path.clone())})}>{"Go"}</button>
             <button type="button" disabled={parent.is_none()||self.loading} onclick={ctx.link().callback(move |_|Msg::Browse(parent.clone().unwrap_or_default()))}>{"Up"}</button></div>
+            <div class="directory-results picker-results" aria-busy={self.loading.to_string()}>
             {if self.loading{html!{<p role="status">{"Loading directories…"}</p>}}else{Html::default()}}
             {if !self.error.is_empty(){html!{<p class="error" role="alert">{&self.error}</p>}}else{Html::default()}}
             <div class="directory-entries">{for array(&self.listing["entries"]).iter().map(|entry|{let path=text(entry,"path").to_owned();html!{<button type="button" onclick={ctx.link().callback(move |_|Msg::Browse(path.clone()))}><span aria-hidden="true">{"▱ "}</span>{text(entry,"name")}</button>}})}</div>
             {if !self.loading && self.listing["entries"].as_array().is_some_and(Vec::is_empty){html!{<p class="muted">{"No subdirectories"}</p>}}else{Html::default()}}
             {if self.listing["truncated"]==true{html!{<p class="muted">{"Listing shortened. Enter a path to reach another directory."}</p>}}else{Html::default()}}
+            </div>
             <button type="button" disabled={self.loading||!self.error.is_empty()||self.listing["path"].as_str()!=Some(self.path.as_str())} onclick={ctx.link().callback(|_|Msg::Choose)}>{"Use this directory"}</button>
         </crate::modal::Modal>}}else{Html::default()}}</>}
     }

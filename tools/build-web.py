@@ -33,7 +33,7 @@ def bundle_apteronotus(directory, package):
 
 
 def seal_release(directory):
-    template = (ROOT / "crates/web/service-worker.js").read_text()
+    template = (ROOT / "crates/web/service-worker.js").read_text().replace("// SHARE_INBOX", (ROOT / "crates/web/public/share-inbox.js").read_text())
     assets = [
         {"path": "./" + path.relative_to(directory).as_posix(),
          "hash": hashlib.sha256(path.read_bytes()).hexdigest()}
