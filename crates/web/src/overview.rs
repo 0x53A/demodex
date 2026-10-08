@@ -4,6 +4,35 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use yew::prelude::*;
 
+#[derive(Clone, Copy, Default, PartialEq)]
+pub enum Sort {
+    #[default]
+    LastUserMessage,
+    Name,
+    Manual,
+}
+
+impl Sort {
+    pub fn from_saved(value: &str) -> Self {
+        match value {
+            "name" => Self::Name,
+            "manual" => Self::Manual,
+            _ => Self::LastUserMessage,
+        }
+    }
+
+    fn compare(self, a: &Value, b: &Value) -> std::cmp::Ordering {
+        (a["starred"] != true).cmp(&(b["starred"] != true))
+            .then_with(|| match self {
+                Self::LastUserMessage => text(b, "last_user_message_at").cmp(text(a, "last_user_message_at")),
+                Self::Name => title(a).to_lowercase().cmp(&title(b).to_lowercase()),
+                Self::Manual => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| a["sort_order"].as_i64().unwrap_or(0).cmp(&b["sort_order"].as_i64().unwrap_or(0)))
+            .then_with(|| text(a, "id").cmp(text(b, "id")))
+    }
+}
+
 #[derive(Default)]
 pub struct Folder {
     children: BTreeMap<String, Folder>,
@@ -29,10 +58,10 @@ pub fn project(session: &Value) -> (String, String) {
     locations(session).first().map(|(id,path,_)|(demodex_protocol::location::target_id(id).into(), format!("/{}",path.split('/').filter(|p|!p.is_empty()).collect::<Vec<_>>().join("/")))).unwrap_or_default()
 }
 
-pub fn forest(sessions: &[Value]) -> Folder {
+pub fn forest(sessions: &[Value], sort: Sort) -> Folder {
     let mut root = Folder::default();
     let mut ordered: Vec<_> = sessions.iter().collect();
-    ordered.sort_by_key(|s| (s["starred"] != true, s["sort_order"].as_i64().unwrap_or(0)));
+    ordered.sort_by(|a, b| sort.compare(a, b));
     for session in ordered {
         // Target grouping is handled by view; forest builds one target's paths.
         let mut folder = &mut root;
@@ -152,6 +181,49 @@ fn session_view(
     {handle}</li>}
 }
 
+fn parent_marker(levels: u64) -> String {
+    match levels {
+        0 => String::new(),
+        1 | 2 => "../".repeat(levels as usize),
+        n => format!("../ × {n}"),
+    }
+}
+
+fn git_view(sessions: &[Value], git: &[Value], connected: bool) -> Html {
+    let Some(session) = sessions.first() else { return Html::default(); };
+    let (target,path) = project(session);
+    let row = git.iter().find(|r|text(r,"target")==target && text(r,"path")==path
+        && sessions.iter().any(|s|locations(s).iter().any(|(id,_,_)|id==text(r,"executor"))));
+    if !connected {
+        return html!{<small class="project-git unavailable" title="Connection lost; Git status is unavailable">{"Git unavailable"}</small>};
+    }
+    let Some(row) = row else {
+        return html!{<small class="project-git muted">{"Git …"}</small>};
+    };
+    if text(row,"state")=="not_repository" { return Html::default(); }
+    if text(row,"state")!="repository" {
+        return html!{<small class="project-git unavailable" title={text(row,"error").to_owned()}>{"Git unavailable"}</small>};
+    }
+    let status = &row["status"];
+    let levels = status["parent_levels"].as_u64().unwrap_or(0);
+    let branch = match text(status,"branch") {
+        "(detached)" => format!("detached {}",text(status,"oid").chars().take(8).collect::<String>()),
+        branch if text(status,"oid")=="(initial)" => format!("{branch} (new)"),
+        branch => branch.to_owned(),
+    };
+    let changes = [("staged","staged"),("unstaged","modified"),("untracked","untracked"),("conflicts","conflicts")].iter()
+        .filter_map(|(key,label)|status[*key].as_u64().filter(|n|*n>0).map(|n|format!("{n} {label}"))).collect::<Vec<_>>();
+    let dirty = !changes.is_empty();
+    let stale = row["checked_at_ms"].as_f64().is_none_or(|at|js_sys::Date::now()-at>90000.0);
+    let mut label = format!("Git {}{branch} · {}",if levels==0 {String::new()}else{format!("{} · ",parent_marker(levels))},if dirty {changes.join(" · ")}else{"clean".into()});
+    for (key,arrow) in [("ahead","↑"),("behind","↓")] {
+        if let Some(n) = status[key].as_u64().filter(|n|*n>0) { label.push_str(&format!(" · {arrow}{n}")); }
+    }
+    if stale {label.push_str(" · stale");}
+    let title = format!("Repository: {}\nRepository root is {levels} parent directories above this folder.\nStatus covers the whole repository; untracked counts include directories. Submodule contents are not scanned.\nAhead/behind compares local tracking refs; no fetch is performed.",text(status,"root"));
+    html!{<small class={classes!("project-git",if stale {"unavailable"}else if dirty {"dirty"}else{"clean"})} {title}>{label}</small>}
+}
+
 fn folder_view(
     mut name: String,
     mut folder: &Folder,
@@ -163,6 +235,8 @@ fn folder_view(
     create: &Callback<(String, String)>,
     disabled: bool,
     reorder_mode: bool,
+    git: &[Value],
+    connected: bool,
 ) -> Html {
     // Collapse empty ancestry, but retain every folder with an attached agent.
     while folder.sessions.is_empty() && folder.children.len() == 1 {
@@ -174,10 +248,10 @@ fn folder_view(
         folder = next;
     }
     let create_here = { let create = create.clone(); let location = folder.sessions.first().map(project).unwrap_or_default(); Callback::from(move |_|create.emit(location.clone())) };
-    html! {<li class="tree-folder"><div class="folder-name"><span aria-hidden="true">{"▱ "}</span>{name}</div><ul>
+    html! {<li class="tree-folder"><div class="folder-name"><span aria-hidden="true">{"▱ "}</span>{name}</div>{git_view(&folder.sessions,git,connected)}<ul>
         {if !folder.sessions.is_empty(){html!{<li class="folder-add-session"><crate::ui::AddButton onclick={create_here} {disabled}>{"+ Session"}</crate::ui::AddButton></li>}}else{Html::default()}}
         {for folder.sessions.iter().map(|s|session_view(s,&folder.sessions,environments,selected,select,edit,run,disabled,reorder_mode))}
-        {for folder.children.iter().map(|(name,child)|folder_view(name.clone(),child,environments,selected,select,edit,run,create,disabled,reorder_mode))}
+        {for folder.children.iter().map(|(name,child)|folder_view(name.clone(),child,environments,selected,select,edit,run,create,disabled,reorder_mode,git,connected))}
     </ul></li>}
 }
 
@@ -191,13 +265,19 @@ pub fn view(
     disabled: bool,
     reorder_mode: bool,
     flat: bool,
+    sort: Sort,
+    git: &[Value],
+    connected: bool,
     create: Callback<(String, String)>,
 ) -> Html {
     let mut targets: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for session in sessions { targets.entry(project(session).0).or_default().push(session.clone()); }
     if flat {
         let mut ordered=sessions.to_vec();
-        ordered.sort_by_key(|s|(project(s),s["starred"]!=true,s["sort_order"].as_i64().unwrap_or(0)));
+        ordered.sort_by(|a,b| {
+            let group = if sort == Sort::Manual { project(a).cmp(&project(b)) } else { std::cmp::Ordering::Equal };
+            group.then_with(|| sort.compare(a,b))
+        });
         return html!{<nav class="session-tree session-list" aria-label="Sessions as list"><ul>
             {for ordered.iter().map(|session|{
                 let path=project(session);
@@ -207,7 +287,7 @@ pub fn view(
         </ul>{if sessions.is_empty(){html!{<p class="muted">{"No sessions on this server yet. Choose New Session to start one."}</p>}}else{Html::default()}}</nav>};
     }
     html! {<nav class="session-tree" aria-label="Sessions by project">
-        {if sessions.is_empty(){html!{<p class="muted">{"No sessions on this server yet. Choose New Session to start one."}</p>}}else{html!{<ul>{for targets.iter().map(|(target,sessions)|html!{<li class="target-folder" data-target-id={target.clone()}><div class="folder-name">{environment_label(target,environments)}</div><ul>{folder_view("/".into(),&forest(sessions),environments,selected,&select,&edit,&run,&create,disabled,reorder_mode)}</ul></li>})}</ul>}}}
+        {if sessions.is_empty(){html!{<p class="muted">{"No sessions on this server yet. Choose New Session to start one."}</p>}}else{html!{<ul>{for targets.iter().map(|(target,sessions)|html!{<li class="target-folder" data-target-id={target.clone()}><div class="folder-name">{environment_label(target,environments)}</div><ul>{folder_view("/".into(),&forest(sessions, sort),environments,selected,&select,&edit,&run,&create,disabled,reorder_mode,git,connected)}</ul></li>})}</ul>}}}
     </nav>}
 }
 
@@ -233,6 +313,30 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn parent_repository_marker_is_explicit_and_compact() {
+        assert_eq!(parent_marker(0), "");
+        assert_eq!(parent_marker(1), "../");
+        assert_eq!(parent_marker(2), "../../");
+        assert_eq!(parent_marker(3), "../ × 3");
+        assert_eq!(parent_marker(100), "../ × 100");
+    }
+
+    #[test]
+    fn recent_user_messages_sort_newest_first_after_stars_with_unknowns_last() {
+        let sessions = vec![
+            json!({"id":"unknown","name":"Alpha","sort_order":0}),
+            json!({"id":"old","name":"Beta","sort_order":1,"last_user_message_at":"2026-10-01T10:00:00.000Z"}),
+            json!({"id":"new","name":"zeta","sort_order":2,"last_user_message_at":"2026-10-02T10:00:00.000Z"}),
+            json!({"id":"star","name":"Star","starred":true,"sort_order":3}),
+        ];
+        let ids = |sort| forest(&sessions, sort).sessions.iter().map(|s|text(s,"id").to_owned()).collect::<Vec<_>>();
+        assert_eq!(ids(Sort::from_saved("")), ["star","new","old","unknown"]);
+        assert_eq!(ids(Sort::from_saved("name")), ["star","unknown","old","new"]);
+        assert_eq!(ids(Sort::from_saved("manual")), ["star","unknown","old","new"]);
+        assert_eq!(ids(Sort::from_saved("invalid")), ids(Sort::LastUserMessage));
+    }
+
+    #[test]
     fn old_and_new_host_sessions_share_one_target_and_project_group() {
         let mut groups: BTreeMap<String, Vec<Value>> = BTreeMap::new();
         for generation in 0..100 {
@@ -247,7 +351,7 @@ mod tests {
             groups.entry(target).or_default().push(session);
         }
         assert_eq!(groups.len(), 1);
-        let tree = forest(&groups["host"]);
+        let tree = forest(&groups["host"], Sort::Manual);
         assert_eq!(tree.children["workspace"].children["project"].sessions.len(), 100);
     }
 
@@ -285,7 +389,7 @@ mod tests {
             json!({"id":"star-later","starred":true,"sort_order":3}),
             json!({"id":"plain-first","starred":false,"sort_order":1}),
             json!({"id":"star-first","starred":true,"sort_order":2}),
-        ]);
+        ], Sort::Manual);
         assert_eq!(tree.sessions.iter().map(|s|text(s,"id")).collect::<Vec<_>>(),vec!["star-first","star-later","plain-first","plain-later"]);
     }
 
@@ -310,7 +414,7 @@ mod tests {
             json!({"id":"c","targets":[{"id":"vm","cwd":"/workspace/a"},{"id":"host-third","cwd":"/workspace/a"}]}),
             json!({"id":"d","targets":[{"id":"host-third","cwd":"/workspace/b"}]}),
         ];
-        let tree = forest(&sessions);
+        let tree = forest(&sessions, Sort::Manual);
         assert_eq!(tree.children["workspace"].children.len(), 2);
         assert_eq!(tree.children["workspace"].children["a"].sessions.len(), 3);
         assert_eq!(tree.children["workspace"].children["b"].sessions.len(), 1);

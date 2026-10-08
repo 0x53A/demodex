@@ -52,16 +52,18 @@ pub enum Resource {
     Runtime,
     Environments,
     Targets,
+    ProjectGit,
     Detail,
     Events,
 }
-pub const RESOURCES: [Resource; 6] = [
+pub const RESOURCES: [Resource; 7] = [
     Resource::Events,
     Resource::Detail,
     Resource::Sessions,
     Resource::Runtime,
     Resource::Environments,
     Resource::Targets,
+    Resource::ProjectGit,
 ];
 impl Resource {
     pub fn session(self) -> bool {
@@ -76,7 +78,7 @@ struct Slot {
 }
 #[derive(Default)]
 pub struct Reads {
-    slots: [Slot; 6],
+    slots: [Slot; 7],
     serial: u64,
 }
 impl Reads {
@@ -92,6 +94,7 @@ impl Reads {
             }
             Notice::Runtime => {
                 self.invalidate(Resource::Runtime);
+                self.invalidate(Resource::ProjectGit);
                 self.invalidate(Resource::Detail);
                 // Retry failed reads on a heartbeat, never in a tight loop.
                 for resource in RESOURCES {
@@ -103,6 +106,7 @@ impl Reads {
             Notice::Session { id, state } => {
                 if state {
                     self.invalidate(Resource::Sessions);
+                    self.invalidate(Resource::ProjectGit);
                 }
                 if id == selected {
                     self.invalidate(Resource::Events);

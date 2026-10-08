@@ -1,4 +1,5 @@
 mod background;
+mod project_git;
 mod prompts;
 mod notifications;
 mod subagents;

@@ -3,6 +3,7 @@
 # ///
 """Real Yew/Wormhole browser integration with a fake Codex; no inference."""
 import importlib.util
+import base64
 import os
 import json
 from pathlib import Path
@@ -167,6 +168,28 @@ class Codex:
             self.dispatch_queued()
 
 
+def git_executor(ws):
+    try:
+        for raw in ws:
+            request = json.loads(raw)
+            if request.get('method') == 'initialize':
+                ws.send(json.dumps({'id':request['id'], 'result':{}}))
+            elif request.get('method') == 'process/start':
+                params = request['params']
+                assert params['argv'][0] == 'timeout'
+                assert params['cwd'].startswith('file:///')
+                process = params['processId']
+                ws.send(json.dumps({'id':request['id'], 'result':{'processId':process}}))
+                output = b'\0'.join([b'/home', b'operator/src/', b'# branch.oid abcdef123456', b'# branch.head main', b'# branch.ab +2 -0', b'1 M. metadata file', b'? untracked', b''])
+                found = params['cwd'] == 'file:///home/operator/src'
+                if not found:
+                    output = b'fatal: not a git repository (or any of the parent directories): .git'
+                ws.send(json.dumps({'method':'process/output', 'params':{'processId':process, 'stream':'stdout' if found else 'stderr', 'chunk':base64.b64encode(output).decode()}}))
+                ws.send(json.dumps({'method':'process/exited', 'params':{'processId':process, 'exitCode':0 if found else 128}}))
+    except ConnectionClosed:
+        pass
+
+
 with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
     directory = Path(temporary)
     candidate = directory / "web"
@@ -177,6 +200,10 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
     codex = Codex()
     server = serve(codex.handle, "127.0.0.1", codex_port)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    git_port = port()
+    git_server = serve(git_executor, "127.0.0.1", git_port)
+    threading.Thread(target=git_server.serve_forever, daemon=True).start()
+
     incompatible_port = port()
     incompatible_frames = []
 
@@ -255,6 +282,17 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             page.get_by_role("button", name="Save and connect").click()
             expect(page.locator("header .indicator")).to_have_text("connected to", timeout=20000)
             print("CHECK: connected", flush=True)
+            sort = page.get_by_role('combobox', name='Sort sessions', exact=True)
+            expect(sort).to_have_value('last_user_message')
+            sort.select_option('name')
+            page.reload()
+            expect(sort).to_have_value('name', timeout=20000)
+            page.get_by_role('button', name='Reorder', exact=True).click()
+            expect(sort).to_have_value('manual')
+            expect(page.get_by_role('button', name='Done reordering', exact=True)).to_be_visible()
+            sort.select_option('last_user_message')
+            expect(page.get_by_role('button', name='Reorder', exact=True)).to_be_visible()
+
             expect(page.get_by_role("alert")).to_have_count(0)
             page.set_viewport_size({"width": 1200, "height": 850})
             expect(page.locator('aside .host-picker')).to_have_count(0)
@@ -270,12 +308,13 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             creation.press('Escape')
             expect(creation).to_have_count(0)
             from wormhole_client import api as actor_api
-            actor_api(host, token, '/sessions', {'name':'Wormhole fixture','endpoint':f'ws://127.0.0.1:{codex_port}','targets':[{'id':'fixture-host','url':'ws://127.0.0.1:4501','cwd':'/home/operator/src'}]})
+            actor_api(host, token, '/sessions', {'name':'Wormhole fixture','endpoint':f'ws://127.0.0.1:{codex_port}','targets':[{'id':'fixture-host','url':f'ws://127.0.0.1:{git_port}','cwd':'/home/operator/src'}]})
             page.locator('.session').filter(has_text='Wormhole fixture').click()
             # A disconnected draft becomes sendable after reconnect even while
             # the separate detail/control read is still blocked.
             composer = page.get_by_label('Message', exact=True)
             composer.fill('Draft written before reconnect')
+            expect(page.locator('.project-git')).to_contain_text('Git unavailable')
             expect(page.get_by_role('button', name='Send', exact=True)).to_be_disabled()
             seen, release = threading.Event(), threading.Event()
             codex.snapshot_gate = (seen, release)
@@ -290,6 +329,14 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
                 release.set()
             expect(page.get_by_role('button', name='Send', exact=True)).to_be_enabled()
             composer.fill('')
+            expect(page.locator('.project-git')).to_contain_text('Git ../../ · main · 1 staged · 1 untracked · ↑2', timeout=20000)
+            expect(page.locator('.project-git')).to_have_attribute('title', __import__('re').compile('Repository: /home'))
+            page.set_viewport_size({'width':390, 'height':844})
+            page.get_by_role('button', name='Close session view', exact=True).click()
+            expect(page.locator('.project-git')).to_be_in_viewport()
+            assert page.locator('aside').evaluate('e=>e.scrollWidth<=e.clientWidth')
+            page.locator('.session').filter(has_text='Wormhole fixture').click()
+            page.set_viewport_size({'width':1200, 'height':850})
             page.get_by_role("button",name="Session controls",exact=True).click()
             expect(page.get_by_role('button',name='Save executors and directories',exact=True)).to_be_enabled()
             page.get_by_label('fixture-host (primary) working directory',exact=True).fill('/home/operator/src')
@@ -551,8 +598,31 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             expect(page.get_by_role("heading", name="Connections", exact=True)).to_be_visible()
             page.go_back()
             expect(page.get_by_label("Message", exact=True)).to_have_value("unsent draft")
-            # Hold an incremental snapshot while history navigation clears and
-            # reopens the same conversation. Its tail must not hide the prefix.
+            # Returning from the session list must render from memory even when
+            # no browser actor reads can reach the daemon.
+            page.evaluate("""() => {
+                window.originalSocketSend = WebSocket.prototype.send;
+                window.heldSocketSends = [];
+                WebSocket.prototype.send = function(data) { window.heldSocketSends.push([this, data]); };
+            }""")
+            try:
+                page.get_by_role('button', name='Close session view', exact=True).click()
+                page.locator('.session').filter(has_text='Wormhole fixture').click()
+                expect(page.locator('.transcript')).to_contain_text('Fixture transcript line 0', timeout=1000)
+                expect(page.get_by_text('Loading conversation…', exact=True)).to_have_count(0)
+                expect(page.get_by_label('Message', exact=True)).to_have_value('unsent draft')
+            finally:
+                page.evaluate("""() => {
+                    WebSocket.prototype.send = window.originalSocketSend;
+                    for (const [socket, data] of window.heldSocketSends) socket.send(data);
+                    delete window.heldSocketSends;
+                }""")
+            # Navigation invalidates the deliberately delayed reads and catches
+            # up from the cached cursor without losing the conversation prefix.
+            page.get_by_role('button', name='Close session view', exact=True).click()
+            page.locator('.session').filter(has_text='Wormhole fixture').click()
+            # Hold a detail snapshot across history navigation. Its late reply
+            # must not interfere with incremental transcript updates.
             expect(page.locator('.transcript')).to_contain_text('Fixture transcript line 0')
             seen, release = threading.Event(), threading.Event()
             codex.snapshot_gate = (seen, release)
@@ -1040,5 +1110,6 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+        git_server.shutdown()
         server.shutdown()
         incompatible_server.shutdown()

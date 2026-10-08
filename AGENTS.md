@@ -48,6 +48,29 @@ Exact transport dependency versions constrain consumers with separate lockfiles.
 
 ## Library and native clients
 
+Protocol v38 adds read-only ProjectGit snapshots for overview project folders.
+Checks use the exact attached executor of a connected session, never host fallback,
+with a 30-second generation/endpoint/path cache, four concurrent commands, 64
+projects and a 12-second refresh bound. Each executor must provide Git, sh and
+`timeout`; native host checks use the daemon PATH (the NixOS module includes
+Git), and remote checks use the standard Linux/NixOS system PATH. Each command
+is limited to four seconds and 256 KiB of output. Git optional writes, fsmonitor
+hooks, submodule recursion and partial-clone lazy fetching are disabled; missing
+objects report Git unavailable rather than triggering a fetch.
+The status covers the whole containing worktree and reports root ancestry from
+Git's prefix (including linked worktrees). No-repository is distinct from errors,
+timeouts and disconnected targets. The browser reads independently on state and
+runtime notices; project status is neither persisted nor a conversation event.
+Run `uv run tests/project_git.py` for disposable real-native-executor checks
+without inference. Deploy matching daemon and clients; receipt encoding remains v16.
+
+Protocol v38 adds Session.last_user_message_at from accepted Demodex sends,
+steers and queue submissions, using an indexed lookup over durable events.
+Overview defaults to newest user message, with Name and Manual options; stars
+remain first. Tree sorts within projects; List sorts across projects except
+in Manual mode. Missing recorded send times sort last. Reorder selects Manual.
+Deploy matching daemon and clients; receipt encoding remains v16.
+
 Protocol v37 adds explicit receipted Takeover for local imported threads blocked
 by Codex's active-writer error. Detail controls exposes a read-only CLI-daemon
 inspection. The UI warns that stopping the shared CLI daemon stops all its loaded

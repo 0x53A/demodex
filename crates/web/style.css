@@ -628,3 +628,11 @@ aside > .section-title { flex-wrap:wrap;gap:6px; }
 /* Informational cache-age estimate, separate from warnings and errors. */
 .tree-agent .session-state .cache-indicator { color:#75b8f7; margin-left:6px; font-size:14px; }
 .cache-info { flex:none; color:#b7dcff; background:#192b3b; border-left:3px solid #75b8f7; padding:8px 12px; font-size:12px; line-height:1.5; overflow-wrap:anywhere; }
+
+.session-sort { grid-template-columns:auto minmax(0,1fr);align-items:center;margin:8px 0; }
+.session-sort select { min-width:0;width:100%; }
+
+.project-git { display:block;font:11px/1.5 monospace;overflow-wrap:anywhere;margin:2px 0 6px;color:#a3aa9e; }
+.project-git.clean { color:#91b88b; }
+.project-git.dirty { color:#ffb079; }
+.project-git.unavailable { color:#a3aa9e; }

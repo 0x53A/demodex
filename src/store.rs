@@ -84,6 +84,7 @@ impl Store {
                seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id),
                at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), message TEXT NOT NULL);
              CREATE INDEX IF NOT EXISTS events_session ON events(session_id,seq);
+             CREATE INDEX IF NOT EXISTS events_user_message ON events(session_id,seq) WHERE json_extract(message,'$.method') IN ('demodex/promptAccepted','demodex/promptSteered','demodex/promptQueued');
              CREATE TABLE IF NOT EXISTS pending (
                key TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
                generation TEXT NOT NULL, rpc_id TEXT NOT NULL, method TEXT NOT NULL,
@@ -423,7 +424,7 @@ impl Store {
     }
 
     fn list_from(db: &Connection) -> Result<Vec<Session>> {
-        let mut query = db.prepare("SELECT id,name,endpoint,thread_id,targets,status,error,sandbox,effective_sandbox,session_presentation.value, EXISTS(SELECT 1 FROM session_archive WHERE session_id=sessions.id), (SELECT value FROM session_usage WHERE session_id=sessions.id), session_order.starred, session_order.position FROM sessions LEFT JOIN session_settings ON sessions.id=session_settings.session_id JOIN session_presentation ON sessions.id=session_presentation.session_id JOIN session_order ON sessions.id=session_order.session_id ORDER BY session_order.position,created,id")?;
+        let mut query = db.prepare("SELECT id,name,endpoint,thread_id,targets,status,error,sandbox,effective_sandbox,session_presentation.value, EXISTS(SELECT 1 FROM session_archive WHERE session_id=sessions.id), (SELECT value FROM session_usage WHERE session_id=sessions.id), session_order.starred, session_order.position, (SELECT at FROM events WHERE session_id=sessions.id AND json_extract(message,'$.method') IN ('demodex/promptAccepted','demodex/promptSteered','demodex/promptQueued') ORDER BY seq DESC LIMIT 1) FROM sessions LEFT JOIN session_settings ON sessions.id=session_settings.session_id JOIN session_presentation ON sessions.id=session_presentation.session_id JOIN session_order ON sessions.id=session_order.session_id ORDER BY session_order.position,created,id")?;
         let rows = query.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -440,6 +441,7 @@ impl Store {
                 row.get::<_, Option<String>>(11)?,
                 row.get::<_, bool>(12)?,
                 row.get::<_, i64>(13)?,
+                row.get::<_, Option<String>>(14)?,
             ))
         })?;
         rows.map(|row| {
@@ -458,11 +460,13 @@ impl Store {
                 context_usage,
                 starred,
                 sort_order,
+                last_user_message_at,
             ) = row?;
             Ok(Session {
                 archived,
                 starred,
                 sort_order,
+                last_user_message_at,
                 context_usage: context_usage
                     .as_deref()
                     .map(serde_json::from_str)
@@ -887,6 +891,35 @@ impl Store { pub(crate) fn remove_legacy_prompt(&self,id:&str)->Result<()> { sel
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn last_user_message_uses_only_accepted_submissions_and_survives_upgrade() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("messages.db");
+        let store = Store::open(&path)?;
+        let session = store.create("A", "ws://localhost:1", &[], Some("a"))?;
+        assert_eq!(session.last_user_message_at, None);
+        // Simulate a database from before the lookup index existed.
+        store.lock()?.execute_batch("DROP INDEX events_user_message")?;
+        for (method, at) in [
+            ("demodex/promptAccepted", "2026-10-01T10:00:00.000Z"),
+            ("demodex/promptSteered", "2026-10-01T11:00:00.000Z"),
+            ("demodex/promptQueued", "2026-10-01T12:00:00.000Z"),
+        ] {
+            let seq = store.event(&session.id, &json!({"method":method}))?;
+            store.lock()?.execute("UPDATE events SET at=?2 WHERE seq=?1", params![seq,at])?;
+            assert_eq!(store.get(&session.id)?.last_user_message_at.as_deref(), Some(at));
+        }
+        for method in ["item/completed", "demodex/threadSnapshot", "demodex/promptSteering", "demodex/promptSteeringFailed", "turn/started"] {
+            store.event(&session.id, &json!({"method":method}))?;
+        }
+        drop(store);
+        let store = Store::open(&path)?;
+        assert_eq!(store.get(&session.id)?.last_user_message_at.as_deref(), Some("2026-10-01T12:00:00.000Z"));
+        let plan: String = store.lock()?.query_row("EXPLAIN QUERY PLAN SELECT at FROM events WHERE session_id=?1 AND json_extract(message,'$.method') IN ('demodex/promptAccepted','demodex/promptSteered','demodex/promptQueued') ORDER BY seq DESC LIMIT 1", [&session.id], |r|r.get(3))?;
+        assert!(plan.contains("events_user_message"), "{plan}");
+        Ok(())
+    }
+
     #[test]
     fn stars_and_order_stay_within_groups_and_survive_restart() -> Result<()> {
         let dir = tempfile::tempdir()?;

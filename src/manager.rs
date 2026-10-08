@@ -25,6 +25,7 @@ pub struct Live {
 
 pub struct Manager {
     pub store: Store,
+    pub(crate) project_git: crate::project_git::Cache,
     pub(crate) file_slots: tokio::sync::Semaphore,
     pub(crate) file_jobs: tokio_util::task::TaskTracker,
     file_messages: Arc<tokio::sync::Semaphore>,
@@ -41,6 +42,7 @@ impl Manager {
     pub fn new(store: Store) -> Arc<Self> {
         Arc::new(Self {
             store,
+            project_git: Default::default(),
             file_slots: tokio::sync::Semaphore::new(8),
             file_jobs: tokio_util::task::TaskTracker::new(),
             file_messages: Arc::new(tokio::sync::Semaphore::new(8)),

@@ -51,6 +51,20 @@ Small, deliberate, slightly odd. A session console, not a decorative dashboard.
 
 ## Session overview and context
 
+- Project folders show containing-worktree Git branch, clean or changed counts,
+  conflicts and locally known ahead/behind counts. A parent repository shows
+  `../` or `../../`; deeper ancestry is `../ × N`. The tooltip gives the repository
+  root and clarifies whole-repository scope. Git checks use that project's executor
+  and never fetch. Not-a-repository has no badge; errors/disconnection show Git
+  unavailable, loading shows Git …, and old cached readings are marked stale.
+
+- Default to Last user message (newest first), with Name and Manual sort choices
+  saved with the tab's server view. Starred sessions stay first. Tree sorts within
+  project folders; List sorts across projects, except Manual keeps reorder groups.
+  Reorder selects Manual; selecting another sort exits reordering. Sessions with
+  no recorded accepted Demodex send sort last; agent output and reconnects do not
+  refresh the time. Queue submissions count when accepted, not when dispatched.
+
 - Each server shows one sparse folder tree, grouped by stable execution target, then project path, never by
   executor generation. Each session appears once: at its reported project, or
   its host directory when host is attached, otherwise its first executor directory.

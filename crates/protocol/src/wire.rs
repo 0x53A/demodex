@@ -39,10 +39,36 @@ pub struct Session {
     pub starred: bool,
     #[serde(default)]
     pub sort_order: i64,
+    /// Latest accepted user send, steer, or queue submission recorded by Demodex.
+    #[serde(default)]
+    pub last_user_message_at: Option<String>,
     pub sandbox: Option<Sandbox>,
     pub effective_sandbox: Option<serde_json::Value>,
     pub context_usage: serde_json::Value,
     pub presentation: Presentation,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ProjectGit {
+    pub target: String,
+    pub executor: String,
+    pub path: String,
+    pub state: String,
+    pub checked_at_ms: u64,
+    pub status: Option<GitStatus>,
+    pub error: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct GitStatus {
+    pub root: String,
+    pub parent_levels: u32,
+    pub branch: String,
+    pub oid: String,
+    pub ahead: Option<u64>,
+    pub behind: Option<u64>,
+    pub staged: u64,
+    pub unstaged: u64,
+    pub untracked: u64,
+    pub conflicts: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Presentation {
@@ -103,6 +129,7 @@ pub struct SessionDetail {
 pub enum Response {
     Conversation(ConversationSnapshot),
     Sessions(Vec<Session>),
+    ProjectGit(Vec<ProjectGit>),
     Session(Session),
     Detail(SessionDetail),
     Events(Vec<Event>),
@@ -141,6 +168,7 @@ impl Response {
     /// Presentation adapter for dynamic renderers and persisted legacy receipts.
     pub fn into_value(self) -> serde_json::Value {
         match self {
+            Self::ProjectGit(value) => serde_json::json!(value),
             Self::Sessions(value) => serde_json::json!(value),
             Self::Session(value) => serde_json::json!(value),
             Self::Detail(value) => serde_json::json!(value),
@@ -156,6 +184,7 @@ impl Response {
         value: serde_json::Value,
     ) -> Result<Self, serde_json::Error> {
         Ok(match operation {
+            Operation::ProjectGit => Self::ProjectGit(serde_json::from_value(value)?),
             Operation::Sessions => Self::Sessions(serde_json::from_value(value)?),
             Operation::CreateSession { .. }
             | Operation::CreateSessionWithPrompt { .. }
@@ -216,6 +245,7 @@ pub enum Operation {
     RemovePush { device_id: String },
     TestPush { device_id: String },
     Sessions,
+    ProjectGit,
     StopBackground {
         id: String,
         generation: String,

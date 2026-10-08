@@ -84,6 +84,7 @@ pub struct App {
     _listeners: Vec<EventListener>,
     _cache_clock: gloo::timers::callback::Interval,
     sessions: Vec<Value>,
+    project_git: Vec<Value>,
     runtime: Value,
     environments: Vec<Value>,
     targets: Vec<Value>,
@@ -116,6 +117,7 @@ pub struct App {
     event_count: usize,
     history_loaded: bool,
     transcript: crate::transcript::Transcript,
+    conversations: crate::transcript::ConversationCache,
     reads: Reads,
     busy: bool,
     error: String,
@@ -205,6 +207,34 @@ pub enum Msg {
 }
 
 impl App {
+    fn select_conversation(&mut self, id: String) {
+        if id != self.saved.selected {
+            let previous = std::mem::take(&mut self.transcript);
+            if self.history_loaded && !self.saved.selected.is_empty() {
+                self.conversations.insert(self.saved.selected.clone(), previous, self.event_count);
+            }
+            let cached = self.conversations.take(&id);
+            self.history_loaded = cached.is_some();
+            (self.transcript, self.event_count) = cached.unwrap_or_default();
+            self.saved.selected = id;
+        }
+        self.current = self.sessions.iter()
+            .find(|session| text(session, "id") == self.saved.selected)
+            .cloned().unwrap_or(Value::Null);
+        if !self.current.is_null() {
+            self.saved.fields.insert("session_sandbox".into(), text(&self.current, "sandbox").into());
+        }
+        self.events.clear();
+        self.pending.clear();
+        self.queued.clear();
+        self.queue_error.clear();
+        self.target_selection = Value::Null;
+        self.targets_pending = false;
+        self.target_notice.clear();
+        self.reads.reset(true);
+        self.follow = true;
+    }
+
     fn start_reads(&mut self, ctx: &Context<Self>) {
         let Some(client) = self.client.clone().filter(|_| self.connected) else { return; };
         for resource in RESOURCES {
@@ -213,6 +243,7 @@ impl App {
             let after = self.transcript.cursor();
             let operation = match resource {
                 Resource::Sessions => Operation::Sessions,
+                Resource::ProjectGit => Operation::ProjectGit,
                 Resource::Runtime => Operation::Runtime,
                 Resource::Environments => Operation::Environments,
                 Resource::Targets => Operation::Targets,
@@ -518,6 +549,7 @@ impl Component for App {
             retry: None,
             _listeners: listeners,
             sessions: vec![],
+            project_git: vec![],
             runtime: Value::Null,
             environments: vec![],
             targets: vec![],
@@ -550,6 +582,7 @@ impl Component for App {
             event_count: 0,
             history_loaded: false,
             transcript: crate::transcript::Transcript::default(),
+            conversations: crate::transcript::ConversationCache::default(),
             reads: Reads::default(),
             busy: false,
             error: String::new(),
@@ -634,16 +667,8 @@ impl Component for App {
                     self.record_navigation(true);
                 } else {
                     self.connections_page = route.connections;
-                    self.saved.selected = route.selected;
+                    self.select_conversation(route.selected);
                     self.saved.page.clear();
-                    self.current = Value::Null;
-                    self.events.clear();
-                    self.event_count = 0;
-                    self.history_loaded = false;
-                    self.reads.reset(true);
-                    self.transcript = crate::transcript::Transcript::default();
-                    self.pending.clear();
-                    self.follow = true;
                     ctx.link().send_message(Msg::Refresh);
                 }
             }
@@ -802,6 +827,7 @@ impl Component for App {
                 }
                 let host = self.host_input.trim().trim_end_matches('/').to_owned();
                 if host != self.saved.host {
+                    self.reorder_mode = false;
                     self.show_diagnostics = false;
                     self.show_background = false;
                     self.background = Value::Null;
@@ -809,6 +835,7 @@ impl Component for App {
                     self.controls = Value::Null;
                     self.models = Value::Null;
                     self.model_error.clear();
+                    self.conversations = crate::transcript::ConversationCache::default();
                     self.saved.selected.clear();
                     self.saved.page.clear();
                     self.events.clear();
@@ -818,6 +845,7 @@ impl Component for App {
                     self.transcript = crate::transcript::Transcript::default();
                     self.current = Value::Null;
                     self.sessions.clear();
+                    self.project_git.clear();
                     self.saved_threads.clear();
                     self.pending.clear();
                     self.runtime = Value::Null;
@@ -990,6 +1018,7 @@ impl Component for App {
                             self.runtime = value;
                             if !self.runtime["account"].is_null() { self.login = Value::Null; }
                         }
+                        Resource::ProjectGit => self.project_git = array(&value),
                         Resource::Environments => self.environments = array(&value),
                         Resource::Targets => self.targets = array(&value),
                         Resource::Detail => {
@@ -1044,16 +1073,8 @@ impl Component for App {
                 self.background = Value::Null;
                 self.models = Value::Null;
                 self.model_error.clear();
-                self.saved.selected = id;
+                self.select_conversation(id);
                 self.saved.page.clear();
-                self.current = Value::Null;
-                self.pending.clear();
-                self.events.clear();
-                self.event_count = 0;
-                self.history_loaded = false;
-                self.reads.reset(true);
-                self.transcript = crate::transcript::Transcript::default();
-                self.follow = true;
                 ctx.link().send_message(Msg::Refresh);
             }
             Msg::ServerSettings(open) => {
@@ -1067,14 +1088,7 @@ impl Component for App {
             }
             Msg::Page(page) => {
                 self.saved.page = page;
-                self.saved.selected.clear();
-                self.current = Value::Null;
-                self.events.clear();
-                self.event_count = 0;
-                self.history_loaded = false;
-                self.reads.reset(true);
-                self.transcript = crate::transcript::Transcript::default();
-                self.pending.clear();
+                self.select_conversation(String::new());
                 ctx.link().send_message(Msg::Refresh);
             }
             Msg::TargetDraft(value) => {
@@ -1098,6 +1112,7 @@ impl Component for App {
                 }
             }
             Msg::Field(name, value) => {
+                if name == "session_sort" { self.reorder_mode = false; }
                 if name == "search" {
                     // A cursor belongs to the submitted query. Editing invalidates
                     // both its results and any response still in flight.
@@ -1146,7 +1161,10 @@ impl Component for App {
                 if generation != self.generation || id != self.saved.selected || !self.show_diagnostics { return false; }
                 match result { Ok(events) => self.events = events, Err(error) => self.error = error }
             }
-            Msg::ReorderMode => { self.reorder_mode = !self.reorder_mode; }
+            Msg::ReorderMode => {
+                self.reorder_mode = !self.reorder_mode;
+                if self.reorder_mode { self.saved.fields.insert("session_sort".into(), "manual".into()); }
+            }
             Msg::Controls(open) => {
                 self.show_diagnostics = false;
                 self.show_background = false;
@@ -1777,9 +1795,14 @@ impl Component for App {
                                 <button type="button" aria-pressed={(self.saved.field("session_view")!="flat").to_string()} onclick={ctx.link().callback(|_|Msg::Field("session_view".into(),"tree".into()))}>{"Tree"}</button>
                                 <button type="button" aria-pressed={(self.saved.field("session_view")=="flat").to_string()} onclick={ctx.link().callback(|_|Msg::Field("session_view".into(),"flat".into()))}>{"List"}</button>
                             </div><button type="button" class="reorder-toggle" aria-pressed={self.reorder_mode.to_string()} onclick={ctx.link().callback(|_|Msg::ReorderMode)}>{if self.reorder_mode{"Done reordering"}else{"Reorder"}}</button></div>
+                            <label class="session-sort">{"Sort"}<select aria-label="Sort sessions" onchange={ctx.link().callback(|e:Event|Msg::Field("session_sort".into(),e.target_unchecked_into::<HtmlSelectElement>().value()))}>
+                                <option value="last_user_message" selected={crate::overview::Sort::from_saved(&self.saved.field("session_sort"))==crate::overview::Sort::LastUserMessage}>{"Last user message"}</option>
+                                <option value="name" selected={self.saved.field("session_sort")=="name"}>{"Name"}</option>
+                                <option value="manual" selected={self.saved.field("session_sort")=="manual"}>{"Manual"}</option>
+                            </select></label>
                             <button class="new-session-nav primary" disabled={!self.connected} onclick={ctx.link().callback(|_|Msg::NewSession(true))}>{"+ New Session"}</button>
-                            {crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]!=true).map(|s|{let mut s=s.clone();s["goal"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["goal"].clone()}else{Value::Null};s["active_subagents"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["active_subagents"].clone()}else{Value::Null};s["background_count"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["count"].clone()}else{Value::Null};s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode,self.saved.field("session_view")=="flat",ctx.link().callback(Msg::NewProjectSession))}
-                            {if self.sessions.iter().any(|s|s["archived"]==true){html!{<details class="archived-sessions"><summary>{format!("Archived sessions ({})",self.sessions.iter().filter(|s|s["archived"]==true).count())}</summary>{crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]==true).map(|s|{let mut s=s.clone();s["background_count"]=Value::Null;s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode,self.saved.field("session_view")=="flat",ctx.link().callback(Msg::NewProjectSession))}</details>}}else{Html::default()}}
+                            {crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]!=true).map(|s|{let mut s=s.clone();s["goal"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["goal"].clone()}else{Value::Null};s["active_subagents"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["active_subagents"].clone()}else{Value::Null};s["background_count"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["count"].clone()}else{Value::Null};s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode,self.saved.field("session_view")=="flat",crate::overview::Sort::from_saved(&self.saved.field("session_sort")),&self.project_git,self.connected,ctx.link().callback(Msg::NewProjectSession))}
+                            {if self.sessions.iter().any(|s|s["archived"]==true){html!{<details class="archived-sessions"><summary>{format!("Archived sessions ({})",self.sessions.iter().filter(|s|s["archived"]==true).count())}</summary>{crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]==true).map(|s|{let mut s=s.clone();s["background_count"]=Value::Null;s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode,self.saved.field("session_view")=="flat",crate::overview::Sort::from_saved(&self.saved.field("session_sort")),&self.project_git,self.connected,ctx.link().callback(Msg::NewProjectSession))}</details>}}else{Html::default()}}
                         </aside>
                         <main class={(!self.saved.selected.is_empty()).then_some("chat-main")}>
                             {if !self.saved.selected.is_empty(){self.chat_view(ctx)}else{html!{<section class="empty"><span class="eyebrow">{"SERVER OVERVIEW"}</span><h1>{"Your agents, by project."}</h1><p>{"Select an agent in the folder tree to open its conversation. Only folders with sessions appear."}</p><p class="muted">{"Each agent keeps its icon and generated name. Status shows who is working, waiting for you, or disconnected."}</p><button disabled={!self.connected} onclick={ctx.link().callback(|_|Msg::NewSession(true))}>{"New Session"}</button></section>}}}
