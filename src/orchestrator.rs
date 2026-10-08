@@ -1521,6 +1521,14 @@ impl Orchestrator {
         self.connect_session_locked(id, &settings, None).await
     }
 
+    pub(crate) async fn takeover(&self, id: &str, expected_daemon: &str, expected_threads: &[String]) -> Result<()> {
+        let _lifecycle = self.jobs.lock().await;
+        let settings = self.manager.connecting.lock().await;
+        crate::takeover::takeover(self, id, expected_daemon, expected_threads).await?;
+        // This is one explicit resume, never a replay of the failed import or a turn.
+        self.connect_session_locked(id, &settings, None).await
+    }
+
     // Caller holds jobs, then manager.connecting, throughout the transition.
     pub(crate) async fn connect_session_locked(
         &self,

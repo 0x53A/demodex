@@ -15,6 +15,7 @@ mod session_context;
 mod ssh;
 mod store;
 mod targets;
+mod takeover;
 mod uploads;
 mod usage;
 mod vm;

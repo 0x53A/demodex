@@ -48,6 +48,21 @@ Exact transport dependency versions constrain consumers with separate lockfiles.
 
 ## Library and native clients
 
+Protocol v37 adds explicit receipted Takeover for local imported threads blocked
+by Codex's active-writer error. Detail controls exposes a read-only CLI-daemon
+inspection. The UI warns that stopping the shared CLI daemon stops all its loaded
+sessions, and submits its identity and reviewed thread list. The server rechecks
+both in the explicitly shared profile. Linux takeover verifies the inspection
+socket's peer PID/UID and the daemon's boot ID/start ticks, pins a pidfd before
+validation, sends SIGTERM only through that handle and waits for that exact
+process to exit before resuming once without a turn. A replacement daemon is
+never signalled. Unavailable pidfd support fails closed; no automatic takeover, profile-wide stop,
+numeric-PID/process-name killing, SIGKILL, lock deletion or external-controller
+fallback. The loaded list is a snapshot; stopping the reviewed server affects
+all its sessions, including ones opened before shutdown. Matching daemon/clients
+required; receipt encoding remains v16. Run `uv run tests/takeover.py` for disposable real
+Codex daemon checks without inference.
+
 Protocol v36 adds last-request input_tokens and cached_input_tokens to
 Session.context_usage. Existing usage snapshots recover those fields from saved
 events while preserving report time. The blue Possibly cold indicator is a

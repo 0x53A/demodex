@@ -72,7 +72,7 @@ impl Rpc {
     }
     pub async fn connect(url: &str) -> Result<(Self, mpsc::Receiver<Result<Value>>)> {
         // Endpoints are host-admin configuration, never supplied by an agent tool.
-        let (mut sink, mut stream): (WsSink, WsStream) =
+        let (sink, stream): (WsSink, WsStream) =
             tokio::time::timeout(Duration::from_secs(10), async {
                 if let Some(path) = url.strip_prefix("unix://") {
                     let stream = tokio::net::UnixStream::connect(path).await?;
@@ -92,6 +92,20 @@ impl Rpc {
             })
             .await
             .context("app-server connection timed out")??;
+        Self::from_transport(sink, stream).await
+    }
+
+    /// Keep an already verified Unix peer bound to this exact RPC connection.
+    pub(crate) async fn connect_unix(stream: tokio::net::UnixStream) -> Result<(Self, mpsc::Receiver<Result<Value>>)> {
+        let (socket, _) = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio_tungstenite::client_async("ws://localhost/", stream),
+        ).await.context("app-server handshake timed out")??;
+        let (sink, stream) = socket.split();
+        Self::from_transport(Box::pin(sink), Box::pin(stream)).await
+    }
+
+    async fn from_transport(mut sink: WsSink, mut stream: WsStream) -> Result<(Self, mpsc::Receiver<Result<Value>>)> {
         let (out, mut commands) = mpsc::channel::<Outgoing>(64);
         // Absorb streaming bursts while the consumer commits event batches.
         // Keep this bounded and fail closed on overflow: waiting here would

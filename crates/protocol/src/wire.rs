@@ -259,6 +259,11 @@ pub enum Operation {
     Connect {
         id: String,
     },
+    Takeover {
+        id: String,
+        expected_daemon: String,
+        expected_threads: Vec<String>,
+    },
     StarSession { id: String, starred: bool },
     MoveSession { id: String, neighbor: String },
     ReorderSessions { expected: Vec<String>, ids: Vec<String> },

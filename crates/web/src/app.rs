@@ -1879,6 +1879,8 @@ impl App {
         let status = text(&self.current, "status");
         let reconnect = status == "disconnected" && self.current["archived"] != true;
         let stored_error = text(&self.current, "error");
+        let writer_conflict = reconnect && demodex_protocol::active_writer_conflict(stored_error, text(&self.current, "thread_id"));
+        let takeover = &self.controls["takeover"];
         let error = if matches!(stored_error, "host runtime is restarting; reconnect to resume" | "Host runtime disconnected; reconnect to resume") {
             if self.runtime["running"] == true { "Host runtime restarted. Reconnect to resume." } else { "Host runtime is unavailable. Start it in Server settings, then reconnect." }
         } else if stored_error.is_empty() && reconnect { "Session disconnected." } else { stored_error };
@@ -1888,6 +1890,17 @@ impl App {
         html! {<>
             <div class="session-heading"><button class="back" onclick={ctx.link().callback(|_|Msg::Page(String::new()))}>{"← Sessions"}</button><div class="session-heading-text"><h1>{crate::overview::title(&self.current)}</h1><span class="agent-name">{crate::overview::identity(&self.current)}</span>{if !text(&self.current,"thread_id").is_empty(){html!{<code class="thread-reference" title="Codex thread UUID">{text(&self.current,"thread_id")}</code>}}else{Html::default()}}</div><span class={classes!("status",crate::overview::status_class(status))}>{status}</span>{close}</div>
             {if !error.is_empty(){html!{<div class="error session-error" role="status"><span>{error}</span>{if reconnect{self.button(ctx,"Reconnect",Operation::Connect{id:id.clone()})}else{Html::default()}}</div>}}else{Html::default()}}
+            {if writer_conflict {html!{<section class="app-notice" aria-label="Codex takeover">
+                <p>{"Another Codex server is keeping this thread open. Closing its terminal may leave it running."}</p>
+                {if let Some(daemon) = takeover["daemon"].as_str() {
+                    let threads: Vec<String> = array(&takeover["threads"]).iter().filter_map(|v|v.as_str().map(str::to_owned)).collect();
+                    html!{<>
+                        <p>{format!("Takeover stops the shared Codex CLI server and interrupts all {} loaded sessions. Any sessions opened on that server before shutdown will also stop. Running work and goals will stop; remote commands may continue. It then resumes this thread in Demodex without sending a message. Saved conversations are kept.",threads.len())}</p>
+                        <details><summary>{"Sessions affected"}</summary><ul>{for threads.iter().map(|thread|html!{<li><code>{thread}</code></li>})}</ul></details>
+                        {self.button(ctx,"Take over — stop Codex CLI server",Operation::Takeover{id:id.clone(),expected_daemon:daemon.into(),expected_threads:threads})}
+                    </>}
+                } else {html!{<p>{if takeover.is_null() {"Checking whether the CLI server can be stopped…"} else {text(takeover,"error")}}</p>}}}
+            </section>}}else{Html::default()}}
             {crate::usage::cache_indicator(&self.current,true)}
             <div class="transcript-frame"><div class="transcript" ref={self.transcript_ref.clone()} onscroll={ctx.link().callback(|_|Msg::Scroll)} role="region" aria-label="Chat transcript" tabindex="0">
                 {if !self.history_loaded {html!{<p class="muted" role="status">{"Loading conversation…"}</p>}}else{Html::default()}}

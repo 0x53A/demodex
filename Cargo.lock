@@ -443,6 +443,7 @@ dependencies = [
  "ractor_wormhole",
  "reqwest",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",

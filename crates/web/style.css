@@ -21,6 +21,9 @@ aside{min-height:0;overflow-y:auto;overscroll-behavior:contain}
 .activity.waiting{color:#ff9b61}
 .app-notice{flex:none;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 16px;border-bottom:1px solid #ff792f;background:#292017;color:#ffbf93;font-size:13px;overflow-wrap:anywhere}
 .app-notice button{flex:none}
+.app-notice[aria-label="Codex takeover"]{display:block;max-height:40dvh;overflow:auto}
+.app-notice[aria-label="Codex takeover"] p{margin:0 0 .6rem}
+.app-notice[aria-label="Codex takeover"] details{margin-bottom:.6rem}
 .global-error{flex:0 1 auto;min-height:0;max-height:40dvh;overflow-y:auto}
 .activity-marker{width:8px;height:8px;background:currentColor;animation:working-pulse 1.4s ease-in-out infinite}
 @keyframes working-pulse{50%{opacity:.25}}

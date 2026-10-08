@@ -67,6 +67,10 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         HostSession { input } => return Ok(Response::Session(host_session(app, input).await?)),
         ExternalSession { input } => return Ok(Response::Session(create(app, input).await?)),
         Connect { id } => connect(app, id).await?,
+        Takeover { id, expected_daemon, expected_threads } => {
+            app.orchestrator.takeover(&id, &expected_daemon, &expected_threads).await?;
+            json!({"ok":true})
+        }
         StarSession { id, starred } => {
             app.manager.store.star(&id, starred)?;
             json!({"ok":true})
@@ -362,6 +366,7 @@ async fn detail(app: &App, id: String) -> Result<SessionDetail> {
     };
     let mut controls = app.manager.control_snapshot(&id).await?;
     controls["prompts"]=app.orchestrator.session_prompt_view(&id)?;
+    controls["takeover"]=app.orchestrator.takeover_view(&session).await;
     let background = app.manager.background_snapshot(&id).await;
     Ok(SessionDetail {
         session,
