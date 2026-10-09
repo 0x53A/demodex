@@ -168,6 +168,9 @@ class Codex:
             self.dispatch_queued()
 
 
+git_probe = {'fail': False, 'calls': 0}
+
+
 def git_executor(ws):
     try:
         for raw in ws:
@@ -175,10 +178,14 @@ def git_executor(ws):
             if request.get('method') == 'initialize':
                 ws.send(json.dumps({'id':request['id'], 'result':{}}))
             elif request.get('method') == 'process/start':
+                git_probe['calls'] += 1
                 params = request['params']
                 assert params['argv'][0] == 'timeout'
                 assert params['cwd'].startswith('file:///')
                 process = params['processId']
+                if git_probe['fail']:
+                    ws.send(json.dumps({'id':request['id'], 'error':{'code':-32000, 'message':'fixture Git refresh failure'}}))
+                    continue
                 ws.send(json.dumps({'id':request['id'], 'result':{'processId':process}}))
                 output = b'\0'.join([b'/home', b'operator/src/', b'# branch.oid abcdef123456', b'# branch.head main', b'# branch.ab +2 -0', b'1 M. metadata file', b'? untracked', b''])
                 found = params['cwd'] == 'file:///home/operator/src'
@@ -314,7 +321,7 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             # the separate detail/control read is still blocked.
             composer = page.get_by_label('Message', exact=True)
             composer.fill('Draft written before reconnect')
-            expect(page.locator('.project-git')).to_contain_text('Git unavailable')
+            expect(page.locator('.project-git')).to_contain_text('Git refresh failed: Reconnect a session')
             expect(page.get_by_role('button', name='Send', exact=True)).to_be_disabled()
             seen, release = threading.Event(), threading.Event()
             codex.snapshot_gate = (seen, release)
@@ -331,6 +338,16 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             composer.fill('')
             expect(page.locator('.project-git')).to_contain_text('Git ../../ · main · 1 staged · 1 untracked · ↑2', timeout=20000)
             expect(page.locator('.project-git')).to_have_attribute('title', __import__('re').compile('Repository: /home'))
+            if os.environ.get('DEMODEX_GIT_ONLY'):
+                # No clicks or session changes: periodic reads must surface failures
+                # after cache expiry, then clear the warning after recovery.
+                git_probe['fail'] = True
+                expect(page.locator('.project-git')).to_contain_text('fixture Git refresh failure', timeout=75000)
+                git_probe['fail'] = False
+                expect(page.locator('.project-git')).to_contain_text('Git ../../ · main', timeout=75000)
+                expect(page.locator('.project-git')).not_to_contain_text('refresh failed')
+                print('PASS: periodic Git refresh, visible failures and recovery', flush=True)
+                raise SystemExit(0)
             page.set_viewport_size({'width':390, 'height':844})
             page.get_by_role('button', name='Close session view', exact=True).click()
             expect(page.locator('.project-git')).to_be_in_viewport()

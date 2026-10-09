@@ -1,4 +1,4 @@
-//! Cached, bounded Git metadata through the project's exact executor.
+//! Cached, bounded Git metadata through the current host or exact remote executor.
 use anyhow::{Context, Result, ensure};
 use base64::Engine;
 use demodex_protocol::{GitStatus, ProjectGit, Session, Target};
@@ -64,17 +64,30 @@ fn empty(target: &Target, path: &str, state: &str, error: Option<String>) -> Pro
 }
 
 impl Cache {
-    pub async fn snapshot(&self, manager: &crate::manager::Manager) -> Result<Vec<ProjectGit>> {
+    pub async fn snapshot(
+        &self,
+        manager: &crate::manager::Manager,
+        orchestrator: &crate::orchestrator::Orchestrator,
+    ) -> Result<Vec<ProjectGit>> {
+        let host = orchestrator.project_git_host().await;
         let sessions = manager.store.list()?;
         let live = manager.live.lock().await;
         let mut projects = BTreeMap::new();
         for session in &sessions {
-            if let Some((target, path)) = project(session) {
+            if let Some((mut target, path)) = project(session) {
+                let is_host = demodex_protocol::location::target_id(&target.id) == "host";
+                if is_host && let Some(current) = &host {
+                    target = current.clone();
+                }
                 let key = (
                     demodex_protocol::location::target_id(&target.id).to_owned(),
                     path.clone(),
                 );
-                let connected = live.contains_key(&session.id);
+                let connected = if is_host {
+                    host.is_some()
+                } else {
+                    live.contains_key(&session.id)
+                };
                 let entry =
                     projects
                         .entry(key)
@@ -100,7 +113,14 @@ impl Cache {
                     &target,
                     &path,
                     "unavailable",
-                    Some("Reconnect a session in this project to check Git".into()),
+                    Some(
+                        if demodex_protocol::location::target_id(&target.id) == "host" {
+                            "Host executor is unavailable"
+                        } else {
+                            "Reconnect a session in this project to check Git"
+                        }
+                        .into(),
+                    ),
                 ));
             } else if let Some((_, value)) = cache
                 .get(&key)
@@ -141,12 +161,21 @@ impl Cache {
         }
         // Do not attribute results to a replacement or detached executor.
         let current = manager.store.list()?;
+        let current_host = orchestrator.project_git_host().await;
         let live = manager.live.lock().await;
         output.retain(|row| {
             current.iter().any(|s| {
                 project(s).is_some_and(|(t, p)| {
-                    t.id == row.executor && empty(&t, &p, "", None).path == row.path
-                }) && (row.state == "unavailable" || live.contains_key(&s.id))
+                    let same_executor = if row.target == "host" {
+                        demodex_protocol::location::target_id(&t.id) == "host"
+                            && current_host.as_ref().map_or(row.state == "unavailable", |h| {
+                                h.id == row.executor
+                            })
+                    } else {
+                        t.id == row.executor
+                    };
+                    same_executor && empty(&t, &p, "", None).path == row.path
+                }) && (row.target == "host" || row.state == "unavailable" || live.contains_key(&s.id))
             })
         });
         Ok(output)

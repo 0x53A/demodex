@@ -27,7 +27,7 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         RegisterPush { input } => crate::notifications::register(&app.manager.store, input)?,
         RemovePush { device_id } => crate::notifications::remove(&app.manager.store, &device_id)?,
         TestPush { device_id } => crate::notifications::test(&app.manager.store, &device_id).await?,
-        ProjectGit => return Ok(Response::ProjectGit(app.manager.project_git.snapshot(&app.manager).await?)),
+        ProjectGit => return Ok(Response::ProjectGit(app.manager.project_git.snapshot(&app.manager, &app.orchestrator).await?)),
         Sessions => return Ok(Response::Sessions(list(app).await?)),
         Detail { id } => return Ok(Response::Detail(detail(app, id).await?)),
         Events { id, after } => return Ok(Response::Events(app.manager.store.events(&id, after)?)),

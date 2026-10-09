@@ -54,9 +54,12 @@ Small, deliberate, slightly odd. A session console, not a decorative dashboard.
 - Project folders show containing-worktree Git branch, clean or changed counts,
   conflicts and locally known ahead/behind counts. A parent repository shows
   `../` or `../../`; deeper ancestry is `../ × N`. The tooltip gives the repository
-  root and clarifies whole-repository scope. Git checks use that project's executor
-  and never fetch. Not-a-repository has no badge; errors/disconnection show Git
-  unavailable, loading shows Git …, and old cached readings are marked stale.
+  root and clarifies whole-repository scope. Host folders use the current host
+  executor even with disconnected sessions; remote folders require their attached
+  executor. Checks never fetch. Git refreshes every 60 seconds. Not-a-repository
+  has no badge; failures show a visible warning with the reason, loading shows
+  Git …, and old cached readings are marked stale. Failed refresh requests warn
+  that displayed results may be out of date until a successful refresh.
 
 - Default to Last user message (newest first), with Name and Manual sort choices
   saved with the tab's server view. Starred sessions stay first. Tree sorts within

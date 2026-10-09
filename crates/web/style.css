@@ -636,3 +636,4 @@ aside > .section-title { flex-wrap:wrap;gap:6px; }
 .project-git.clean { color:#91b88b; }
 .project-git.dirty { color:#ffb079; }
 .project-git.unavailable { color:#a3aa9e; }
+.project-git.failed { color:#f58c82; }

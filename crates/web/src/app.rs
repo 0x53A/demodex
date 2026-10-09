@@ -85,6 +85,7 @@ pub struct App {
     _cache_clock: gloo::timers::callback::Interval,
     sessions: Vec<Value>,
     project_git: Vec<Value>,
+    project_git_error: String,
     runtime: Value,
     environments: Vec<Value>,
     targets: Vec<Value>,
@@ -550,6 +551,7 @@ impl Component for App {
             _listeners: listeners,
             sessions: vec![],
             project_git: vec![],
+            project_git_error: String::new(),
             runtime: Value::Null,
             environments: vec![],
             targets: vec![],
@@ -846,6 +848,7 @@ impl Component for App {
                     self.current = Value::Null;
                     self.sessions.clear();
                     self.project_git.clear();
+                    self.project_git_error.clear();
                     self.saved_threads.clear();
                     self.pending.clear();
                     self.runtime = Value::Null;
@@ -1018,7 +1021,10 @@ impl Component for App {
                             self.runtime = value;
                             if !self.runtime["account"].is_null() { self.login = Value::Null; }
                         }
-                        Resource::ProjectGit => self.project_git = array(&value),
+                        Resource::ProjectGit => {
+                            self.project_git = array(&value);
+                            self.project_git_error.clear();
+                        },
                         Resource::Environments => self.environments = array(&value),
                         Resource::Targets => self.targets = array(&value),
                         Resource::Detail => {
@@ -1058,7 +1064,11 @@ impl Component for App {
                     },
                     Err(error) => {
                         self.reads.failed(resource);
-                        self.error = error;
+                        if resource == Resource::ProjectGit {
+                            self.project_git_error = error;
+                        } else {
+                            self.error = error;
+                        }
                     }
                 }
             }
@@ -1101,7 +1111,9 @@ impl Component for App {
                 self.saved.enter_sends = enabled;
                 self.enter_sends_error = if write_enter_sends(enabled) { String::new() } else { ENTER_SENDS_STORAGE_ERROR.into() };
             }
-            Msg::CacheClock => return true,
+            Msg::CacheClock => {
+                if self.connected { self.reads.invalidate(Resource::ProjectGit); }
+            },
             Msg::SyncEnterSends => {
                 match read_enter_sends() {
                     Ok(value) => {
@@ -1801,6 +1813,7 @@ impl Component for App {
                                 <option value="manual" selected={self.saved.field("session_sort")=="manual"}>{"Manual"}</option>
                             </select></label>
                             <button class="new-session-nav primary" disabled={!self.connected} onclick={ctx.link().callback(|_|Msg::NewSession(true))}>{"+ New Session"}</button>
+                            {if !self.project_git_error.is_empty() {html!{<div class="error" role="alert">{format!("Git refresh failed; displayed results may be out of date: {}",self.project_git_error)}</div>}}else{Html::default()}}
                             {crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]!=true).map(|s|{let mut s=s.clone();s["goal"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["goal"].clone()}else{Value::Null};s["active_subagents"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["active_subagents"].clone()}else{Value::Null};s["background_count"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["count"].clone()}else{Value::Null};s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode,self.saved.field("session_view")=="flat",crate::overview::Sort::from_saved(&self.saved.field("session_sort")),&self.project_git,self.connected,ctx.link().callback(Msg::NewProjectSession))}
                             {if self.sessions.iter().any(|s|s["archived"]==true){html!{<details class="archived-sessions"><summary>{format!("Archived sessions ({})",self.sessions.iter().filter(|s|s["archived"]==true).count())}</summary>{crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]==true).map(|s|{let mut s=s.clone();s["background_count"]=Value::Null;s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode,self.saved.field("session_view")=="flat",crate::overview::Sort::from_saved(&self.saved.field("session_sort")),&self.project_git,self.connected,ctx.link().callback(Msg::NewProjectSession))}</details>}}else{Html::default()}}
                         </aside>

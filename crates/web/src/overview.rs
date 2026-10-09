@@ -193,7 +193,7 @@ fn git_view(sessions: &[Value], git: &[Value], connected: bool) -> Html {
     let Some(session) = sessions.first() else { return Html::default(); };
     let (target,path) = project(session);
     let row = git.iter().find(|r|text(r,"target")==target && text(r,"path")==path
-        && sessions.iter().any(|s|locations(s).iter().any(|(id,_,_)|id==text(r,"executor"))));
+        && (target=="host" || sessions.iter().any(|s|locations(s).iter().any(|(id,_,_)|id==text(r,"executor")))));
     if !connected {
         return html!{<small class="project-git unavailable" title="Connection lost; Git status is unavailable">{"Git unavailable"}</small>};
     }
@@ -202,7 +202,7 @@ fn git_view(sessions: &[Value], git: &[Value], connected: bool) -> Html {
     };
     if text(row,"state")=="not_repository" { return Html::default(); }
     if text(row,"state")!="repository" {
-        return html!{<small class="project-git unavailable" title={text(row,"error").to_owned()}>{"Git unavailable"}</small>};
+        return html!{<small class="project-git failed" role="status">{format!("⚠ Git refresh failed: {}",text(row,"error"))}</small>};
     }
     let status = &row["status"];
     let levels = status["parent_levels"].as_u64().unwrap_or(0);

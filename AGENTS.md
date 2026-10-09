@@ -48,8 +48,10 @@ Exact transport dependency versions constrain consumers with separate lockfiles.
 
 ## Library and native clients
 
-Protocol v38 adds read-only ProjectGit snapshots for overview project folders.
-Checks use the exact attached executor of a connected session, never host fallback,
+Protocol v39 allows read-only ProjectGit snapshots for all overview host project
+folders through the current daemon host executor, including disconnected sessions.
+Host mode must be explicitly enabled. Remote checks still use the exact attached
+executor of a connected session, never host fallback,
 with a 30-second generation/endpoint/path cache, four concurrent commands, 64
 projects and a 12-second refresh bound. Each executor must provide Git, sh and
 `timeout`; native host checks use the daemon PATH (the NixOS module includes
@@ -57,6 +59,8 @@ Git), and remote checks use the standard Linux/NixOS system PATH. Each command
 is limited to four seconds and 256 KiB of output. Git optional writes, fsmonitor
 hooks, submodule recursion and partial-clone lazy fetching are disabled; missing
 objects report Git unavailable rather than triggering a fetch.
+The browser refreshes Git every 60 seconds and shows per-folder failures and
+request-level refresh errors visibly, clearing them after successful refresh.
 The status covers the whole containing worktree and reports root ancestry from
 Git's prefix (including linked worktrees). No-repository is distinct from errors,
 timeouts and disconnected targets. The browser reads independently on state and

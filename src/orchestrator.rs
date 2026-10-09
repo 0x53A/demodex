@@ -58,6 +58,17 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
+    pub(crate) async fn project_git_host(&self) -> Option<Target> {
+        if !self.is_host_mode() {
+            return None;
+        }
+        self.runtime
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|r| r.host_target.clone())
+    }
+
     pub async fn browse_directories(&self, target: &str, path: &str) -> Result<Value> {
         crate::targets::validate_cwd(path)?;
         if target == "host" {
