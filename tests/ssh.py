@@ -17,6 +17,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from playwright.sync_api import sync_playwright, expect
 from websockets.sync.client import connect
 from websockets.sync.server import serve
@@ -328,10 +329,16 @@ Subsystem sftp internal-sftp
             c.close()
             api(f'/sessions/{sid}/targets',{'targets':[{'id':target['id'],'cwd':str(root/'missing-dir')}]},error='working directory does not exist')
             old_identity=executors[-1]['environmentId']
+            assert old_identity[:-37] == target['id'], old_identity
+            uuid.UUID(old_identity[-36:])
             api('/targets/'+target['id']+'/reconnect',{})
             assert api(f'/sessions/{sid}')['session']['status']=='disconnected'
             api(f'/sessions/{sid}/connect',{})
-            assert executors[-1]['environmentId']!=old_identity
+            new_identity=executors[-1]['environmentId']
+            assert new_identity!=old_identity
+            assert new_identity[:-37] == target['id'], new_identity
+            uuid.UUID(new_identity[-36:])
+            assert api(f'/sessions/{sid}')['target_selection']==[{'id':target['id'],'cwd':str(root)}]
             api('/targets/'+target['id']+'/forget',{},error='Detach')
             api(f'/sessions/{sid}/targets',{'targets':[]})
             api('/targets/'+target['id']+'/forget',{})

@@ -230,6 +230,8 @@ Restart requires idle managed threads, no active goals, queued messages, unresol
 decisions or background terminals; unknown loaded threads block it. It disconnects
 sessions and replaces the host executor. Reconnect explicitly; never replay work.
 Run `uv run tests/runtime_features.py` for disposable real-Codex checks without
+inference. Run `uv run tests/runtime_startup.py` to check that failed isolated
+runtime startup releases its owned process and permits another attempt, without
 inference. Existing receipt response encoding stays v16. Deploy matching protocol
 clients and daemon together.
 
