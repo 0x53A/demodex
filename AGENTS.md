@@ -18,8 +18,13 @@ daemon. There is no central coordinator. See `DESIGN.md` for the UI design syste
   browser checks, run with UV.
 
 Use Codex app-server JSON-RPC, never terminal scraping. The compatibility
-baseline is codex-cli 0.154.0; this is an experimental API. Preserve unknown
+baseline is codex-cli 0.163.0; this is an experimental API. Preserve unknown
 events for inspection and report unsupported requests explicitly.
+
+The 0.163.0 complete upstream Linux binary package no longer bundles patched
+zsh. Host/resume, prompt settings, runtime feature/restart, failed-startup
+cleanup and durable native/SFTP file tests pass against this version without
+inference. Packaging recipes must not require the retired zsh helper.
 
 The PWA uses ractor_wormhole at `/wormhole`. A JSON hello checks protocol VERSION
 and wire-schema fingerprint before the Wormhole handshake or authentication.
