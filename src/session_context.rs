@@ -2,7 +2,7 @@
 use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 
-pub const INSTRUCTIONS: &str = "You are running inside Demodex, a UI for managing agent sessions across machines. Demodex groups sessions by active execution target, then project path. Use demodex.get_session_context to see your identity and execution environments. Use demodex.set_user_visible_session_context when you establish or change the project you are working on, including after creating a project. Supply its execution environment ID, absolute project-root path, and optionally a short description of your work. The reported environment selects your active display target when several executors are attached; without a valid report, host is preferred, otherwise the first target. Keep the project root during incidental commands in other directories. When available, use demodex.set_session_identity to change your session title, display name, or icon when useful or requested. Omitted fields stay unchanged. When available, use demodex.notify when an explicit notification to the user is useful or requested. It records a chat notification and attempts push to enabled devices; acceptance is not proof the user received or read it. Never send duplicate notifications for the same event. Ask questions directly in chat: request_user_input and request_user_input_async are not reliable in this Demodex integration, even if listed in the tool catalogue. Messages support Markdown tables, LaTeX formulas, and fenced mermaid diagrams; users can view and copy raw text. Context and identity tools only update display metadata; they do not change execution directories, sandbox permissions, or session/thread IDs.";
+pub const INSTRUCTIONS: &str = "You are running inside Demodex, a UI for managing agent sessions across machines. Demodex groups sessions by active execution target, then project path. Use demodex.get_session_context to see your identity and execution environments. Use demodex.set_user_visible_session_context when you establish or change the project you are working on, including after creating a project. Supply its execution environment ID and absolute project-root path. The reported environment selects your active display target when several executors are attached; without a valid report, host is preferred, otherwise the first target. Keep the project root during incidental commands in other directories. Once the task is clear, use demodex.set_session_identity to set a short, descriptive task title. Update the title when the task changes substantially. The title describes the work; project context identifies its location. Change the display name or icon when useful or requested. Omitted fields stay unchanged. When available, use demodex.notify when an explicit notification to the user is useful or requested. It records a chat notification and attempts push to enabled devices; acceptance is not proof the user received or read it. Never send duplicate notifications for the same event. Ask questions directly in chat: request_user_input and request_user_input_async are not reliable in this Demodex integration, even if listed in the tool catalogue. Messages support Markdown tables, LaTeX formulas, and fenced mermaid diagrams; users can view and copy raw text. Context and identity tools only update display metadata; they do not change execution directories, sandbox permissions, or session/thread IDs.";
 
 pub use demodex_protocol::{Presentation, UserVisibleContext};
 
@@ -78,11 +78,6 @@ pub fn validate(context: &mut UserVisibleContext, targets: &[crate::store::Targe
         .filter(|p| !p.is_empty() && *p != ".")
         .collect();
     context.path = format!("/{}", parts.join("/"));
-    ensure!(
-        context.description.chars().count() <= 240
-            && !context.description.chars().any(char::is_control),
-        "description must be a single line of at most 240 characters"
-    );
     Ok(())
 }
 
@@ -118,9 +113,9 @@ pub fn tools() -> Value {
         "type":"namespace", "name":"demodex", "description":"Session identity, project context, and explicit notifications in Demodex. These tools do not change execution settings or permissions.",
         "tools":[
             {"type":"function","name":"notify","description":"Record a notification in this session chat and attempt encrypted push to enabled devices. Use deliberately when user attention is useful or requested. Delivery is best effort; never assume the user received or read it.","inputSchema":{"type":"object","properties":{"message":{"type":"string","minLength":1,"maxLength":1000},"title":{"type":"string","minLength":1,"maxLength":120}},"required":["message"],"additionalProperties":false}},
-            {"type":"function", "name":"set_user_visible_session_context", "description":"Report the project shown beside your session icon. Use the project root, not incidental command directories. description defaults to an empty string. Selects this session's active display target and project; execution settings are unchanged.",
-             "inputSchema":{"type":"object","properties":{"environment_id":{"type":"string"},"path":{"type":"string","description":"Absolute project-root path in that execution environment"},"description":{"type":"string","description":"Short user-visible description of the work","default":""}},"required":["environment_id","path"],"additionalProperties":false}},
-            {"type":"function", "name":"set_session_identity", "description":"Update this session's Demodex title, display identity name, and/or icon. Supply at least one field; omitted fields stay unchanged. Does not rename the underlying Codex thread or change IDs, project context, or execution settings.",
+            {"type":"function", "name":"set_user_visible_session_context", "description":"Report the project shown beside your session icon. Use the project root, not incidental command directories. Selects this session's active display target and project; execution settings are unchanged.",
+             "inputSchema":{"type":"object","properties":{"environment_id":{"type":"string"},"path":{"type":"string","description":"Absolute project-root path in that execution environment"}},"required":["environment_id","path"],"additionalProperties":false}},
+            {"type":"function", "name":"set_session_identity", "description":"Set a short task title once the task is clear; update it when the task changes substantially. Also supports display identity name and icon updates. Supply at least one field; omitted fields stay unchanged. Does not rename the underlying Codex thread or change IDs, project context, or execution settings.",
              "inputSchema":{"type":"object","properties":{"title":{"type":"string","description":"Session title in Demodex (1–120 characters)","minLength":1,"maxLength":120},"name":{"type":"string","description":"Display identity name, replacing the generated name (1–120 characters)","minLength":1,"maxLength":120},"icon":{"type":"string","description":"Short display icon, usually an emoji (1–32 characters)","minLength":1,"maxLength":32}},"additionalProperties":false}},
             {"type":"function", "name":"get_session_context", "description":"Read this session's IDs, display identity, reported context, and attached execution environments.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
         ]
@@ -201,15 +196,24 @@ mod tests {
             store.context_tool(&session.id, "thread", &unknown)?["success"],
             false
         );
-        let mut description = call("description", "/src/other");
+        // Older threads retain the original tool schema, including description.
+        let mut description = call("description", "/src/new");
         description["arguments"]["description"] = json!("x".repeat(241));
         assert_eq!(
             store.context_tool(&session.id, "thread", &description)?["success"],
-            false
+            true
         );
         drop(store);
+        // Persisted presentations from older daemons still include description.
+        let legacy = rusqlite::Connection::open(&database)?;
+        legacy.execute(
+            "UPDATE session_presentation SET value=json_set(value, '$.context.description', 'Old work summary') WHERE session_id=?1",
+            [&session.id],
+        )?;
+        drop(legacy);
         let store = Store::open(&database)?;
         let saved = store.get(&session.id)?;
+        assert!(serde_json::to_value(&saved.presentation)?["context"].get("description").is_none());
         assert_eq!(saved.presentation.name, session.presentation.name);
         assert_eq!(saved.presentation.icon, session.presentation.icon);
         assert_eq!(saved.presentation.context.unwrap().path, "/src/new");

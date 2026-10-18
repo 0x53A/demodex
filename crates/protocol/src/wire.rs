@@ -78,12 +78,10 @@ pub struct Presentation {
     pub context: Option<UserVisibleContext>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+// Accept legacy description fields in persisted contexts and older thread tool calls.
 pub struct UserVisibleContext {
     pub environment_id: String,
     pub path: String,
-    #[serde(default)]
-    pub description: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Event {

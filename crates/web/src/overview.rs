@@ -292,13 +292,11 @@ pub fn view(
 }
 
 pub fn context_view(session: &Value, environments: &[Value]) -> Html {
-    let description = text(&session["presentation"]["context"], "description");
     let locations = locations(session);
     let reported = locations.iter().any(|(_, _, reported)| *reported);
     html! {<section class="session-context" aria-label="Session identity and project">
         <div class="context-project"><span class="eyebrow">{if reported{"AGENT-REPORTED PROJECT"}else{"EXECUTOR DIRECTORY"}}</span>
             {for locations.iter().map(|(environment,path,_)|html!{<p><span class="environment-label">{environment_label(environment,environments)}</span><code>{path}</code></p>})}
-            {if reported && !description.is_empty(){html!{<p class="context-description">{description}</p>}}else{Html::default()}}
             {if !reported{html!{<p class="muted">{if session["presentation"]["context_reporting"]==true{"The agent has not reported a project for this execution environment yet."}else{"Project reporting is unavailable for this imported or older thread. Showing its configured executor directory."}}</p>}}else{Html::default()}}
         </div>
         <div class="session-identifiers">

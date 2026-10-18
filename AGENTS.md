@@ -48,6 +48,14 @@ Exact transport dependency versions constrain consumers with separate lockfiles.
 
 ## Library and native clients
 
+Protocol v40 removes the redundant project-context description from replies and
+UI. Legacy saved contexts and older thread calls may still include it; it is
+ignored. Agents are instructed to set a short task title once the task is clear
+and update it when the task changes substantially. Context tools report only
+environment and project path. Deploy matching daemon and clients; receipt
+encoding remains v16. Existing threads retain their saved tool schemas, and
+custom integration prompt layers must be updated explicitly if desired.
+
 Protocol v39 allows read-only ProjectGit snapshots for all overview host project
 folders through the current daemon host executor, including disconnected sessions.
 Host mode must be explicitly enabled. Remote checks still use the exact attached

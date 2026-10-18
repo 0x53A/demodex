@@ -80,7 +80,7 @@ header{gap:12px}
 }
 .session-context{padding:8px 0 16px;border-bottom:1px solid #3b403a}
 .context-project p{margin:8px 0;overflow-wrap:anywhere}.environment-label{font:11px ui-monospace,monospace;color:#a3aa9e;margin-right:10px}
-.context-description{font-size:14px}.session-identifiers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:16px}
+.session-identifiers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:16px}
 .session-identifiers label{margin:0;gap:6px;font:11px ui-monospace,monospace;color:#a3aa9e}
 input.session-uuid{font:11px ui-monospace,monospace;padding:10px 7px;letter-spacing:-.3px;color:#d8ddd1;cursor:text;min-width:0}
 .connections-page .session-tree{display:none}

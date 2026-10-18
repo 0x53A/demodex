@@ -80,12 +80,15 @@ Small, deliberate, slightly odd. A session console, not a decorative dashboard.
   unique identifiers; always retain UUIDs as the authoritative identity.
 - Keep the Codex thread UUID visible in the conversation heading. Show labelled,
   selectable Codex thread and Demodex session UUID fields in the context panel.
-- `demodex.set_user_visible_session_context(environment_id, path, description="")`
+- `demodex.set_user_visible_session_context(environment_id, path)`
   reports display metadata for the calling session. Use an absolute project root
-  in an attached environment, with an optional one-line description. It never
+  in an attached environment. The session title describes the work; there is no
+  separate project description. It never
   changes execution directories, sandbox settings, identity, or another session.
 - `demodex.set_session_identity(title?, name?, icon?)` updates only the calling
-  session's Demodex title and display identity. Omitted fields stay unchanged.
+  session's Demodex title and display identity. Agents must set a short task title
+  once the task is clear and update it when the task changes substantially.
+  Omitted fields stay unchanged.
   Validate the entire patch before committing it with its receipt; preserve UUIDs,
   Codex thread names, reported context, and execution settings.
 - `demodex.get_session_context()` supplies title, identity, current display metadata,

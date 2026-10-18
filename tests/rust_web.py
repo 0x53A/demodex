@@ -822,7 +822,8 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             call = {"namespace":"demodex","tool":"set_user_visible_session_context","turnId":"turn","callId":"context-one","arguments":{"environment_id":api("/sessions")[0]["targets"][0]["id"],"path":"/home/operator/src/cairn","description":"Building the snapshot store"}}
             codex.send("item/tool/call",call,880)
             expect(page.locator('.context-project')).to_contain_text("/home/operator/src/cairn")
-            expect(page.locator('.context-description')).to_have_text("Building the snapshot store")
+            expect(page.locator('.context-description')).to_have_count(0)
+            assert "description" not in api("/sessions")[0]["presentation"]["context"]
             expect(page.locator('.tree-folder > .folder-name')).to_contain_text("/home/operator/src/cairn")
             current = api('/sessions')[0]
             identity = current['presentation']['name']
