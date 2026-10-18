@@ -1,3 +1,4 @@
+mod bug_reports;
 mod app;
 mod approval;
 mod client;

@@ -418,3 +418,24 @@ mod tests {
         assert_eq!(tree.children["workspace"].children["b"].sessions.len(), 1);
     }
 }
+
+/// Fast search is deliberately limited to the visible title and working/project paths.
+pub fn matches_search(session: &Value, query: &str) -> bool {
+    title(session).to_lowercase().contains(query)
+        || locations(session).iter().any(|(_, path, _)| path.to_lowercase().contains(query))
+        || array(&session["targets"]).iter().any(|target| text(target, "cwd").to_lowercase().contains(query))
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn search_matches_title_and_all_working_paths_only() {
+        let s = json!({"name":"Rover Control", "presentation":{"name":"Hidden identity","context":{"environment_id":"host-1","path":"/Projects/FRoST"}},"targets":[{"id":"host-1","cwd":"/home/Operator"},{"id":"ssh-other","cwd":"/Remote/firmware"}]});
+        for q in ["rover", "control", "frost", "operator", "firmware", ""] { assert!(matches_search(&s,q), "{q}"); }
+        assert!(!matches_search(&s,"hidden identity"));
+        assert!(!matches_search(&s,"ssh-other"));
+        assert!(!matches_search(&s,"missing"));
+    }
+}

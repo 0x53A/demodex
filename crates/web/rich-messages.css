@@ -35,9 +35,12 @@
 .chat-notification { border-left:2px solid #ffb079; padding-left:8px }
 .chat-notification small { color:#a8afa2 }
 
-.message-link { display:inline; min-height:0; padding:1px 5px; margin:0 2px; border:1px solid #646b60; background:#252b24; color:inherit; font:inherit; text-align:left; white-space:normal; overflow-wrap:anywhere; cursor:pointer }
+.message-link { display:inline-flex; align-items:stretch; max-width:100%; vertical-align:baseline; min-height:0; padding:0; margin:0 2px; border:1px solid #646b60; background:#252b24; color:inherit; font:inherit; text-align:left; white-space:normal; overflow-wrap:anywhere; cursor:pointer }
 .message-destinations { margin-top:12px; border-top:1px solid #41473e; padding-top:8px; font-size:.9em }
 .message-destination { margin:6px 0 }
+.message-link-icon,.message-link-index { flex:none; padding:1px 5px; border-right:1px solid #646b60 }
+.message-link-index { color:#a3aa9e; font-variant-numeric:tabular-nums }
+.message-link-label { min-width:0; padding:1px 6px }
 .link-destination { display:block; white-space:pre-wrap; overflow-wrap:anywhere; unicode-bidi:plaintext; user-select:text; font-family:var(--mono,monospace); font-size:.9em }
 .link-warning { color:#ffbd7f; font-weight:600 }
 
@@ -49,3 +52,5 @@
 .executor-unavailable { color:#999; background:#202220 }
 .file-preview { white-space:pre; overflow:auto; max-height:60vh; max-width:100%; font-size:13px }
 .web-link-popup a { color:#ffb079; padding:8px 0 }
+
+.message-action { border-color: var(--accent, #ff8800); margin: .2rem .25rem .2rem 0; white-space: normal; overflow-wrap: anywhere; }

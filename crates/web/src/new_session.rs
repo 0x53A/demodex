@@ -2,6 +2,13 @@
 use super::*;
 
 impl App {
+    pub(super) fn initialize_new_sandbox(&mut self) {
+        if self.runtime.get("default_sandbox").is_some() {
+            self.saved.fields.entry("new_sandbox".into())
+                .or_insert_with(|| text(&self.runtime, "default_sandbox").to_owned());
+        }
+    }
+
     pub(super) fn new_session_targets(&self) -> Vec<Value> {
         self.saved
             .fields

@@ -99,6 +99,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-push-') as temp:
             page.locator('.session').filter(has_text='Notification fixture').click()
             page.locator('.session-error').get_by_role('button',name='Reconnect',exact=True).click()
             expect(page.locator('.session-heading .status')).to_have_text('connected')
+            expect(page.locator('.bug-report-dot')).to_have_count(0)
             # Explicit dynamic tool call with push disabled creates one durable chat entry.
             request={'id':'notify-request','method':'item/tool/call','params':{'namespace':'demodex','tool':'notify','threadId':'thread','callId':'notify-once','arguments':{'message':'Please review the candidate.','title':'Review ready'}}}
             codex.socket.send(json.dumps(request))
@@ -106,7 +107,43 @@ with tempfile.TemporaryDirectory(prefix='demodex-push-') as temp:
             codex.socket.send(json.dumps(request))
             expect(page.locator('.chat-notification')).to_have_count(1)
             expect(page.locator('.chat-notification small')).to_contain_text('Notification saved here',timeout=15000)
+            emergency={**request,'id':'emergency-request','params':{**request['params'],'tool':'emergency_call','callId':'emergency-once','arguments':{'title':'Immediate attention','message':'A fixture requires intervention.'}}}
+            codex.socket.send(json.dumps(emergency))
+            expect(page.locator('.chat-notification')).to_have_count(2)
+            expect(page.locator('.chat-notification').last).to_contain_text('Emergency: Immediate attention')
+            codex.socket.send(json.dumps(emergency))
+            expect(page.locator('.chat-notification')).to_have_count(2)
+            report={**request,'id':'report-request','params':{**request['params'],'tool':'bug_report','callId':'report-once','arguments':{'title':'Fixture report','description':'Expected reply; observed timeout. <script>throw Error("unsafe")</script>'}}}
+            codex.socket.send(json.dumps(report))
+            codex.socket.send(json.dumps(report))
+            expect(page.locator('.bug-report-dot')).to_have_count(1,timeout=15000)
             page.get_by_role('button',name='Server settings',exact=True).click()
+            expect(page.locator('.bug-report-dot')).to_have_count(1)
+            page.get_by_role('button',name='Load reports',exact=True).click()
+            report_view=page.locator('.bug-report').filter(has_text='Fixture report')
+            expect(report_view).to_have_count(1)
+            report_view.locator('summary').first.click()
+            expect(report_view).to_contain_text('Expected reply; observed timeout.')
+            assert len(call(host,token,{'BugReports':{'before':None}})['reports'])==1
+            expect(page.locator('.bug-report-dot')).to_have_count(0)
+            summary=call(host,token,'Runtime')['bug_reports']
+            seen_key='demodex-bug-reports-seen:'+summary['server_id']
+            assert page.evaluate('(key)=>localStorage.getItem(key)',seen_key)==str(summary['latest_id'])
+            page.reload()
+            expect(page.locator('header .indicator')).to_have_text('connected to',timeout=20000)
+            expect(page.locator('.bug-report-dot')).to_have_count(0)
+            # A later report restores the indicator without opening settings.
+            later={**report,'id':'report-later-request','params':{**report['params'],'callId':'report-later','arguments':{'title':'Later report','description':'New issue after reviewing the inbox.'}}}
+            codex.socket.send(json.dumps(later))
+            expect(page.locator('.bug-report-dot')).to_have_count(1,timeout=15000)
+            page.reload()
+            expect(page.locator('header .indicator')).to_have_text('connected to',timeout=20000)
+            expect(page.locator('.bug-report-dot')).to_have_count(1,timeout=15000)
+            page.get_by_role('button',name='Server settings',exact=True).click()
+            expect(page.locator('.bug-report-dot')).to_have_count(1)
+            page.get_by_role('button',name='Load reports',exact=True).click()
+            expect(page.locator('.bug-report').filter(has_text='Later report')).to_have_count(1)
+            expect(page.locator('.bug-report-dot')).to_have_count(0)
             panel=page.get_by_role('region',name='Push notifications')
             expect(panel.get_by_role('button',name='Enable push on this device')).to_be_enabled(timeout=15000)
             assert page.evaluate('permissionCalls')==0
@@ -145,9 +182,15 @@ with tempfile.TemporaryDirectory(prefix='demodex-push-') as temp:
             assert 'notify_session='+created['id'] in captures[0]['data']['url']
             worker.evaluate('(p)=>{const event=new Event("notificationclick");event.notification={data:p,close(){}};event.waitUntil=(v)=>v;self.dispatchEvent(event);}',captures[0]['data'])
             assert worker.evaluate('self.opened')[0]==captures[0]['data']['url'], (worker.evaluate('self.opened'),captures[0])
+            urgent={**payload,'id':'urgent-push','emergency':True,'title':'Emergency: Fixture'}
+            worker.evaluate('(p)=>self.dispatchEvent(new PushEvent("push",{data:JSON.stringify(p)}))',urgent)
+            for _ in range(100):
+                if len(worker.evaluate('self.captured'))==2:break
+                time.sleep(.05)
+            assert worker.evaluate('self.captured[1].requireInteraction') is True
             other={**payload,'id':'foreign','server_id':'another-server'}
             worker.evaluate('(p)=>self.dispatchEvent(new PushEvent("push",{data:JSON.stringify(p)}))',other)
-            time.sleep(.2);assert len(worker.evaluate('self.captured'))==1
+            time.sleep(.2);assert len(worker.evaluate('self.captured'))==2
             # Accepted pushes need a separate worker acknowledgement to establish
             # browser receipt; showNotification success cannot prove an OS banner.
             page.evaluate('(id)=>{window.testReceipt=demodexPush.watchTest(id);}',server_id)
@@ -188,7 +231,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-push-') as temp:
             page.screenshot(path=str(ROOT/'target/notifications-mobile.png'))
             assert not errors,errors
             browser.close()
-        print('PASS: explicit durable notification, duplicate receipt, permission gesture, subscription privacy/settings/removal, Test error feedback, local display test, worker receipt/display failure/timeout, mocked SW routing/server binding, mobile layout; no real push sent')
+        print('PASS: persistent new-report indicator, live arrival and review/reload, bug report inbox and duplicate filing, emergency chat and persistent push display, explicit durable notification, duplicate receipt, permission gesture, subscription privacy/settings/removal, Test error feedback, local display test, worker receipt/display failure/timeout, mocked SW routing/server binding, mobile layout; no real push sent')
     finally:
         for process in reversed(processes):
             process.terminate()

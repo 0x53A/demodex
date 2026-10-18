@@ -305,13 +305,27 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             expect(page.locator('aside .host-picker')).to_have_count(0)
             expect(page.locator('header .current-server')).to_be_visible()
             expect(page.get_by_role('button',name='+ External',exact=True)).to_have_count(0)
+            page.get_by_role('button', name='Server settings', exact=True).click()
+            settings = page.get_by_role('dialog', name='Server settings', exact=True)
+            default_sandbox = settings.get_by_label('Default sandbox', exact=True)
+            expect(default_sandbox).to_have_value('')
+            default_sandbox.select_option('workspace-write')
+            expect(default_sandbox).to_be_enabled()
+            settings.get_by_role('button', name='Close', exact=True).click()
+            page.reload()
+            page.get_by_role('button', name='Server settings', exact=True).click()
+            expect(default_sandbox).to_have_value('workspace-write', timeout=20000)
+            settings.get_by_role('button', name='Close', exact=True).click()
             page.get_by_role('button',name='+ New Session',exact=True).click()
             creation=page.get_by_role('dialog',name='New Session',exact=True)
             expect(creation.get_by_role('heading',name='Executors',exact=True)).to_be_visible()
+            expect(creation.get_by_label('Sandbox', exact=True)).to_have_value('workspace-write')
+            creation.get_by_label('Sandbox', exact=True).select_option('read-only')
             creation.get_by_label('Session name (optional)',exact=True).fill('Preserved creation draft')
             creation.get_by_role('button',name='Close',exact=True).click()
             page.get_by_role('button',name='+ New Session',exact=True).click()
             expect(creation.get_by_label('Session name (optional)',exact=True)).to_have_value('')
+            expect(creation.get_by_label('Sandbox', exact=True)).to_have_value('workspace-write')
             creation.press('Escape')
             expect(creation).to_have_count(0)
             from wormhole_client import api as actor_api
@@ -338,6 +352,44 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             composer.fill('')
             expect(page.locator('.project-git')).to_contain_text('Git ../../ · main · 1 staged · 1 untracked · ↑2', timeout=20000)
             expect(page.locator('.project-git')).to_have_attribute('title', __import__('re').compile('Repository: /home'))
+            if os.environ.get('DEMODEX_SEARCH_ONLY'):
+                search = page.get_by_role('searchbox', name='Search sessions', exact=True)
+                cards = page.locator('aside .session')
+                search.fill('WORMHOLE')
+                expect(cards).to_have_count(1)
+                search.fill('/HOME/OPERATOR')
+                expect(cards).to_have_count(1)
+                search.fill('not-a-session')
+                expect(cards).to_have_count(0)
+                expect(page.get_by_role('button',name='Reorder',exact=True)).to_be_disabled()
+                expect(page.get_by_role('button',name='Full text search',exact=True)).to_be_visible()
+                search.fill('')
+                codex.send('item/completed', {'item':{'id':'search-message','type':'agentMessage','text':'Unique search body: Cobalt%_Needle'}})
+                expect(page.locator('.transcript')).to_contain_text('Cobalt%_Needle')
+                before = len(codex.calls)
+                search.fill('cobalt%_needle')
+                expect(cards).to_have_count(0)
+                page.get_by_role('button',name='Full text search',exact=True).click()
+                expect(page.locator('.session-search-footer')).to_contain_text('Full text search complete')
+                expect(cards).to_have_count(1)
+                assert not any(c['method'] in ('turn/start','thread/resume') for c in codex.calls[before:])
+                page.get_by_role('button',name='List',exact=True).click()
+                expect(page.locator('.session-list .session')).to_have_count(1)
+                search.fill('no-match-after-search')
+                expect(cards).to_have_count(0)
+                search.fill('')
+                page.locator('aside .session-archive-action').click()
+                search.fill('cobalt%_needle')
+                expect(cards).to_have_count(0)
+                page.get_by_role('button',name='Full text search',exact=True).click()
+                expect(page.locator('.session-search-footer')).to_contain_text('Full text search complete')
+                expect(page.locator('.archived-sessions .session')).to_be_visible()
+                search.fill('WORMHOLE')
+                expect(page.locator('.archived-sessions .session')).to_be_visible()
+                search.fill('')
+                expect(page.locator('.session-search-footer')).to_have_count(0)
+                print('PASS: title/folder filtering, literal full text, list/tree, archives and no inference', flush=True)
+                raise SystemExit(0)
             if os.environ.get('DEMODEX_GIT_ONLY'):
                 # No clicks or session changes: periodic reads must surface failures
                 # after cache expiry, then clear the warning after recovery.
@@ -768,6 +820,7 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             expect(page.locator("aside .session")).to_have_count(0)
             page.get_by_role("button", name="+ New Session", exact=True).click()
             expect(page.get_by_label("Session name (optional)", exact=True)).to_have_value("")
+            expect(page.get_by_label("Sandbox", exact=True)).to_have_value("")
             page.get_by_label("Session name (optional)", exact=True).fill("Second server draft")
             page.get_by_role("dialog").press("Escape")
             page.get_by_role("button",name="Connections",exact=True).click()
@@ -777,6 +830,15 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             page.get_by_role("button", name="+ New Session", exact=True).click()
             expect(page.get_by_label("Session name (optional)", exact=True)).to_have_value("")
             page.get_by_role("dialog").press("Escape")
+            page.get_by_role('button', name='Server settings', exact=True).click()
+            settings = page.get_by_role('dialog', name='Server settings', exact=True)
+            expect(settings.get_by_label('Default sandbox', exact=True)).to_have_value('workspace-write')
+            settings.get_by_label('Default sandbox', exact=True).select_option('')
+            expect(settings.get_by_label('Default sandbox', exact=True)).to_be_enabled()
+            settings.get_by_role('button', name='Close', exact=True).click()
+            page.get_by_role('button', name='+ New Session', exact=True).click()
+            expect(page.get_by_label('Sandbox', exact=True)).to_have_value('')
+            page.get_by_role('dialog').press('Escape')
             # A fresh PWA window has no sessionStorage, but retains named hosts
             # and their distinct tokens in localStorage.
             fresh = context.new_page()
@@ -1109,6 +1171,32 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             assert any(p['state'] == 'unavailable' and p['params'].get('itemId') == 'lost-approval' for p in stored)
             assert codex.answers == answers_before
             assert sum(c.get('method') == 'turn/interrupt' for c in codex.calls) == interrupts_before
+            # Page a large saved conversation with realistic collapsed tool output.
+            # Direct writes are confined to this disposable daemon's fixture DB.
+            with sqlite3.connect(directory/'state/state.sqlite') as db:
+                for number in range(15):
+                    for item in [
+                        {'id':f'page-tool-{number}','type':'commandExecution','status':'completed','command':f'Paging tool {number}','aggregatedOutput':'x'*(1024*1024)},
+                        {'id':f'page-marker-{number}','type':'agentMessage','text':f'Paging marker {number}\n'+'Visible paragraph. '*40},
+                    ]:
+                        db.execute('INSERT INTO events(session_id,message) VALUES(?,?)',(session_id,json.dumps({'method':'item/completed','params':{'turnId':f'paging-{number}','item':item}})))
+            page.reload()
+            older = page.get_by_role('button',name='Show older messages',exact=True)
+            expect(older).to_have_count(1,timeout=30000)
+            expect(page.locator('[data-item-id="page-marker-14"]')).to_have_count(1)
+            expect(page.locator('[data-item-id="page-marker-0"]')).to_have_count(0)
+            transcript = page.locator('.transcript')
+            transcript.evaluate('e=>{e.scrollTop=0;e.dispatchEvent(new Event("scroll"));}')
+            anchor = page.locator('[data-item-id^="page-marker-"]').first
+            anchor_id = anchor.get_attribute('data-item-id')
+            anchor_y = anchor.bounding_box()['y']
+            older.click()
+            expect(page.locator('[data-item-id="page-marker-0"]')).to_have_count(1,timeout=30000)
+            expect(older).to_have_count(0)
+            assert abs(page.locator(f'[data-item-id="{anchor_id}"]').bounding_box()['y'] - anchor_y) < 3
+            assert page.locator('[data-item-id^="page-marker-"]').count() == 15
+            expect(page.get_by_role('button',name='Jump to latest',exact=True)).to_be_enabled()
+            print('CHECK: newest 10 MiB history page, older page, stable scroll and no duplicate messages',flush=True)
             assert not rest_requests, rest_requests
             assert not errors, errors
             browser.close()

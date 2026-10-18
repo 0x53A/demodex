@@ -1,3 +1,5 @@
+#[path = "session_search.rs"]
+mod session_search;
 #[path = "new_session.rs"]
 mod new_session;
 #[path = "dialogs.rs"]
@@ -65,6 +67,7 @@ fn input(event: InputEvent) -> String {
 }
 
 pub struct App {
+    search: session_search::State,
     share: share::State,
     saved: Saved,
     host_input: String,
@@ -103,6 +106,7 @@ pub struct App {
     show_background: bool,
     show_controls: bool,
     reorder_mode: bool,
+    reveal_selected_session: bool,
     show_new_session: bool,
     show_saved_search: bool,
     new_target_setup: String,
@@ -117,6 +121,11 @@ pub struct App {
     events: Vec<Value>,
     event_count: usize,
     history_loaded: bool,
+    older: Option<demodex_protocol::ConversationPageCursor>,
+    older_loading: bool,
+    older_serial: u64,
+    older_error: String,
+    prepend_scroll: Option<(i32, i32)>,
     transcript: crate::transcript::Transcript,
     conversations: crate::transcript::ConversationCache,
     reads: Reads,
@@ -132,6 +141,7 @@ pub struct App {
     login: Value,
     transcript_ref: NodeRef,
     prompt_ref: NodeRef,
+    button_cursor: Option<u32>,
     image_ref: NodeRef,
     upload_anchor: Option<(String, String, u32, u32)>,
     follow: bool,
@@ -141,6 +151,10 @@ pub struct App {
 }
 
 pub enum Msg {
+    SearchQuery(String),
+    SearchStart,
+    SearchStop,
+    SearchPage(u64, u64, String, Result<Value, String>),
     Share(share::ShareMsg),
     HostInput(String),
     Token(String),
@@ -157,6 +171,8 @@ pub enum Msg {
     Wake(u64, bool),
     Retry,
     Refresh,
+    LoadOlder,
+    OlderRead(u64, u64, String, Result<Value, String>),
     Read(u64, Resource, u64, String, i64, Result<Value, String>),
     Select(String),
     EditSession(String),
@@ -169,6 +185,8 @@ pub enum Msg {
     NewTargetSetup(String),
     StageSsh,
     RemoveStagedSsh,
+    BugReportsSeen((String, i64)),
+    BugReportsSeenChanged,
     ServerSettings(bool),
     Background(bool),
     Diagnostics(bool),
@@ -185,6 +203,7 @@ pub enum Msg {
     Field(String, String),
     TargetDraft(Value),
     Draft(String),
+    InsertButton(String, String),
     ChooseImage,
     UploadImage(web_sys::File),
     ImageRead(u64, String, Result<Vec<u8>, String>),
@@ -212,11 +231,15 @@ impl App {
         if id != self.saved.selected {
             let previous = std::mem::take(&mut self.transcript);
             if self.history_loaded && !self.saved.selected.is_empty() {
-                self.conversations.insert(self.saved.selected.clone(), previous, self.event_count);
+                self.conversations.insert(self.saved.selected.clone(), previous, self.event_count, self.older.take());
             }
             let cached = self.conversations.take(&id);
             self.history_loaded = cached.is_some();
-            (self.transcript, self.event_count) = cached.unwrap_or_default();
+            (self.transcript, self.event_count, self.older) = cached.unwrap_or_default();
+            self.older_serial += 1;
+            self.older_loading = false;
+            self.older_error.clear();
+            self.prepend_scroll = None;
             self.saved.selected = id;
         }
         self.current = self.sessions.iter()
@@ -249,7 +272,7 @@ impl App {
                 Resource::Environments => Operation::Environments,
                 Resource::Targets => Operation::Targets,
                 Resource::Detail => Operation::Detail { id: selected.clone() },
-                Resource::Events if !self.history_loaded => Operation::Conversation { id: selected.clone() },
+                Resource::Events if !self.history_loaded => Operation::Conversation { id: selected.clone(), older: None },
                 Resource::Events => Operation::Events { id: selected.clone(), after },
             };
             let generation = self.generation;
@@ -505,6 +528,12 @@ impl Component for App {
         let listeners = vec![
             EventListener::new(&window(), "storage", move |event| {
                 if let Some(event) = event.dyn_ref::<web_sys::StorageEvent>()
+                    && event.key().as_deref().is_none_or(crate::bug_reports::is_seen_key)
+                    && event.storage_area() == window().local_storage().ok().flatten()
+                {
+                    preferences.send_message(Msg::BugReportsSeenChanged);
+                }
+                if let Some(event) = event.dyn_ref::<web_sys::StorageEvent>()
                     && event.key().as_deref().is_none_or(|key|key == ENTER_SENDS_KEY)
                     && event.storage_area() == window().local_storage().ok().flatten()
                 {
@@ -531,6 +560,7 @@ impl Component for App {
         ];
         let cache_clock = ctx.link().clone();
         let mut app = Self {
+            search: session_search::State::default(),
             _cache_clock: gloo::timers::callback::Interval::new(60_000, move || cache_clock.send_message(Msg::CacheClock)),
             share: share::State::default(),
             host_input: saved.host.clone(),
@@ -569,6 +599,7 @@ impl Component for App {
             show_background: false,
             show_controls: false,
             reorder_mode: false,
+            reveal_selected_session: false,
             show_new_session: false,
             show_saved_search: false,
             new_target_setup: String::new(),
@@ -583,6 +614,11 @@ impl Component for App {
             events: vec![],
             event_count: 0,
             history_loaded: false,
+            older: None,
+            older_loading: false,
+            older_serial: 0,
+            older_error: String::new(),
+            prepend_scroll: None,
             transcript: crate::transcript::Transcript::default(),
             conversations: crate::transcript::ConversationCache::default(),
             reads: Reads::default(),
@@ -598,6 +634,7 @@ impl Component for App {
             login: Value::Null,
             transcript_ref: NodeRef::default(),
             prompt_ref: NodeRef::default(),
+            button_cursor: None,
             image_ref: NodeRef::default(),
             upload_anchor: None,
             follow: true,
@@ -644,6 +681,44 @@ impl Component for App {
                 | Msg::Connected(_, Ok(_))
         );
         match msg {
+            Msg::SearchQuery(query) => {
+                self.search.reset(query);
+                self.reorder_mode = false;
+            }
+            Msg::SearchStart => {
+                if !self.connected || self.search.loading || self.search.query.trim().is_empty() { return false; }
+                self.search.reset(self.search.query.clone());
+                self.search.full = true;
+                self.search.loading = true;
+                self.search.pending = self.sessions.iter().map(|s|text(s,"id").to_owned()).collect();
+                self.search.total = self.search.pending.len();
+                self.search_next(ctx, None);
+            }
+            Msg::SearchStop => {
+                self.search.serial += 1;
+                self.search.loading = false;
+                self.search.errors.push("Search stopped; results are incomplete.".into());
+            }
+            Msg::SearchPage(generation, serial, id, result) => {
+                if generation != self.generation || serial != self.search.serial { return false; }
+                match result {
+                    Ok(value) => {
+                        if value["matched"] == true { self.search.matches.insert(id); }
+                        else if !value["older"].is_null() {
+                            match serde_json::from_value(value["older"].clone()) {
+                                Ok(older) => { self.search_next(ctx, Some(older)); return true; }
+                                Err(error) => self.search.errors.push(format!("Invalid search cursor: {error}")),
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let name = self.sessions.iter().find(|s|text(s,"id")==id).map(crate::overview::title).unwrap_or(&id);
+                        self.search.errors.push(format!("{name}: {error}"));
+                    }
+                }
+                self.search.pending.pop();
+                self.search_next(ctx, None);
+            }
             Msg::Share(msg) => self.share_update(ctx, msg),
             Msg::History(route) => {
                 self.new_target_setup.clear();
@@ -658,6 +733,7 @@ impl Component for App {
                 self.model_error.clear();
                 if self.connecting {
                     self.generation += 1;
+                    self.search.reset(String::new());
                     self.connecting = false;
                     self.retry = None;
                 }
@@ -721,6 +797,7 @@ impl Component for App {
                 self.new_target_setup.clear();
                 self.show_new_session = open;
                 if open {
+                    self.initialize_new_sandbox();
                     self.saved.fields.remove("thread_id");
                     self.show_controls = false;
                     self.show_background = false;
@@ -786,6 +863,7 @@ impl Component for App {
                 }
                 if url == self.saved.host {
                     self.generation += 1;
+                    self.search.reset(String::new());
                     self.retry = None;
                     self.client = None;
                     self.connected = false;
@@ -843,6 +921,11 @@ impl Component for App {
                     self.events.clear();
                     self.event_count = 0;
                     self.history_loaded = false;
+                    self.older = None;
+                    self.older_loading = false;
+                    self.older_serial += 1;
+                    self.older_error.clear();
+                    self.prepend_scroll = None;
                     self.reads.reset(true);
                     self.transcript = crate::transcript::Transcript::default();
                     self.current = Value::Null;
@@ -865,10 +948,13 @@ impl Component for App {
                 }
                 self.saved.switch_host(host.clone());
                 self.generation += 1;
+                    self.search.reset(String::new());
                 self.client = None;
                 self.connected = false;
                 self.connecting = true;
                 self.reads.reset(false);
+                self.older_loading = false;
+                self.older_serial += 1;
                 self.saved_search_loading = false;
                 self.busy = false;
                 self.upload_anchor = None;
@@ -996,6 +1082,38 @@ impl Component for App {
             Msg::Refresh => {
                 self.reads.notice(Notice::Changed, &self.saved.selected);
             }
+            Msg::LoadOlder => {
+                if self.older_loading { return false; }
+                let Some(older) = self.older.clone() else { return false; };
+                let Some(client) = self.client.clone().filter(|_|self.connected) else { return false; };
+                self.older_loading = true;
+                self.older_error.clear();
+                self.older_serial += 1;
+                let serial = self.older_serial;
+                let generation = self.generation;
+                let id = self.saved.selected.clone();
+                ctx.link().send_future(async move {
+                    let result = client.read(Operation::Conversation { id:id.clone(), older:Some(older) }).await.map_err(|e|format!("{e:#}"));
+                    Msg::OlderRead(generation, serial, id, result)
+                });
+            }
+            Msg::OlderRead(generation, serial, id, result) => {
+                if generation != self.generation || serial != self.older_serial || id != self.saved.selected { return false; }
+                self.older_loading = false;
+                match result.and_then(|value|serde_json::from_value::<demodex_protocol::ConversationSnapshot>(value).map_err(|e|e.to_string())) {
+                    Ok(page) => {
+                        if self.older.as_ref().is_none_or(|older|older.through != page.cursor) {
+                            self.older_error = "Conversation page cursor changed; reload this conversation.".into();
+                        } else {
+                            self.prepend_scroll = self.transcript_ref.cast::<HtmlElement>().map(|el|(el.scroll_top(),el.scroll_height()));
+                            self.follow = false;
+                            self.transcript.prepend(&page.items);
+                            self.older = page.older;
+                        }
+                    }
+                    Err(error) => self.older_error = error,
+                }
+            }
             Msg::Read(generation, resource, ticket, selected, after, result) => {
                 if generation != self.generation || !self.reads.finish(resource, ticket) {
                     return false;
@@ -1019,6 +1137,7 @@ impl Component for App {
                         },
                         Resource::Runtime => {
                             self.runtime = value;
+                            if self.show_new_session { self.initialize_new_sandbox(); }
                             if !self.runtime["account"].is_null() { self.login = Value::Null; }
                         }
                         Resource::ProjectGit => {
@@ -1044,9 +1163,10 @@ impl Component for App {
                             if after != cursor {
                                 self.reads.invalidate(Resource::Events);
                             } else if !self.history_loaded {
-                                if let (Some(items), Some(cursor), Some(count)) = (value["items"].as_array(), value["cursor"].as_i64(), value["event_count"].as_u64()) {
-                                    self.transcript = crate::transcript::Transcript::restore(items, cursor);
-                                    self.event_count = count as usize;
+                                if let Ok(page) = serde_json::from_value::<demodex_protocol::ConversationSnapshot>(value) {
+                                    self.transcript = crate::transcript::Transcript::restore(&page.items, page.cursor);
+                                    self.event_count = page.event_count as usize;
+                                    self.older = page.older;
                                     self.history_loaded = true;
                                     self.reads.invalidate(Resource::Events);
                                 } else { self.error = "Invalid conversation response".into(); }
@@ -1087,6 +1207,10 @@ impl Component for App {
                 self.saved.page.clear();
                 ctx.link().send_message(Msg::Refresh);
             }
+            Msg::BugReportsSeen((server, latest)) => {
+                crate::bug_reports::mark_seen(&server, latest);
+            }
+            Msg::BugReportsSeenChanged => {}
             Msg::ServerSettings(open) => {
                 self.new_target_setup.clear();
                 self.show_server_settings = open && self.connected;
@@ -1124,6 +1248,11 @@ impl Component for App {
                 }
             }
             Msg::Field(name, value) => {
+                if name == "session_view"
+                    && (self.saved.field("session_view") == "flat") != (value == "flat")
+                {
+                    self.reveal_selected_session = !self.saved.selected.is_empty();
+                }
                 if name == "session_sort" { self.reorder_mode = false; }
                 if name == "search" {
                     // A cursor belongs to the submitted query. Editing invalidates
@@ -1346,6 +1475,16 @@ impl Component for App {
                     }
                 }
             }
+            Msg::InsertButton(key, text) => {
+                if key != self.saved.key() { return false; }
+                let draft = self.saved.draft();
+                let cursor = self.prompt_ref.cast::<HtmlTextAreaElement>()
+                    .and_then(|el| el.selection_start().ok().flatten())
+                    .unwrap_or(draft.encode_utf16().count() as u32);
+                let (draft, cursor) = crate::rich_messages::insert_button(&draft, cursor, &text);
+                self.saved.drafts.insert(key, draft);
+                self.button_cursor = Some(cursor);
+            }
             Msg::Draft(value) => {
                 self.saved.drafts.insert(self.saved.key(), value);
             }
@@ -1403,6 +1542,19 @@ impl Component for App {
                 }
             }
             Msg::Run(operation) => {
+                let confirmation = match &operation {
+                    Operation::DeleteEnvironment { id } => {
+                        let name = self.environments.iter().find(|vm| vm["id"] == *id).map(|vm|text(vm,"name")).unwrap_or(id);
+                        Some(format!("Permanently delete VM ‘{name}’ and all files on its disk? Conversations are preserved. This cannot be undone."))
+                    }
+                    Operation::DetachEnvironmentExecutors { .. } => Some("Detach this VM from every session, including saved and pending selections? Connected sessions must be idle and will disconnect. Conversations and other executors are preserved; reconnect explicitly afterward.".into()),
+                    _ => None,
+                };
+                if let Some(message) = confirmation {
+                    if !web_sys::window().is_some_and(|window| window.confirm_with_message(&message).unwrap_or(false)) {
+                        return false;
+                    }
+                }
                 if matches!(
                     operation,
                     Operation::RegisterSshTarget { .. }
@@ -1433,6 +1585,9 @@ impl Component for App {
                             self.saved.receipts.remove(&self.saved.host);
                         }
                         match operation {
+                            Operation::SetDefaultSandbox { sandbox } => {
+                                self.runtime["default_sandbox"] = json!(sandbox);
+                            }
                             Operation::RenameSession { id, .. } if same_dialog => {
                                 self.saved.fields.remove(&format!("rename:{id}"));
                             }
@@ -1745,7 +1900,49 @@ impl Component for App {
         true
     }
     fn rendered(&mut self, _ctx: &Context<Self>, _first: bool) {
-        if self.follow
+        if let Some(cursor) = self.button_cursor.take()
+            && let Some(el) = self.prompt_ref.cast::<HtmlTextAreaElement>() {
+            let _ = el.focus();
+            let _ = el.set_selection_range(cursor, cursor);
+        }
+        if std::mem::take(&mut self.reveal_selected_session)
+            && let Some(document) = window().document()
+            && let Ok(Some(sidebar)) = document.query_selector(".layout > aside")
+            && let Ok(sidebar) = sidebar.dyn_into::<HtmlElement>()
+            && let Ok(Some(selected)) = sidebar.query_selector(".session.chosen")
+        {
+            // Reveal archived selections too. Only scroll the sidebar, leaving
+            // the conversation and keyboard focus where the user left them.
+            let mut ancestor = selected.parent_element();
+            while let Some(element) = ancestor {
+                if element == *sidebar { break; }
+                if element.tag_name() == "DETAILS" {
+                    let _ = element.set_attribute("open", "");
+                }
+                ancestor = element.parent_element();
+            }
+            let viewport = sidebar.get_bounding_client_rect();
+            let row = selected.get_bounding_client_rect();
+            let top = viewport.top() + f64::from(sidebar.client_top());
+            let bottom = top + f64::from(sidebar.client_height());
+            // The pinned controls cover the top of the sidebar's scrollport.
+            let top = sidebar.query_selector(".session-sidebar-header").ok().flatten()
+                .map(|header| top.max(header.get_bounding_client_rect().bottom()))
+                .unwrap_or(top);
+            let delta = if row.top() < top {
+                row.top() - top
+            } else if row.bottom() > bottom {
+                (row.bottom() - bottom).min(row.top() - top)
+            } else {
+                0.0
+            };
+            sidebar.set_scroll_top(sidebar.scroll_top() + delta.round() as i32);
+        }
+        if let Some((top, height)) = self.prepend_scroll.take()
+            && let Some(el) = self.transcript_ref.cast::<HtmlElement>()
+        {
+            el.set_scroll_top(top + el.scroll_height() - height);
+        } else if self.follow
             && let Some(el) = self.transcript_ref.cast::<HtmlElement>()
         {
             el.set_scroll_top(el.scroll_height());
@@ -1759,7 +1956,7 @@ impl Component for App {
                         <div class="connection-actions"><button onclick={ctx.link().callback(|_|Msg::Connections)}>{"Connections"}</button></div>
                         <div class="current-server"><span class={classes!("indicator",(!self.connected).then_some("disconnected"))}>{if self.connected{"connected to"}else if self.connecting{"connecting to"}else{"disconnected from"}}</span><strong title={self.saved.host.clone()}>{self.connections.iter().find(|c|c.url==self.saved.host).map(|c|if c.name.is_empty(){c.url.clone()}else{c.name.clone()}).unwrap_or_else(||if self.saved.host.is_empty(){"No server".into()}else{self.saved.host.clone()})}</strong></div>
                         {if self.client.is_some(){crate::usage::weekly(&self.runtime,self.connected)}else{Html::default()}}
-                        {if self.connected{html!{<button class="server-settings-toggle" onclick={ctx.link().callback(|_|Msg::ServerSettings(true))}>{"Server settings"}</button>}}else{Html::default()}}
+                        {if self.connected{html!{<button class="server-settings-toggle" onclick={ctx.link().callback(|_|Msg::ServerSettings(true))} aria-label="Server settings" title={if crate::bug_reports::has_new(&self.runtime["bug_reports"]) {"New bug reports"} else {"Server settings"}}>{"Server settings"}{if crate::bug_reports::has_new(&self.runtime["bug_reports"]) {html!{<span class="bug-report-dot" role="status" aria-label="New bug reports" title="New bug reports">{"●"}</span>}} else {Html::default()}}</button>}}else{Html::default()}}
                     </header>
                     {if self.connections_page {html!{<crate::modal::Modal title="Connections" compact=true onclose={ctx.link().callback(|_|Msg::BackToHost)}>
                         <crate::ui::Group class="connections" title="Saved servers">
@@ -1803,19 +2000,23 @@ impl Component for App {
                     {if !self.connected&&!self.sessions.is_empty(){html!{<div class="app-notice" role="status">{"Connection lost — showing the last known session state. Reconnecting does not replay commands."}</div>}}else{Html::default()}}
                     <div class={classes!("layout",detail.then_some("detail"))}>
                         <aside>
+                            <div class="session-sidebar-header">
                             <div class="section-title"><h2>{"Sessions"}</h2><div class="session-view-switch" role="group" aria-label="Session layout">
                                 <button type="button" aria-pressed={(self.saved.field("session_view")!="flat").to_string()} onclick={ctx.link().callback(|_|Msg::Field("session_view".into(),"tree".into()))}>{"Tree"}</button>
                                 <button type="button" aria-pressed={(self.saved.field("session_view")=="flat").to_string()} onclick={ctx.link().callback(|_|Msg::Field("session_view".into(),"flat".into()))}>{"List"}</button>
-                            </div><button type="button" class="reorder-toggle" aria-pressed={self.reorder_mode.to_string()} onclick={ctx.link().callback(|_|Msg::ReorderMode)}>{if self.reorder_mode{"Done reordering"}else{"Reorder"}}</button></div>
+                            </div><button type="button" class="reorder-toggle" disabled={!self.search.query.trim().is_empty()} aria-pressed={self.reorder_mode.to_string()} onclick={ctx.link().callback(|_|Msg::ReorderMode)}>{if self.reorder_mode{"Done reordering"}else{"Reorder"}}</button></div>
+                            <label class="session-search">{"Search sessions"}<input type="search" aria-label="Search sessions" placeholder="Title or working folder" maxlength="256" value={self.search.query.clone()} oninput={ctx.link().callback(|e|Msg::SearchQuery(input(e)))}/></label>
                             <label class="session-sort">{"Sort"}<select aria-label="Sort sessions" onchange={ctx.link().callback(|e:Event|Msg::Field("session_sort".into(),e.target_unchecked_into::<HtmlSelectElement>().value()))}>
                                 <option value="last_user_message" selected={crate::overview::Sort::from_saved(&self.saved.field("session_sort"))==crate::overview::Sort::LastUserMessage}>{"Last user message"}</option>
                                 <option value="name" selected={self.saved.field("session_sort")=="name"}>{"Name"}</option>
                                 <option value="manual" selected={self.saved.field("session_sort")=="manual"}>{"Manual"}</option>
                             </select></label>
                             <button class="new-session-nav primary" disabled={!self.connected} onclick={ctx.link().callback(|_|Msg::NewSession(true))}>{"+ New Session"}</button>
+                            </div>
                             {if !self.project_git_error.is_empty() {html!{<div class="error" role="alert">{format!("Git refresh failed; displayed results may be out of date: {}",self.project_git_error)}</div>}}else{Html::default()}}
-                            {crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]!=true).map(|s|{let mut s=s.clone();s["goal"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["goal"].clone()}else{Value::Null};s["active_subagents"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["active_subagents"].clone()}else{Value::Null};s["background_count"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["count"].clone()}else{Value::Null};s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode,self.saved.field("session_view")=="flat",crate::overview::Sort::from_saved(&self.saved.field("session_sort")),&self.project_git,self.connected,ctx.link().callback(Msg::NewProjectSession))}
-                            {if self.sessions.iter().any(|s|s["archived"]==true){html!{<details class="archived-sessions"><summary>{format!("Archived sessions ({})",self.sessions.iter().filter(|s|s["archived"]==true).count())}</summary>{crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]==true).map(|s|{let mut s=s.clone();s["background_count"]=Value::Null;s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode,self.saved.field("session_view")=="flat",crate::overview::Sort::from_saved(&self.saved.field("session_sort")),&self.project_git,self.connected,ctx.link().callback(Msg::NewProjectSession))}</details>}}else{Html::default()}}
+                            {if self.sessions.iter().any(|s|s["archived"]!=true && self.search.includes(s)) || self.search.query.trim().is_empty() {crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]!=true && self.search.includes(s)).map(|s|{let mut s=s.clone();s["goal"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["goal"].clone()}else{Value::Null};s["active_subagents"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["active_subagents"].clone()}else{Value::Null};s["background_count"]=if self.connected{self.runtime["background_terminals"][text(&s,"id")]["count"].clone()}else{Value::Null};s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode,self.saved.field("session_view")=="flat",crate::overview::Sort::from_saved(&self.saved.field("session_sort")),&self.project_git,self.connected,ctx.link().callback(Msg::NewProjectSession))}else{html!{<p class="muted">{"No matching active sessions."}</p>}}}
+                            {if self.sessions.iter().any(|s|s["archived"]==true && self.search.includes(s)){html!{<details class="archived-sessions" open={!self.search.query.trim().is_empty()}><summary>{format!("Archived sessions ({})",self.sessions.iter().filter(|s|s["archived"]==true && self.search.includes(s)).count())}</summary>{crate::overview::view(&self.sessions.iter().filter(|s|s["archived"]==true && self.search.includes(s)).map(|s|{let mut s=s.clone();s["background_count"]=Value::Null;s}).collect::<Vec<_>>(),&self.targets,&self.saved.selected,ctx.link().callback(Msg::Select),ctx.link().callback(Msg::EditSession),ctx.link().callback(Msg::Run),self.busy||!self.connected,self.reorder_mode,self.saved.field("session_view")=="flat",crate::overview::Sort::from_saved(&self.saved.field("session_sort")),&self.project_git,self.connected,ctx.link().callback(Msg::NewProjectSession))}</details>}}else{Html::default()}}
+                            {self.search_footer(ctx)}
                         </aside>
                         <main class={(!self.saved.selected.is_empty()).then_some("chat-main")}>
                             {if !self.saved.selected.is_empty(){self.chat_view(ctx)}else{html!{<section class="empty"><span class="eyebrow">{"SERVER OVERVIEW"}</span><h1>{"Your agents, by project."}</h1><p>{"Select an agent in the folder tree to open its conversation. Only folders with sessions appear."}</p><p class="muted">{"Each agent keeps its icon and generated name. Status shows who is working, waiting for you, or disconnected."}</p><button disabled={!self.connected} onclick={ctx.link().callback(|_|Msg::NewSession(true))}>{"New Session"}</button></section>}}}
@@ -1939,9 +2140,13 @@ impl App {
             </section>}}else{Html::default()}}
             {crate::usage::cache_indicator(&self.current,true)}
             <div class="transcript-frame"><div class="transcript" ref={self.transcript_ref.clone()} onscroll={ctx.link().callback(|_|Msg::Scroll)} role="region" aria-label="Chat transcript" tabindex="0">
+                {if self.older.is_some() {html!{<div class="older-messages"><button disabled={self.older_loading || !self.connected} onclick={ctx.link().callback(|_|Msg::LoadOlder)}>{if self.older_loading {"Loading older messages…"} else {"Show older messages"}}</button></div>}}else{Html::default()}}
+                {if !self.older_error.is_empty() {html!{<p role="alert">{&self.older_error}</p>}}else{Html::default()}}
                 {if !self.history_loaded {html!{<p class="muted" role="status">{"Loading conversation…"}</p>}}else{Html::default()}}
                 <ContextProvider<crate::links::LinkContext> context={crate::links::LinkContext { client:self.client.clone(), session:id.clone(), targets:self.current["targets"].clone(), connected:self.connected }}>
+                <ContextProvider<crate::rich_messages::ButtonContext> context={crate::rich_messages::ButtonContext(ctx.link().callback({let key=self.saved.key(); move |text|Msg::InsertButton(key.clone(),text)}))}>
                 <crate::conversation::Conversation key={self.saved.key()} chunks={self.transcript.groups.clone()} {working} {waiting} connected={self.connected}/>
+                </ContextProvider<crate::rich_messages::ButtonContext>>
                 </ContextProvider<crate::links::LinkContext>>
             </div>
                 {if !self.follow{html!{<button class="jump-latest" onclick={ctx.link().callback(|_|Msg::Latest)}>{"Jump to latest"}</button>}}else{Html::default()}}
@@ -1984,7 +2189,7 @@ impl App {
                 {if let Some(client)=self.client.clone(){let targets=array(&self.target_selection);if targets.is_empty(){html!{<crate::prompt_settings::InstructionPreview client={client} target={None::<demodex_protocol::Selection>}/>}}else{html!{<>{for targets.iter().map(|t|html!{<div role="group" aria-label={format!("Instructions · {}",text(t,"cwd"))}><p class="muted">{text(t,"cwd")}</p><crate::prompt_settings::InstructionPreview client={client.clone()} target={serde_json::from_value::<demodex_protocol::Selection>(t.clone()).ok()}/></div>})}</>}}}else{Html::default()}}
                 <crate::ui::Group class="control-section" label="Execution settings" title="Execution">
                 {self.target_picker(ctx,working||waiting)}
-                <section class="session-settings"><h3>{"Sandbox permissions"}</h3>{for array(&self.current["targets"]).iter().map(|t|html!{<p class="muted">{"Working directory: "}<code>{text(t,"cwd")}</code></p>})}
+                <section class="session-settings"><h3>{"Sandbox permissions"}</h3>
                     <section class="runtime-panel"><p>{"Active sandbox: "}<strong>{sandbox_name(text(&self.current["effective_sandbox"],"type"))}</strong></p>{self.sandbox(ctx,"session_sandbox","Session sandbox")}
                     {if self.saved.field("session_sandbox") != text(&self.current,"sandbox") {html!{<p class="sandbox-pending" role="status">{"Selection not applied. Active sandbox remains as shown above."}</p>}}else{Html::default()}}
                     {if self.saved.field("session_sandbox").is_empty(){html!{<p class="muted">{"No override preserves the current policy on a connected session; it does not enable full access."}</p>}}else{Html::default()}}
@@ -2058,6 +2263,15 @@ impl App {
             .and_then(|s| serde_json::from_str::<Value>(s).ok())
             .unwrap_or_else(|| self.target_selection.clone());
         let chosen = array(&selected);
+        let mut entries: Vec<Value> = self.targets.iter()
+            .filter(|target|target["owner"].is_null()||text(target,"owner")==self.saved.selected)
+            .cloned().collect();
+        // Keep saved selections removable even when their registry entry is gone.
+        for selected in &chosen {
+            if !entries.iter().any(|target|target["id"]==selected["id"]) {
+                entries.push(json!({"id":selected["id"],"name":"Unavailable target","kind":"unknown","available":false}));
+            }
+        }
         let locked = self.targets_locked();
         let selection = demodex_protocol::SelectTargets {
             targets: chosen
@@ -2101,36 +2315,34 @@ impl App {
                 Msg::Run(if interrupting{interrupt.clone()}else{operation.clone()})
             })} actions={html!{<><button type="submit" disabled={locked}>{if active{"Save for next turn"}else{"Save executors and directories"}}</button>
                 {if active{html!{<button type="submit" data-target-mode="interrupt" disabled={locked}>{"Interrupt and save"}</button>}}else{Html::default()}}</>}}>
-            <fieldset disabled={locked}>
-                {for self.targets.iter().filter(|target|target["owner"].is_null()||text(target,"owner")==self.saved.selected).map(|target|{
+                {for entries.iter().map(|target|{
                     let id=text(target,"id").to_owned();
-                    let enabled=chosen.iter().any(|s|s["id"]==id);
+                    let name=text(target,"name");
+                    let index=chosen.iter().position(|s|s["id"]==id);
+                    let enabled=index.is_some();
                     let mut toggled=chosen.clone();
                     if enabled {toggled.retain(|s|s["id"]!=id);} else {toggled.push(json!({"id":id,"cwd":target["cwd"]}));}
-                    html!{<label class="checkbox"><input type="checkbox" checked={enabled} disabled={!enabled && target["available"]!=true} onchange={ctx.link().callback(move |_|Msg::TargetDraft(json!(toggled)))}/>{format!("{} · {}{}",text(target,"name"),text(target,"kind"),if target["available"]==true{""}else{" · unavailable"})}</label>}
+                    html!{<crate::ui::Group key={id.clone()} class="executor-entry" label={format!("Executor {name}")}>
+                        <fieldset disabled={locked}>
+                        <div class="executor-heading">
+                            <label class="checkbox"><input type="checkbox" checked={enabled} disabled={!enabled && target["available"]!=true} onchange={ctx.link().callback(move |_|Msg::TargetDraft(json!(toggled)))}/>{format!("{} · {}{}",name,text(target,"kind"),if target["available"]==true{""}else{" · unavailable"})}</label>
+                            {if let Some(index)=index {if index==0 {html!{<span class="executor-primary">{"Primary"}</span>}} else {let mut primary=chosen.clone();let entry=primary.remove(index);primary.insert(0,entry);html!{<button type="button" onclick={ctx.link().callback(move |_|Msg::TargetDraft(json!(primary)))}>{"Make primary"}</button>}}}else{Html::default()}}
+                        </div>
+                        {if let Some(index)=index {
+                            let selected=&chosen[index];
+                            let current=chosen.clone();
+                            html!{<div class="target-directory"><crate::ui::FieldAction><label>{"Working directory"}<crate::ui::Input aria_label={format!("{}{} working directory",name,if index==0{" (primary)"}else{""})} value={text(selected,"cwd").to_owned()} oninput={ctx.link().callback(move |e:InputEvent|{let mut next=current.clone();next[index]["cwd"]=json!(input(e));Msg::TargetDraft(json!(next))})} rule={crate::ui::Rule::Path}/></label>
+                            <crate::directory_picker::DirectoryPicker key={format!("{}:{}",self.generation,id)} client={self.connected.then(||self.client.clone()).flatten()} target={id.clone()} path={text(selected,"cwd").to_owned()} onchoose={ctx.link().callback({let targets=chosen.clone();let id=id.clone();move |path:String|{let mut next=targets.clone();if let Some(target)=next.iter_mut().find(|t|t["id"]==id){target["cwd"]=json!(path);}Msg::TargetDraft(json!(next))}})}/></crate::ui::FieldAction></div>}
+                        }else{Html::default()}}
+                        </fieldset>
+                        {if text(target,"owner")==self.saved.selected {html!{<details class="executor-connection"><summary>{format!("SSH connection · {}",text(target,"destination"))}</summary><div class="executor-connection-actions">
+                            {self.button(ctx,"Check SSH connection",Operation::CheckSshTarget{id:id.clone()})}
+                            {self.button(ctx,"Replace SSH executor",Operation::ReconnectSshTarget{id:id.clone()})}
+                            {if array(&target["users"]).is_empty(){self.button(ctx,"Forget executor",Operation::ForgetTarget{id:id.clone()})}else{Html::default()}}
+                        </div></details>}}else{Html::default()}}
+                    </crate::ui::Group>}
                 })}
-                {if !chosen.is_empty(){html!{<h4>{"Working directories"}</h4>}}else{Html::default()}}
-                {for chosen.iter().enumerate().map(|(index,target)|{
-                    let name=self.targets.iter().find(|t|t["id"]==target["id"]).map(|t|text(t,"name")).unwrap_or("Unavailable target");
-                    let current=chosen.clone();
-                    let mut removed=chosen.clone(); removed.remove(index);
-                    let mut primary=chosen.clone();
-                    let entry=primary.remove(index);primary.insert(0,entry);
-                    html!{<div class="target-directory"><crate::ui::FieldAction><label>{format!("{}{} working directory",name,if index==0{" (primary)"}else{""})}<crate::ui::Input aria_label={format!("{}{} working directory",name,if index==0{" (primary)"}else{""})} value={text(target,"cwd").to_owned()} oninput={ctx.link().callback(move |e:InputEvent|{let mut next=current.clone();next[index]["cwd"]=json!(input(e));Msg::TargetDraft(json!(next))})} rule={crate::ui::Rule::Path}/></label>
-                        <crate::directory_picker::DirectoryPicker key={format!("{}:{}",self.generation,text(target,"id"))} client={self.connected.then(||self.client.clone()).flatten()} target={text(target,"id").to_owned()} path={text(target,"cwd").to_owned()} onchoose={ctx.link().callback({let targets=chosen.clone();let id=text(target,"id").to_owned();move |path:String|{let mut next=targets.clone();if let Some(target)=next.iter_mut().find(|t|t["id"]==id){target["cwd"]=json!(path);}Msg::TargetDraft(json!(next))}})}/></crate::ui::FieldAction>
-                        {if index>0{html!{<button type="button" onclick={ctx.link().callback(move |_|Msg::TargetDraft(json!(primary)))}>{"Make primary"}</button>}}else{Html::default()}}
-                        <crate::ui::IconButton label={format!("Remove {name}")} title="Remove executor" onclick={ctx.link().callback(move |_|Msg::TargetDraft(json!(removed)))}>{"×"}</crate::ui::IconButton>
-                    </div>}
-                })}
-</fieldset></crate::ui::Form>
-            {for self.targets.iter().filter(|target|text(target,"owner")==self.saved.selected).map(|target|{
-                let id=text(target,"id").to_owned();
-                html!{<section class="environment-card"><h3>{text(target,"name")}</h3><p>{format!("Private SSH executor · {}",text(target,"destination"))}</p>
-                    {self.button(ctx,"Check SSH connection",Operation::CheckSshTarget{id:id.clone()})}
-                    {self.button(ctx,"Replace SSH executor",Operation::ReconnectSshTarget{id:id.clone()})}
-                    {if array(&target["users"]).is_empty(){self.button(ctx,"Forget executor",Operation::ForgetTarget{id})}else{Html::default()}}
-                </section>}
-            })}
+            </crate::ui::Form>
             <crate::ui::AddButton onclick={ctx.link().callback(|_|Msg::NewTargetSetup("session-ssh".into()))}>{"+ Add SSH executor to this session"}</crate::ui::AddButton>
             {if !blockers.is_empty(){html!{<p class="muted control-warning" role="status">{blockers.join(" ")}</p>}}else{Html::default()}}
         </section>}
@@ -2234,8 +2446,23 @@ impl App {
                 {if !self.login.is_null(){html!{<><a href={text(&self.login,"verificationUrl").to_owned()} target="_blank" rel="noopener noreferrer">{"Continue sign-in in your browser"}</a><p>{"Device code: "}<strong>{text(&self.login,"userCode")}</strong></p></>}}else{Html::default()}}
                 {if let Some(error)=self.runtime["error"].as_str(){html!{<p class="muted">{error}</p>}}else{Html::default()}}
             </crate::ui::Group>
+            {if let Some(client)=self.client.clone(){html!{<crate::bug_reports::BugReports key={format!("reports:{}:{}",self.saved.host,self.generation)} client={client} server_id={self.runtime["bug_reports"]["server_id"].as_str().unwrap_or("").to_owned()} onseen={ctx.link().callback(Msg::BugReportsSeen)}/>}}else{Html::default()}}
             {if let Some(client)=self.client.clone(){html!{<crate::notifications::Notifications key={format!("{}:{}",self.saved.host,self.generation)} client={client} host={self.saved.host.clone()}/>}}else{Html::default()}}
             {if let Some(client)=self.client.clone(){html!{<crate::prompt_settings::PromptSettings key={format!("prompts:{}:{}",self.saved.host,self.generation)} client={client}/>}}else{Html::default()}}
+            <crate::ui::Group title="New session defaults">
+                <label for="default_sandbox">{"Default sandbox"}</label>
+                <select id="default_sandbox" disabled={self.busy||!self.connected||self.runtime.is_null()} onchange={ctx.link().callback(|e:Event| {
+                    sandbox_choice(&e.target_unchecked_into::<HtmlSelectElement>().value())
+                        .map(|sandbox|Operation::SetDefaultSandbox{sandbox})
+                        .map_or_else(Msg::InvalidForm,Msg::Run)
+                })}>
+                    <option value="" selected={self.runtime["default_sandbox"].is_null()}>{"Codex default / saved policy"}</option>
+                    <option value="read-only" selected={self.runtime["default_sandbox"]=="read-only"}>{"Read-only"}</option>
+                    <option value="workspace-write" selected={self.runtime["default_sandbox"]=="workspace-write"}>{"Workspace-write"}</option>
+                    <option value="danger-full-access" selected={self.runtime["default_sandbox"]=="danger-full-access"}>{"Danger-full-access"}</option>
+                </select>
+                <p class="muted">{"Saves immediately for this server. Preselects the sandbox in New Session; you can override it before creating. Existing and resumed sessions keep their policies."}</p>
+            </crate::ui::Group>
             <crate::runtime_features::RuntimeFeatures runtime={self.runtime.clone()} disabled={self.busy||!self.connected} onrun={ctx.link().callback(Msg::Run)}/>
             <crate::ui::Group class="settings-targets" title="Executors">
             {self.target_registry(ctx)}
@@ -2251,7 +2478,25 @@ impl App {
                 <crate::ui::AddButton onclick={ctx.link().callback(|_|Msg::NewTargetSetup("container".into()))}>{"+ Create container"}</crate::ui::AddButton>
             </section>
             <section class="vm-management"><h3>{"Virtual machines"}</h3>
-                {for self.environments.iter().map(|env|{let id=text(env,"id").to_owned();let status=text(env,"status");html!{<section class="environment-card"><h3>{text(env,"name")}</h3><p>{status}</p><div class="environment-actions">{if status=="running"{self.button(ctx,"Stop · keep disk",Operation::StopEnvironment{id})}else{self.button(ctx,"Start",Operation::StartEnvironment{id})}}</div>{if let Some(error)=env["error"].as_str(){html!{<p class="error">{error}</p>}}else{Html::default()}}</section>}})}
+                {for self.environments.iter().map(|env| {
+                    let id=text(env,"id").to_owned();
+                    let status=text(env,"status");
+                    let target=self.targets.iter().find(|target|text(target,"id")==format!("vm-{id}"));
+                    let users=target.and_then(|target|target["users"].as_array());
+                    let attached=users.map(Vec::len);
+                    let delete=Operation::DeleteEnvironment{id:id.clone()};
+                    let detach=Operation::DetachEnvironmentExecutors{id:id.clone()};
+                    html!{<section class="environment-card"><h3>{text(env,"name")}</h3><p>{status}</p>
+                        <p>{attached.map(|count|format!("{count} attached session(s)")).unwrap_or_else(||"Checking attached executors…".into())}</p>
+                        <div class="environment-actions">
+                            {if status=="running" || status=="starting" || status=="error" {self.button(ctx,"Stop · keep disk",Operation::StopEnvironment{id:id.clone()})}else{self.button(ctx,"Start",Operation::StartEnvironment{id:id.clone()})}}
+                            <button type="button" disabled={self.busy || !self.connected || !attached.is_some_and(|n|n>0)} onclick={ctx.link().callback(move |_|Msg::Run(detach.clone()))}>{"Detach executors"}</button>
+                            <button type="button" class="danger" disabled={self.busy || !self.connected || status!="stopped" || attached!=Some(0)} onclick={ctx.link().callback(move |_|Msg::Run(delete.clone()))}>{"Delete VM"}</button>
+                        </div>
+                        <p class="muted">{"To delete: stop the VM and detach its executors. Deletion permanently removes its disk; conversations are kept."}</p>
+                        {if let Some(error)=env["error"].as_str(){html!{<p class="error">{error}</p>}}else{Html::default()}}
+                    </section>}
+                })}
                 <crate::ui::AddButton onclick={ctx.link().callback(|_|Msg::NewTargetSetup("vm".into()))}>{"+ Create VM"}</crate::ui::AddButton>
             </section>
             </div></crate::ui::Group>

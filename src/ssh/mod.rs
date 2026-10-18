@@ -33,6 +33,10 @@ impl std::fmt::Display for RpcFailure {
 }
 impl std::error::Error for RpcFailure {}
 
+pub(crate) fn is_missing_file(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<RpcFailure>().is_some_and(|e| e.code == -32004)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {

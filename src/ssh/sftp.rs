@@ -182,6 +182,9 @@ impl Sftp {
         Ok(())
     }
     pub async fn read(&mut self, path: &str) -> Result<Vec<u8>> {
+        self.read_limited(path, LIMIT).await
+    }
+    pub async fn read_limited(&mut self, path: &str, limit: usize) -> Result<Vec<u8>> {
         ensure!(
             self.stat(path).await?["isFile"] == true,
             "Only regular files can be read"
@@ -199,8 +202,8 @@ impl Sftp {
             let bytes = p.data()?;
             ensure!(!bytes.is_empty(), "Empty SFTP data packet");
             ensure!(
-                result.len() + bytes.len() <= LIMIT,
-                "File exceeds 32 MiB; streaming handles are unsupported"
+                result.len() + bytes.len() <= limit,
+                "File exceeds read limit; streaming handles are unsupported"
             );
             result.extend(bytes);
         }

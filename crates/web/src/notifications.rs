@@ -254,7 +254,7 @@ impl Component for Notifications {
                 <button disabled={self.busy||!available||self.local["permission"]!="granted"} onclick={ctx.link().callback(|_|Msg::TestDisplay)}>{"Test notification display"}</button>
             </div>
             {if !self.message.is_empty(){html!{<p role="status">{&self.message}</p>}}else{Html::default()}}
-            <p class="muted">{"Agents can send notifications explicitly; every notification remains in chat. Agent notifications require a newly created Codex thread."}</p>
+            <p class="muted">{"Agents can send notifications explicitly; every notification remains in chat. Emergency calls use high-priority push to enabled devices. Enable and test push on your phone to receive them. Delivery is best effort. Newly added agent tools require a newly created Codex thread."}</p>
         </crate::ui::Group>}
     }
 }

@@ -91,6 +91,7 @@ self.addEventListener('push',event=>event.waitUntil((async()=>{
   let result;
   try {
     await self.registration.showNotification(data.title.slice(0,240),{
+      requireInteraction:data.emergency===true,
       body:data.message.slice(0,1500),tag:`demodex:${data.server_id}:${data.id}`,renotify:false,
       icon:new URL('./icon-192.png',self.registration.scope).href,
       data:{url:url.href},

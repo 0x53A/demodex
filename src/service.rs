@@ -23,6 +23,7 @@ impl crate::Service {
 pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response> {
     use Operation::*;
     let value = match operation {
+        BugReports { before } => return Ok(Response::BugReports(crate::bug_reports::list(&app.manager.store, before)?)),
         PushSettings { device_id } => crate::notifications::settings(&app.manager.store, &device_id)?,
         RegisterPush { input } => crate::notifications::register(&app.manager.store, input)?,
         RemovePush { device_id } => crate::notifications::remove(&app.manager.store, &device_id)?,
@@ -31,9 +32,20 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         Sessions => return Ok(Response::Sessions(list(app).await?)),
         Detail { id } => return Ok(Response::Detail(detail(app, id).await?)),
         Events { id, after } => return Ok(Response::Events(app.manager.store.events(&id, after)?)),
-        Conversation { id } => {
+        Conversation { id, older } => {
             let manager = app.manager.clone();
-            return Ok(Response::Conversation(tokio::task::spawn_blocking(move || manager.store.conversation(&id)).await??));
+            return Ok(Response::Conversation(tokio::task::spawn_blocking(move || manager.store.conversation_page(&id, older.as_ref())).await??));
+        }
+        SearchConversation { id, query, older } => {
+            ensure!(!query.trim().is_empty() && query.len() <= 1024, "Search requires 1–1024 bytes of text");
+            let manager = app.manager.clone();
+            return tokio::task::spawn_blocking(move || {
+                manager.store.get(&id)?;
+                let page = manager.store.conversation_page(&id, older.as_ref())?;
+                let query = query.trim().to_lowercase();
+                let matched = page.items.iter().any(|item| demodex_protocol::transcript::search_text(item, &query));
+                Ok(Response::ConversationSearch { matched, older: if matched { None } else { page.older } })
+            }).await?;
         }
         Runtime => runtime_status(app).await?,
         RuntimeModels => {
@@ -59,6 +71,10 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         }
         StartRuntime => runtime_start(app).await?,
         SetRuntimeFeature { name, enabled } => app.orchestrator.set_runtime_feature(&name, enabled).await?,
+        SetDefaultSandbox { sandbox } => {
+            app.manager.store.set_default_sandbox(sandbox)?;
+            json!({"ok":true})
+        }
         RestartRuntime => app.orchestrator.restart_runtime().await?,
         Login => runtime_login(app).await?,
         SavedThreads { cursor, search } => app.orchestrator.saved_threads(cursor, search).await?,
@@ -106,8 +122,10 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
                 .stop_background(&id, &generation, &processes)
                 .await?
         }
-        MessageFiles { id, item } => crate::message_files::listing(&app.manager, &id, &item).await?,
-        ReadMessageFile { id, item, destination, executor } => crate::message_files::read(&app.manager, &id, &item, &destination, &executor).await?,
+        BindMessageFileHost { id, item, destination, executor, target } => crate::message_files::bind_host(&app.manager, &app.orchestrator, &id, &item, &destination, &executor, &target).await?,
+        RefreshMessageFile { id, item, destination } => crate::message_files::refresh(&app.manager, &app.orchestrator, &id, &item, &destination).await?,
+        MessageFiles { id, item } => crate::message_files::listing(&app.manager, &app.orchestrator, &id, &item).await?,
+        ReadMessageFile { id, item, destination, executor } => crate::message_files::read(&app.manager, &app.orchestrator, &id, &item, &destination, &executor).await?,
         UploadFile { id, name, data } => {
             let bytes = crate::uploads::decode_file(&name, &data)?;
             json!({"path":app.orchestrator.upload_file(&id, &bytes, &name, false).await?})
@@ -156,6 +174,14 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         }
         StartEnvironment { id } => environment_start(app, id).await?,
         StopEnvironment { id } => environment_stop(app, id).await?,
+        DetachEnvironmentExecutors { id } => {
+            app.orchestrator.detach_environment_executors(&id).await?;
+            json!({"ok":true})
+        }
+        DeleteEnvironment { id } => {
+            app.orchestrator.delete_environment(&id).await?;
+            json!({"ok":true})
+        }
         EnvironmentSession { id, input } => {
             return Ok(Response::Session(
                 environment_session(app, id, input).await?,
@@ -277,6 +303,33 @@ fn same_legacy_command(previous: &str, operation: &Operation) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn conversation_search_reads_saved_history_without_runtime() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let service = crate::Service::open(crate::Config {
+            data_dir: root.path().join("state"), host_workspace: None,
+            codex_home: None, vm_image: None,
+        })?;
+        let id = service.manager.store.create("search", "ws://127.0.0.1:1", &[], None)?.id;
+        service.manager.store.event(&id, &json!({"method":"item/completed","params":{"item":{"id":"message","type":"agentMessage","text":"Old saved Cobalt%_Needle"}}}))?;
+        // Force the match onto an older page; no transcript bytes leave the service.
+        service.manager.store.event(&id, &json!({"method":"item/completed","params":{"item":{"id":"large","type":"agentMessage","text":"x".repeat(11*1024*1024)}}}))?;
+        service.manager.store.archive(&id, true)?;
+        let search = |query: &str, older| Operation::SearchConversation { id: id.clone(), query: query.into(), older };
+        let first = service.call("", search("COBALT%_NEEDLE", None)).await?;
+        let Response::ConversationSearch { matched, older } = first else { panic!("wrong response"); };
+        assert!(!matched);
+        assert!(older.is_some());
+        let next = service.call("", search("COBALT%_NEEDLE", older)).await?.into_value();
+        assert_eq!(next["matched"], true);
+        assert!(next["older"].is_null());
+        assert!(service.call("", search(" ", None)).await.is_err());
+        assert!(service.call("", search(&"x".repeat(1025), None)).await.is_err());
+        assert!(service.call("", Operation::SearchConversation {id:"missing".into(),query:"needle".into(),older:None}).await.is_err());
+        assert!(service.manager.store.get(&id)?.archived);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn legacy_receipts_survive_restart_without_reexecution() -> Result<()> {
         let root = tempfile::tempdir()?;
@@ -444,6 +497,8 @@ async fn change_goal(app: &App, id: String, input: controls::GoalAction) -> Resu
 async fn runtime_status(app: &App) -> Result<Value> {
     use futures_util::StreamExt;
     let mut status = app.orchestrator.runtime_status().await?;
+    status["bug_reports"] = crate::bug_reports::summary(&app.manager.store)?;
+    status["default_sandbox"] = json!(app.manager.store.default_sandbox()?);
     let (revision,prompts)=app.manager.store.prompt_settings()?;
     status["prompt_defaults"]=json!({"revision":revision,"include_project":prompts.include_project});
     let sessions = app.manager.store.list()?;

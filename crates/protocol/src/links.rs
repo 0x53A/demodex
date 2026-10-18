@@ -7,6 +7,23 @@ fn invalid_text(s: &str) -> bool {
     s.chars().any(|c| c.is_control() || c == '\u{fffd}' || matches!(c, '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
 }
 
+// Parse locations before percent decoding so %3A remains a literal filename colon.
+// Location syntax is reserved for positive decimal :line and :line:column suffixes.
+fn without_location(path: &str) -> &str {
+    let positive = |value: &str| {
+        !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+            && value.bytes().any(|b| b != b'0')
+    };
+    let Some((base, last)) = path.rsplit_once(':') else { return path; };
+    if !positive(last) || base.is_empty() { return path; }
+    if let Some((file, line)) = base.rsplit_once(':')
+        && positive(line) && !file.is_empty()
+    {
+        return file;
+    }
+    base
+}
+
 pub fn classify(raw: &str) -> LinkDestination {
     let reject = |reason: &str| LinkDestination::Unsupported {
         reason: reason.into(),
@@ -24,8 +41,8 @@ pub fn classify(raw: &str) -> LinkDestination {
             return reject("Malformed percent encoding");
         }
     }
-    let decoded = match percent_decode_str(raw).decode_utf8() {
-        Ok(value) if !invalid_text(&value) => value,
+    match percent_decode_str(raw).decode_utf8() {
+        Ok(value) if !invalid_text(&value) => {},
         _ => return reject("Invalid or suspicious encoded characters"),
     };
     if raw.starts_with('#') || raw.starts_with("//") || raw.contains('\\') {
@@ -67,14 +84,14 @@ pub fn classify(raw: &str) -> LinkDestination {
                 && url.fragment().is_none() =>
         {
             LinkDestination::File {
-                path: percent_decode_str(url.path())
+                path: percent_decode_str(without_location(url.path()))
                     .decode_utf8_lossy()
                     .into_owned(),
             }
         }
         Ok(_) => reject("Only HTTP(S) URLs and local file paths are supported"),
         Err(url::ParseError::RelativeUrlWithoutBase) => LinkDestination::File {
-            path: decoded.into_owned(),
+            path: percent_decode_str(without_location(raw)).decode_utf8_lossy().into_owned(),
         },
         Err(_) => reject("Malformed URL"),
     }
@@ -143,6 +160,28 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].title, "One");
     }
+    #[test]
+    fn file_locations_do_not_become_filename_suffixes() {
+        for (raw, path) in [
+            ("/tmp/DESIGN.md:1", "/tmp/DESIGN.md"),
+            ("./DESIGN.md:12", "./DESIGN.md"),
+            ("src/main.rs:12:4", "src/main.rs"),
+            ("file:///tmp/a%20b.rs:12:4", "/tmp/a b.rs"),
+            ("/tmp/a%3A12", "/tmp/a:12"),
+            ("/tmp/a:0", "/tmp/a:0"),
+            ("/tmp/a:word", "/tmp/a:word"),
+            ("/tmp/a:-1", "/tmp/a:-1"),
+            ("/tmp/a:12/child", "/tmp/a:12/child"),
+        ] {
+            assert_eq!(classify(raw), LinkDestination::File { path: path.into() }, "{raw}");
+        }
+        let links = extract("[Design](/tmp/DESIGN.md:1)");
+        assert_eq!(links[0].destination, "/tmp/DESIGN.md:1");
+        assert_eq!(links[0].kind, LinkDestination::File { path: "/tmp/DESIGN.md".into() });
+        assert!(matches!(classify("https://example.org/a:12"), LinkDestination::Web { url, .. } if url == "https://example.org/a:12"));
+        assert!(matches!(classify("javascript:12"), LinkDestination::Unsupported { .. }));
+    }
+
     #[test]
     fn ambiguous_or_invalid_destinations_are_explicit() {
         for value in [

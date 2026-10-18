@@ -19,7 +19,7 @@ from websockets.exceptions import ConnectionClosed
 from wormhole_client import api, call
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / 'target/rust-pwa/debug/demodex'
+BINARY = Path(os.environ.get('DEMODEX_BIN', ROOT / 'target/rust-pwa/debug/demodex'))
 DIST = Path(os.environ.get('DEMODEX_WEB_DIST', ROOT / 'web/.rust-dist'))
 
 def port():
@@ -51,6 +51,7 @@ def expect_diagram(article):
 
 class Codex:
     socket = None
+    submissions = 0
     def handle(self, ws):
         self.socket = ws
         try:
@@ -58,6 +59,7 @@ class Codex:
                 call = json.loads(raw)
                 if 'id' not in call: continue
                 method = call.get('method')
+                if method in ('turn/start', 'turn/steer', 'thread/queue/add'): self.submissions += 1
                 result = {}
                 if method in ('thread/start', 'thread/resume'): result = {'thread': {'id':'thread','turns':[]}, 'sandbox':{'type':'readOnly'}}
                 elif method == 'thread/read': result = {'thread':{'id':'thread','status':{'type':'idle'}}}
@@ -105,6 +107,32 @@ with tempfile.TemporaryDirectory(prefix='demodex-rich-') as temp:
             page.locator('.session').filter(has_text='Rich fixture').click()
             page.locator('.session-error').get_by_role('button',name='Reconnect',exact=True).click()
             expect(page.locator('.session-heading .status')).to_have_text('connected')
+            submissions_before = codex.submissions
+            button_source = '<button tag="apply-fix">Yes</button> <button tag="explain">Yes</button>'
+            codex.message('buttons', button_source)
+            buttons = page.locator('[data-item-id="buttons"] .message-action')
+            expect(buttons).to_have_count(2)
+            prompt = page.locator('#prompt')
+            prompt.fill('😀existing draft')
+            prompt.evaluate('(e)=>{e.focus(); e.setSelectionRange(2,10)}')
+            buttons.first.click()
+            inserted = "(button 'apply-fix' with label 'Yes' pressed)"
+            expect(prompt).to_have_value('😀 ' + inserted + ' existing draft')
+            expect(prompt).to_be_focused()
+            buttons.nth(1).focus()
+            page.keyboard.press('Enter')
+            inserted2 = "(button 'explain' with label 'Yes' pressed)"
+            expect(prompt).to_have_value('😀 ' + inserted + ' ' + inserted2 + ' existing draft')
+            page.reload()
+            expect(prompt).to_have_value('😀 ' + inserted + ' ' + inserted2 + ' existing draft')
+            assert codex.submissions == submissions_before, 'Button submitted a turn'
+            prompt.fill('')
+            codex.message('button-literals', '`<button tag="code">Code</button>`\n\n```html\n<button tag="fenced">Fenced</button>\n```\n\n<button tag="bad" onclick="alert(1)">Unsafe</button>')
+            literals = page.locator('[data-item-id="button-literals"]')
+            expect(literals).to_contain_text('Unsafe')
+            expect(literals.locator('.message-action')).to_have_count(0)
+            page.locator('[data-item-id="buttons"]').get_by_label('Format Markdown', exact=True).uncheck()
+            expect(page.locator('[data-item-id="buttons"] .rich-message > pre')).to_have_text(button_source)
             source=r'''# Rich message
 
 **Strong** and *emphasis*, ~~deleted~~, `code`.
@@ -311,7 +339,7 @@ sequenceDiagram
             page.mouse.click(1,1)
             expect(mail_popup).to_have_count(0)
             # Metadata is captured at completion using a real disposable executor.
-            file_source=f'[Deployment status]({report}) and [Again]({report}) [Missing]({directory / "missing"})'
+            file_source=f'[Deployment status]({report}) and [Again]({report}) [Missing]({directory / "missing"}:1)'
             codex.message('file-links',file_source)
             file_article=page.locator('[data-item-id="file-links"]')
             expect(file_article.locator('.message-destination')).to_have_count(2)
@@ -346,6 +374,45 @@ sequenceDiagram
             codex.message('file-links',file_source)
             captured=call(host,token,{'MessageFiles':{'id':created['id'],'item':'file-links'}})
             assert captured['files'][0]['checks'][0]['checked_at_ms']==before
+            # Simulate a snapshot made before location suffix parsing was supported.
+            with sqlite3.connect(directory/'state/state.sqlite') as db:
+                saved_files=json.loads(db.execute('SELECT files FROM message_files WHERE session_id=? AND item_id=?',(created['id'],'file-links')).fetchone()[0])
+                saved_files[1]['checks'][0]['path']=str(directory/'missing')+':1'
+                for saved_file in saved_files:
+                    for check in saved_file['checks']:check.pop('host',None)
+                db.execute('DELETE FROM file_executor_hosts WHERE executor=?',(captured_executor,))
+                db.execute('UPDATE message_files SET files=? WHERE session_id=? AND item_id=?',(json.dumps(saved_files),created['id'],'file-links'))
+            # Explicit refresh discovers a formerly missing file, without rechecking neighbors.
+            (directory/'missing').write_text('Now present\n')
+            file_article.locator('.markdown-link').filter(has_text='Missing').click()
+            missing_popup=page.get_by_role('dialog',name='Missing',exact=True)
+            expect(missing_popup.get_by_role('button',name='Refresh',exact=True)).to_be_enabled()
+            missing_popup.get_by_role('button',name='Refresh',exact=True).click()
+            expect(missing_popup.get_by_role('button',name='Show file',exact=True)).to_be_enabled()
+            refreshed=call(host,token,{'MessageFiles':{'id':created['id'],'item':'file-links'}})
+            assert refreshed['files'][0]['checks'][0]['checked_at_ms']==before
+            assert refreshed['files'][1]['checks'][0]['state']=='found'
+            assert refreshed['files'][1]['checks'][0]['path']==str(directory/'missing')
+            # Legacy links can be explicitly paired once with a durable registry target.
+            missing_popup.get_by_role('button',name='Choose file host…',exact=True).click()
+            host_popup=page.get_by_role('dialog',name='Choose file host',exact=True)
+            expect(host_popup).to_be_visible()
+            file_target=next(t for t in call(host,token,'Targets') if t['kind']=='external')
+            host_popup.get_by_label('File host',exact=True).select_option(file_target['id'])
+            host_popup.get_by_role('button',name='Use this host',exact=True).click()
+            expect(host_popup).to_have_count(0)
+            expect(missing_popup).to_contain_text('Saved host identity; session connection is not required.')
+            missing_popup.get_by_role('button',name='Close',exact=True).click()
+            # A receipted refresh cannot be replayed after the file changes again.
+            import uuid
+            refresh_id=str(uuid.uuid4())
+            refresh_op={'RefreshMessageFile':{'id':created['id'],'item':'file-links','destination':str(directory/'missing')+':1'}}
+            first_refresh=call(host,token,refresh_op,refresh_id)
+            (directory/'missing').unlink()
+            assert call(host,token,refresh_op,refresh_id)==first_refresh
+            missing_again=call(host,token,refresh_op,str(uuid.uuid4()))
+            assert missing_again['files'][1]['checks'][0]['state']=='not-found'
+            assert missing_again['files'][1]['checks'][0]['metadata'] is None
             large=directory/'large.bin'
             with large.open('wb') as large_file:large_file.truncate(4*1024*1024+1)
             codex.message('large-file',f'[Large file]({large})')
@@ -394,6 +461,33 @@ sequenceDiagram
             expect(drawing_preview).to_be_visible()
             drawing_preview.get_by_role('button',name='Close',exact=True).click()
             page.get_by_role('dialog',name='Drawing',exact=True).get_by_role('button',name='Close',exact=True).click()
+            # Ordinary file links use actual bytes, even without an image suffix.
+            for ident, filename, payload in [('raster-file', 'picture.bin', png),
+                                               ('broken-raster', 'broken.png', b'\x89PNG\r\n\x1a\ninvalid')]:
+                raster = directory / filename
+                raster.write_bytes(payload)
+                codex.message(ident, f'[Linked image]({raster})')
+                for _ in range(100):
+                    snapshot = call(host, token, {'MessageFiles': {'id': created['id'], 'item': ident}})
+                    if snapshot['files'] and snapshot['files'][0]['checks'][0]['state'] == 'found': break
+                    time.sleep(.1)
+                page.locator(f'[data-item-id="{ident}"] .markdown-link').click()
+                popup = page.get_by_role('dialog', name='Linked image', exact=True)
+                expect(popup.locator('img')).to_have_count(0)
+                popup.get_by_role('button', name='Show file', exact=True).click()
+                preview = page.get_by_role('dialog', name='File preview', exact=True)
+                expect(preview.locator('img')).to_have_attribute('src', 'data:image/png;base64,' + base64.b64encode(payload).decode())
+                if ident == 'raster-file':
+                    page.wait_for_function('()=>document.querySelector("dialog img.image-expanded")?.naturalWidth === 1')
+                    expect(preview).not_to_contain_text('Binary file')
+                    expect(preview).not_to_contain_text('Preview shortened')
+                else:
+                    expect(preview.get_by_role('alert')).to_contain_text('Image could not be decoded')
+                with page.expect_download() as downloaded:
+                    preview.get_by_role('button', name='Download these bytes', exact=True).click()
+                assert Path(downloaded.value.path()).read_bytes() == payload
+                preview.get_by_role('button', name='Close', exact=True).click()
+                popup.get_by_role('button', name='Close', exact=True).click()
             codex.message('svg-unsupported','```svg\n<svg viewBox="0 0 10 10"><defs/></svg>\n```')
             expect(page.locator('[data-item-id="svg-unsupported"]')).to_contain_text('SVG preview unavailable')
             expect(page.locator('[data-item-id="svg-unsupported"] svg')).to_have_count(0)
@@ -451,7 +545,12 @@ sequenceDiagram
             file_article.locator('.markdown-link').filter(has_text='Deployment status').click()
             detached=page.get_by_role('dialog',name='Deployment status',exact=True)
             expect(detached.get_by_role('button',name='Show file',exact=True)).to_be_disabled()
-            expect(detached).to_contain_text('Original executor is no longer attached')
+            expect(detached.get_by_role('button',name='Refresh',exact=True)).to_be_disabled()
+            try:
+                call(host,token,{'RefreshMessageFile':{'id':created['id'],'item':'file-links','destination':str(report)}})
+            except AssertionError as error:assert 'original file host' in str(error),error
+            else:raise AssertionError('Detached executor unexpectedly refreshed')
+            expect(detached).to_contain_text('No durable host identity was recorded')
             expect(detached.locator('.file-check-time')).to_contain_text('Checked')
             try:
                 call(host,token,{'ReadMessageFile':{'id':created['id'],'item':'file-links','destination':str(report),'executor':captured_executor}})
@@ -459,6 +558,19 @@ sequenceDiagram
                 assert 'no longer attached' in str(error),error
             else:raise AssertionError('Detached executor unexpectedly read')
             detached.get_by_role('button',name='Close',exact=True).click()
+            # The explicitly paired file remains usable after removing session targets.
+            (directory/'missing').write_text('Independent of session attachment\n')
+            file_article.locator('.markdown-link').filter(has_text='Missing').click()
+            detached_paired=page.get_by_role('dialog',name='Missing',exact=True)
+            expect(detached_paired.get_by_role('button',name='Refresh',exact=True)).to_be_enabled()
+            detached_paired.get_by_role('button',name='Refresh',exact=True).click()
+            expect(detached_paired.get_by_role('button',name='Show file',exact=True)).to_be_enabled()
+            detached_paired.get_by_role('button',name='Show file',exact=True).click()
+            paired_preview=page.get_by_role('dialog',name='File preview',exact=True)
+            expect(paired_preview.locator('.file-preview')).to_have_text('Independent of session attachment\n')
+            paired_preview.get_by_role('button',name='Close',exact=True).click()
+            detached_paired.get_by_role('button',name='Close',exact=True).click()
+
             assert not external,external
             assert not errors,errors
             browser.close()

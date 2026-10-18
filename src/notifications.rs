@@ -164,6 +164,14 @@ pub fn remove(store: &Store, id: &str) -> Result<Value> {
 }
 
 pub fn record(tx: &Connection, session: &Session, input: NotificationInput) -> Result<Value> {
+    record_kind(tx, session, input, false)
+}
+
+pub fn record_emergency(tx: &Connection, session: &Session, input: NotificationInput) -> Result<Value> {
+    record_kind(tx, session, input, true)
+}
+
+fn record_kind(tx: &Connection, session: &Session, input: NotificationInput, emergency: bool) -> Result<Value> {
     ensure!(
         !input.message.trim().is_empty()
             && input.message.chars().count() <= 1000
@@ -182,7 +190,11 @@ pub fn record(tx: &Connection, session: &Session, input: NotificationInput) -> R
         );
     }
     let id = uuid::Uuid::new_v4().to_string();
-    let payload = json!({"id":id,"session_id":session.id,"title":input.title.unwrap_or_else(||session.name.chars().take(120).collect()),"message":input.message,"session_name":session.name});
+    let mut payload = json!({"id":id,"session_id":session.id,"title":input.title.unwrap_or_else(||session.name.chars().take(120).collect()),"message":input.message,"session_name":session.name});
+    if emergency {
+        payload["emergency"] = json!(true);
+        payload["title"] = json!(format!("Emergency: {}", payload["title"].as_str().unwrap_or("Demodex")));
+    }
     let recipients = tx
         .prepare("SELECT id FROM push_devices ORDER BY id")?
         .query_map([], |r| r.get::<_, String>(0))?
@@ -213,7 +225,7 @@ pub fn record(tx: &Connection, session: &Session, input: NotificationInput) -> R
     }
     tx.execute_batch("RELEASE notification_record")?;
     Ok(
-        json!({"notification_id":id,"recorded_in_chat":true,"push_devices":recipients.len(),"push_state":if recipients.is_empty(){"disabled"}else{"queued"},"message":"Recorded in chat. Push is best effort; this does not confirm receipt or reading."}),
+        json!({"notification_id":id,"recorded_in_chat":true,"push_devices":recipients.len(),"push_state":if recipients.is_empty(){"disabled"}else{"queued"},"message":if emergency && recipients.is_empty(){"Emergency recorded in chat, but no push devices are enabled. The user has NOT been alerted by phone. Enable push on the phone in Server settings."}else{"Recorded in chat. Push is best effort; this does not confirm receipt or reading."}}),
     )
 }
 
@@ -263,8 +275,8 @@ fn payload(reg: &PushRegistration, notification: &Value, server_id: &str) -> Val
     }
     result.as_object_mut().unwrap().remove("session_name");
     if reg.hide_preview {
-        result["title"] = json!("Demodex");
-        result["message"] = json!("A session sent a notification.");
+        result["title"] = json!(if notification["emergency"] == true {"Demodex emergency"} else {"Demodex"});
+        result["message"] = json!(if notification["emergency"] == true {"A session needs your immediate attention."} else {"A session sent a notification."});
     }
     // UTF-8 worst case + routing fields can exceed one Web Push record. Truncate
     // previews only; the full original always remains in the chat event.
@@ -305,7 +317,7 @@ async fn deliver(store: &Store, ids: Vec<String>, notification: &Value) -> Resul
                     .header("Content-Encoding", "aes128gcm")
                     .header("Content-Type", "application/octet-stream")
                     .header("TTL", "86400")
-                    .header("Urgency", "normal")
+                    .header("Urgency", if notification["emergency"] == true { "high" } else { "normal" })
                     .body(body)
                     .send()
                     .await
@@ -524,6 +536,47 @@ mod tests {
             manager.store.events(&session.id, 0)?[3].message["params"]["state"],
             "disabled"
         );
+        Ok(())
+    }
+    #[test]
+    fn emergency_alerts_are_explicit_private_and_receipted() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("state.sqlite");
+        let store = Store::open(&path)?;
+        let session = store.create("Private session", "ws://localhost:1", &[], Some("thread"))?;
+        store.enable_context_reporting(&session.id)?;
+        let call = json!({"namespace":"demodex","tool":"emergency_call","threadId":"thread","callId":"emergency-once","arguments":{"message":"Private incident: stop the job.","title":"Action needed"}});
+        let first = store.context_tool(&session.id,"thread",&call)?;
+        assert_eq!(first["success"],true);
+        let result: Value = serde_json::from_str(first["contentItems"][0]["text"].as_str().unwrap())?;
+        assert_eq!(result["push_state"],"disabled");
+        assert!(result["message"].as_str().unwrap().contains("NOT been alerted"));
+        let event=store.events(&session.id,0)?.remove(0);
+        assert_eq!(event.message["params"]["emergency"],true);
+        assert_eq!(event.message["params"]["title"],"Emergency: Action needed");
+        let (mut reg,_,_)=registration()?;
+        reg.hide_preview=true;
+        let hidden=payload(&reg,&event.message["params"],"server");
+        assert_eq!(hidden["title"],"Demodex emergency");
+        assert_eq!(hidden["emergency"],true);
+        assert!(!hidden.to_string().contains("Private"));
+        register(&store,reg)?;
+        let mut next=call.clone(); next["callId"]=json!("emergency-enabled");
+        let enabled=store.context_tool(&session.id,"thread",&next)?;
+        let enabled: Value=serde_json::from_str(enabled["contentItems"][0]["text"].as_str().unwrap())?;
+        assert_eq!(enabled["push_state"],"queued");
+        assert_eq!(enabled["push_devices"],1);
+        assert_eq!(store.context_tool(&session.id,"thread",&call)?,first);
+        assert_eq!(store.events(&session.id,0)?.len(),2);
+        // A failed outbox write must not leave an emergency chat event behind.
+        store.lock()?.execute_batch("CREATE TRIGGER fail_emergency BEFORE INSERT ON notification_outbox BEGIN SELECT RAISE(FAIL,'fixture failure'); END;")?;
+        let mut failed=call.clone(); failed["callId"]=json!("failed-emergency");
+        assert_eq!(store.context_tool(&session.id,"thread",&failed)?["success"],false);
+        assert_eq!(store.events(&session.id,0)?.len(),2);
+        drop(store);
+        let store=Store::open(&path)?;
+        assert_eq!(store.context_tool(&session.id,"thread",&call)?,first);
+        assert_eq!(store.lock()?.query_row("SELECT count(*) FROM notification_outbox",[],|r|r.get::<_,i64>(0))?,2);
         Ok(())
     }
     #[test]

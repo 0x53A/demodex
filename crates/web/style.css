@@ -601,7 +601,8 @@ input[aria-invalid="true"] { border-color:#f2594e; }
 .session-view-switch button + button { margin-left:-1px; }
 .session-view-switch button[aria-pressed="true"] { background:#30352e;color:#ffbf69;border-color:#ff792f;position:relative;z-index:1; }
 .session-view-switch + .reorder-toggle { margin-left:0; }
-aside > .section-title { flex-wrap:wrap;gap:6px; }
+.session-sidebar-header { position:sticky;top:0;z-index:2;background:#141615;margin:-20px -20px 0;padding:20px 20px 12px;border-bottom:1px solid #3b403a; }
+.session-sidebar-header > .section-title { flex-wrap:wrap;gap:6px; }
 @media(max-width:700px) { .compact-controls .form-actions { bottom:-12px; } }
 @media(pointer:coarse) {
  :root .icon-button { width:42px;height:42px;min-width:42px;min-height:42px; }
@@ -637,3 +638,23 @@ aside > .section-title { flex-wrap:wrap;gap:6px; }
 .project-git.dirty { color:#ffb079; }
 .project-git.unavailable { color:#a3aa9e; }
 .project-git.failed { color:#f58c82; }
+
+/* Keep executor selection, directory and connection tools together. */
+.executor-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; }
+.compact-controls .executor-heading .checkbox { margin:0; flex:1; min-width:0; }
+.executor-heading button { margin:0; flex:none; }
+.executor-primary { color:#ffbf69; font:12px monospace; }
+.executor-entry .target-directory { margin:8px 0 0; }
+.executor-entry .field-action { margin-top:0; }
+.executor-connection { margin-top:10px; font-size:12px; }
+.executor-connection summary { cursor:pointer; color:#a3aa9e; overflow-wrap:anywhere; }
+.executor-connection-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+.executor-connection-actions button { margin:0; }
+.target-picker .form-fields { display:flex; flex-direction:column; gap:8px; }
+.executor-entry > fieldset { margin:0; }
+
+.bug-report-dot { color: #ff7a32; margin-left: .45em; font-size: .85em; }
+
+.session-search input { width: 100%; min-width: 0; }
+.session-search-footer { padding: 12px 0; }
+.session-search-footer small { display: block; margin-top: 8px; }

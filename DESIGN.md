@@ -417,7 +417,7 @@ original source. Preserve that choice as new messages arrive. Keep keyed message
 chunks in a stable list container so unrelated updates do not remount them.
 
 Never insert model HTML into the app document. Links are numbered inline buttons
-with icon, index and title, an exact-destination hover tooltip, plus a destination list at the end of each message.
+with icon, index and title separated by subtle vertical rules, an exact-destination hover tooltip, plus a destination list at the end of each message.
 An operator-opened HTTP(S) popup exposes the full parsed URL with its hostname
 bold before navigation. Reject malformed/control characters and embedded
 credentials; explain normalization and Punycode. Unsupported schemes remain
@@ -430,7 +430,19 @@ Raw view/copy preserves exact source. Rendering never fetches web previews.
 Completed assistant messages trigger bounded metadata checks against the executors
 attached at completion: 10 distinct file destinations, 3 seconds per file and
 10 seconds overall. Persist results and exact executor identities once, never
-recheck on browser reconnect, duplicate completion or daemon restart. File popups
+recheck on browser reconnect, duplicate completion or daemon restart. File links accept positive `:line` and `:line:column` suffixes on local paths;
+checks and reads use the underlying filename while the original destination keeps
+the location. Percent-encoded colons remain literal filename characters. File popups offer an explicit Refresh button to recheck the selected destination
+on its saved file host. Disable it during reads/checks or when the host route is
+unavailable. File controls depend on the daemon connection and host availability,
+not on a live conversation or the current session target list. Opening/reopening
+never triggers new checks. Show a clear host-unavailable reason; identity mismatches
+fail visibly before the saved path is accessed. Machine/account identity is checked
+on the same connection used for the file operation. A saved identity survives
+executor and daemon restarts. Legacy links without one offer Choose file host,
+with a target selector, destination and explanation before an explicit Use this host
+confirmation. This pairing is durable and cannot overwrite an existing identity.
+File popups
 show each executor, resolved path, creation/modification time, byte size, and
 Checked timestamp with a live relative age. Distinguish not found, timeout, error,
 and not checked. Unavailable/replaced executors are greyed out with an explanation.
@@ -546,8 +558,14 @@ disconnected, active session, unsupported permissions) remain separate from fiel
 validation. Use `ui::Input` for names, paths, required fields, URLs, ports and
 numeric limits, with stable accessible labels and error descriptions.
 
+The sidebar keeps its Sessions heading, Tree/List, Reorder, Sort and New Session
+controls in an opaque pinned header while the session list scrolls. Selection
+reveal accounts for the header so the selected row remains below it.
+
 Tree and List are explicit mutually exclusive buttons, with the selected state
-exposed to keyboard and assistive technology. `ui::IconButton` owns icon size,
+exposed to keyboard and assistive technology. Switching layouts reveals the selected
+session with the minimum sidebar scroll needed, opening its archived section if
+necessary, while preserving keyboard focus and conversation scroll. `ui::IconButton` owns icon size,
 accessible name, tooltip, and hover/pressed/focus feedback. Archive uses the red
 destructive variant; Restore and removing an unsaved executor selection are
 neutral. Layout-specific CSS positions buttons without redefining their states.
@@ -577,3 +595,61 @@ the exact last-request input count, not cumulative or predicted next-turn usage.
 This is explicitly an age estimate: Codex supplies no live cache-expiry flag.
 Unknown usage stays unknown; active work has no cold indicator. Opening a session
 or restarting the daemon never refreshes the usage timestamp.
+
+Server settings → New session defaults offers a Default sandbox selector that
+saves immediately per server. It preselects each newly opened New Session form,
+where the user can override it. Resuming sessions preserves the saved policy.
+
+## Agent bug reports and emergency calls
+
+Server settings includes a persistent, daemon-local Bug reports inbox. Load or
+refresh reports explicitly, newest first, with Show older reports for bounded
+pages. Each collapsed report shows its title and ID; expand for the original
+text, filing time, session title and captured project. Source session IDs remain
+available in details. Reports do not send notifications.
+
+Emergency calls record an Emergency-labelled chat notification and request
+high-priority push to enabled devices. Hidden previews retain a generic emergency
+label. The phone must enable push for the daemon; the tool explicitly reports
+when no devices are enabled. Do not claim phone receipt from provider acceptance.
+
+Session controls group each executor checkbox, primary designation and working-directory
+field in one compact frame. Unchecking removes its directory from the draft. Private
+SSH connection actions expand within the same frame. Sandbox permissions do not repeat
+the directory list; pending changes retain their explicit current-turn summary.
+
+Server settings shows an orange dot labelled New bug reports when the daemon has reports newer than this browser’s saved inbox watermark. Clear it only after loading the newest reports successfully, never merely opening settings. Persist the watermark per daemon and sync across tabs.
+
+## Tagged message buttons
+
+Assistant messages support `<button tag="apply-fix">Yes</button>` outside code.
+Use a descriptive tag and a plain-text label; quote attributes and XML-escape
+special characters. Only this narrow syntax is recognized, with no extra attributes
+or nested markup. The renderer creates its own button; arbitrary HTML stays inert.
+Clicking inserts `(button 'apply-fix' with label 'Yes' pressed)` at the composer's
+retained cursor, adds separating spaces as needed, preserves selected/existing text,
+and focuses the editable draft. Sending remains manual. Quotes and backslashes in
+tags/labels are escaped in the inserted text. Raw view/copy preserves exact source.
+
+Linked file Show previews PNG, JPEG, GIF and WebP from signature-identified bytes
+in the existing bounded image container. Decode failures remain visible with download
+available. File contents still require explicit Show/Download; SVG retains its
+allowlisted renderer.
+
+## VM removal
+
+Virtual machine cards show attached session counts, including saved and pending
+selections. Keep Stop · keep disk separate from Detach executors and Delete VM.
+Deletion is disabled until stopped with zero attachments; unknown attachment state
+also disables it. Confirm permanent disk deletion with the VM name. Detach confirms
+that connected sessions will disconnect and need explicit reconnection, while
+conversations and other executors remain. Backend guards are authoritative.
+
+Session search lives in the pinned sidebar header and initially filters only titles
+and working/project folders, case-insensitively. Keep Tree/List and sorting intact;
+disable reorder while filtered. Matching archives expand during search. Place the
+explicit Full text search button after results, including empty results. It searches
+saved conversation and tool text on the selected server, shows progress, supports
+Stop, and labels failures/stopped scans incomplete. Typing clears previous full-text
+results; connection changes discard search state. Search results are a snapshot;
+repeat Full text search to refresh them. Never resume sessions or start model work.

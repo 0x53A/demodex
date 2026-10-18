@@ -69,6 +69,27 @@ impl Orchestrator {
             .and_then(|r| r.host_target.clone())
     }
 
+    /// File routes do not resume conversations or start stopped runtimes/VMs.
+    pub(crate) async fn file_host(&self, id: &str) -> Result<crate::message_files::FileRoute> {
+        use crate::message_files::FileRoute;
+        if id == "host" {
+            return self.project_git_host().await.map(FileRoute::Executor).context("Host file access is disabled or its executor is unavailable");
+        }
+        if id.starts_with("ssh-") {
+            let config = self.manager.store.ssh_targets()?.into_iter().find(|(key,_)| key == id).context("Original SSH target was removed")?.1;
+            config.validate()?;
+            return Ok(FileRoute::Ssh(config));
+        }
+        if let Some(vm) = id.strip_prefix("vm-") {
+            return self.machines.lock().await.get(vm).and_then(|m|m.target.clone()).map(FileRoute::Executor).context("Original VM is not running");
+        }
+        if let Some(container) = id.strip_prefix("container-") {
+            return self.containers.lock().await.get(container).map(|c|FileRoute::Executor(c.target.clone())).context("Original container is not running");
+        }
+        let target = self.manager.store.registered_targets()?.into_iter().find(|t|t.id == id).context("Original file target was removed")?;
+        Ok(FileRoute::Executor(Target { id: target.id, url: target.url, cwd: target.cwd }))
+    }
+
     pub async fn browse_directories(&self, target: &str, path: &str) -> Result<Value> {
         crate::targets::validate_cwd(path)?;
         if target == "host" {
@@ -181,6 +202,7 @@ impl Orchestrator {
                     cwd: external.cwd.clone(),
                 }
             };
+            self.manager.store.record_file_executor(&target, &chosen.id)?;
             target.cwd = chosen.cwd.clone();
             targets.push(target);
         }
@@ -826,6 +848,7 @@ impl Orchestrator {
                 url: format!("ws://127.0.0.1:{port}"),
                 cwd: workspace.to_string_lossy().into_owned(),
             });
+            self.manager.store.record_file_executor(host_target.as_ref().unwrap(), "host")?;
             executor = Some(child);
             command = Command::new(codex);
             command
@@ -1387,6 +1410,77 @@ impl Orchestrator {
         Ok(())
     }
 
+    pub async fn detach_environment_executors(&self, id: &str) -> Result<()> {
+        let _lifecycle = self.jobs.lock().await;
+        let _settings = self.manager.connecting.lock().await;
+        let environment = self.manager.store.environment(id)?;
+        let users = self.manager.store.environment_users(id)?;
+        let mut live_users = Vec::new();
+        // Validate everyone before disconnecting anyone. No implicit interruption.
+        for session in &users {
+            ensure!(self.manager.store.pending(session)?.iter().all(|p|
+                !matches!(p.state.as_str(), "pending" | "responding" | "delivered")),
+                "Resolve pending decisions in every attached session first");
+            if let Ok(live) = self.manager.runtime(session).await {
+                Manager::require_idle(&live).await?;
+                ensure!(self.manager.queued(session).await?.as_array().is_some_and(Vec::is_empty),
+                    "Clear queued messages in every attached session first");
+                let controls = self.manager.control_snapshot(session).await?;
+                ensure!(controls["goalError"].is_null() && controls["goal"]["status"] != "active",
+                    "Pause goals in every attached session first; goal state must be available");
+                let background = self.manager.background_snapshot(session).await;
+                ensure!(background["error"].is_null() && background["data"].as_array().is_some_and(Vec::is_empty),
+                    "Stop background terminals in every attached session first");
+                live_users.push((session.clone(), live));
+            } else {
+                ensure!(environment.status == "stopped",
+                    "Stop the VM before detaching disconnected sessions whose activity cannot be verified");
+            }
+        }
+        // Unsubscribe explicitly so a surviving runtime cannot keep using this
+        // attachment. A failed RPC leaves persisted selections intact.
+        for (session, live) in &live_users {
+            Manager::require_idle(live).await?;
+            let reply = live.rpc.call("thread/unsubscribe", json!({"threadId":live.thread})).await?;
+            ensure!(matches!(reply["status"].as_str(), Some("unsubscribed" | "notSubscribed" | "notLoaded")),
+                "Codex did not confirm detaching session {session}");
+            self.manager.disconnect(session, "VM executor detached; reconnect explicitly").await?;
+        }
+        self.manager.store.detach_environment_selections(id)?;
+        self.manager.changed();
+        Ok(())
+    }
+
+    pub async fn delete_environment(&self, id: &str) -> Result<()> {
+        let jobs = self.jobs.lock().await;
+        let _settings = self.manager.connecting.lock().await;
+        let environment = self.manager.store.environment(id)?;
+        ensure!(self.manager.store.environment_users(id)?.is_empty(),
+            "Detach executors from every session before deleting this VM");
+        ensure!(environment.status == "stopped" && !self.machines.lock().await.contains_key(id)
+            && jobs.get(id).is_none_or(|job| job.is_finished()),
+            "Stop the VM before deleting it");
+        // The directory must be the UUID-owned overlay directory, never a caller path.
+        ensure!(uuid::Uuid::parse_str(id)?.to_string() == id, "Invalid VM ID");
+        let directory = self.directory(id);
+        match tokio::fs::symlink_metadata(&directory).await {
+            Ok(metadata) => {
+                ensure!(metadata.is_dir() && !metadata.file_type().is_symlink(), "VM directory is not a regular directory");
+                let parent = directory.parent().context("Missing VM parent")?;
+                ensure!(tokio::fs::canonicalize(parent).await? == tokio::fs::canonicalize(&self.root).await?.join("environments"),
+                    "VM directory parent must not be a symlink");
+                // Keep the database row on failure; a later explicit request can
+                // finish partial file cleanup. Never touch the shared base image.
+                tokio::fs::remove_dir_all(&directory).await.context("Could not delete VM files; VM record retained")?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+        }
+        self.manager.store.delete_environment_record(id)?;
+        self.manager.changed();
+        Ok(())
+    }
+
     pub async fn stop(&self, id: &str) -> Result<()> {
         self.manager.store.environment(id)?;
         // Serialize lifecycle requests so a concurrent start cannot overtake shutdown.
@@ -1579,8 +1673,10 @@ impl Orchestrator {
             return self.manager.connect_locked(id, settings).await;
         }
         self.manager.store.retarget(id, &endpoint, &targets)?;
-        // Resuming does not update Codex's selected environments until turn/start.
-        if session.thread_id.is_some() {
+        // Unchanged executors need no next-turn application. Preserve any
+        // existing pending flag, but do not create one just for reconnecting.
+        // Replaced identities/endpoints or directories still require turn/start.
+        if session.thread_id.is_some() && session.targets != targets {
             self.manager
                 .store
                 .save_target_selection(id, &selection, &targets)?;

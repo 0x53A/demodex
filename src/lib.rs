@@ -1,3 +1,4 @@
+mod bug_reports;
 mod background;
 mod project_git;
 mod prompts;
@@ -20,6 +21,7 @@ mod takeover;
 mod uploads;
 mod usage;
 mod vm;
+mod vm_lifecycle;
 mod wormhole;
 
 use manager::Manager;

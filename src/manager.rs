@@ -376,6 +376,11 @@ impl Manager {
                 .unwrap_or_else(|error| crate::session_context::response(Err(error)));
             drop(sessions);
             self.session_changed(id, true);
+            if message["params"]["namespace"] == "demodex"
+                && message["params"]["tool"] == "bug_report" && result["success"] == true
+            {
+                let _ = self.notices.send(demodex_protocol::Notice::Runtime);
+            }
             live.rpc
                 .send(json!({"id":message["id"],"result":result}))
                 .await?;

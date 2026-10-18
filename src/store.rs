@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value,json};
-use std::{path::Path, sync::Mutex};
+use std::{path::Path, sync::{Mutex, Arc}};
 
 pub use demodex_protocol::Target;
 
@@ -15,7 +15,17 @@ pub use demodex_protocol::Event;
 
 pub use demodex_protocol::Pending;
 
-pub struct Store(Mutex<Connection>);
+// One reusable immutable projection avoids replaying all durable events for every
+// older page. Eviction never invalidates cursors: they carry a fixed high-water mark.
+struct ConversationProjection {
+    id: String,
+    through: i64,
+    event_count: u64,
+    items: Vec<Value>,
+    sizes: Vec<usize>,
+}
+pub struct Store(Mutex<Connection>, Mutex<Option<Arc<ConversationProjection>>>);
+const CONVERSATION_PAGE_BYTES: usize = 10 * 1024 * 1024;
 
 // Keep manual ordering inside the same target/project group as the overview.
 fn session_group(session: &Session) -> (String, String) {
@@ -79,6 +89,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS session_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id), selection TEXT NOT NULL, pending INTEGER NOT NULL DEFAULT 0);
              CREATE TABLE IF NOT EXISTS staged_session_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id), selection TEXT NOT NULL, targets TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS uploaded_images (session_id TEXT NOT NULL REFERENCES sessions(id), path TEXT NOT NULL, target TEXT NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(session_id,path));
+             CREATE TABLE IF NOT EXISTS file_executor_hosts (executor TEXT PRIMARY KEY, endpoint TEXT NOT NULL, target TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS message_files (session_id TEXT NOT NULL REFERENCES sessions(id), item_id TEXT NOT NULL, targets TEXT NOT NULL, files TEXT NOT NULL, PRIMARY KEY(session_id,item_id));
              CREATE TABLE IF NOT EXISTS events (
                seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -125,6 +136,7 @@ impl Store {
              UPDATE pending SET state='unavailable' WHERE state IN ('pending','responding','delivered');",
         )?;
         crate::notifications::initialize(&connection)?;
+        crate::bug_reports::initialize(&connection)?;
         connection.execute("INSERT INTO session_order(session_id,position) SELECT id, (SELECT COALESCE(MAX(position),0) FROM session_order) + ROW_NUMBER() OVER (ORDER BY created,id) FROM sessions WHERE id NOT IN (SELECT session_id FROM session_order)", [])?;
         let has_engine = connection.prepare("PRAGMA table_info(containers)")?
             .query_map([], |row| row.get::<_, String>(1))?
@@ -165,7 +177,7 @@ impl Store {
                 )?;
             }
         }
-        let store = Self(Mutex::new(connection));
+        let store = Self(Mutex::new(connection), Mutex::new(None));
         // Interrupted checks are durable unknown outcomes, never replayed.
         let interrupted = store.lock()?.prepare("SELECT session_id,item_id,files FROM message_files WHERE files LIKE '%\"pending\"%'")?
             .query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?
@@ -649,6 +661,14 @@ impl Store {
                     session.presentation.context = Some(context);
                     Ok(serde_json::to_value(&session.presentation)?)
                 }
+                "bug_report" => {
+                    let input = serde_json::from_value(request["arguments"].clone())?;
+                    crate::bug_reports::record(&tx, &session, input)
+                }
+                "emergency_call" => {
+                    let input = serde_json::from_value(request["arguments"].clone())?;
+                    crate::notifications::record_emergency(&tx, &session, input)
+                }
                 "notify" => {
                     let input: crate::notifications::NotificationInput = serde_json::from_value(request["arguments"].clone())?;
                     crate::notifications::record(&tx, &session, input)
@@ -730,11 +750,55 @@ impl Store {
         tx.commit()?;
         Ok(claimed)
     }
+    /// Only orchestration may establish provenance; never infer it from display IDs.
+    pub fn record_file_executor(&self, executor: &Target, target: &str) -> Result<()> {
+        self.lock()?.execute("INSERT OR IGNORE INTO file_executor_hosts VALUES(?1,?2,?3)", params![executor.id,executor.url,target])?;
+        anyhow::ensure!(self.file_executor_host(executor)?.as_deref() == Some(target), "Executor identity already belongs to another file host");
+        Ok(())
+    }
+    pub fn file_executor_host(&self, executor: &Target) -> Result<Option<String>> {
+        Ok(self.lock()?.query_row("SELECT target FROM file_executor_hosts WHERE executor=?1 AND endpoint=?2", params![executor.id,executor.url], |r|r.get(0)).optional()?)
+    }
+
     pub fn message_files(&self, id: &str, item: &str) -> Result<Option<(Vec<Target>, Vec<demodex_protocol::MessageFile>)>> {
         let db = self.lock()?;
         let row: Option<(String,String)> = db.query_row("SELECT targets,files FROM message_files WHERE session_id=?1 AND item_id=?2", params![id,item], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
         row.map(|(targets,files)| Ok((serde_json::from_str(&targets)?,serde_json::from_str(&files)?))).transpose()
     }
+    pub fn bind_message_file_host(&self, id: &str, item: &str, file: &demodex_protocol::MessageFile, executor: &str) -> Result<()> {
+        let mut db = self.lock()?;
+        let tx = db.transaction()?;
+        let raw: String = tx.query_row("SELECT files FROM message_files WHERE session_id=?1 AND item_id=?2", params![id,item], |r|r.get(0))?;
+        let mut files: Vec<demodex_protocol::MessageFile> = serde_json::from_str(&raw)?;
+        let saved = files.iter_mut().find(|f|f.destination == file.destination).and_then(|f|f.checks.iter_mut().find(|c|c.executor == executor)).context("No recorded file executor")?;
+        anyhow::ensure!(saved.host.is_none(), "File host was already paired; refusing to replace its identity");
+        *saved = file.checks.iter().find(|c|c.executor == executor).context("Missing new file check")?.clone();
+        tx.execute("UPDATE message_files SET files=?3 WHERE session_id=?1 AND item_id=?2", params![id,item,serde_json::to_string(&files)?])?;
+        let message=serde_json::json!({"method":"demodex/messageFiles","params":{"itemId":item,"files":files}});
+        tx.execute("INSERT INTO events(session_id,message) VALUES(?1,?2)", params![id,serde_json::to_string(&message)?])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn refresh_message_file(&self, id: &str, item: &str, file: &demodex_protocol::MessageFile) -> Result<()> {
+        let mut db = self.lock()?;
+        let tx = db.transaction()?;
+        let raw: String = tx.query_row("SELECT files FROM message_files WHERE session_id=?1 AND item_id=?2", params![id,item], |r| r.get(0))?;
+        let mut files: Vec<demodex_protocol::MessageFile> = serde_json::from_str(&raw)?;
+        let saved = files.iter_mut().find(|f| f.destination == file.destination).context("No recorded file link")?;
+        for old in &saved.checks {
+            if old.host.is_some() {
+                anyhow::ensure!(file.checks.iter().find(|c|c.executor == old.executor).is_some_and(|c|c.host == old.host), "File host changed during refresh; refresh again explicitly");
+            }
+        }
+        *saved = file.clone();
+        tx.execute("UPDATE message_files SET files=?3 WHERE session_id=?1 AND item_id=?2", params![id,item,serde_json::to_string(&files)?])?;
+        let message=serde_json::json!({"method":"demodex/messageFiles","params":{"itemId":item,"files":files}});
+        tx.execute("INSERT INTO events(session_id,message) VALUES(?1,?2)", params![id,serde_json::to_string(&message)?])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn finish_message_files(&self, id: &str, item: &str, files: &[demodex_protocol::MessageFile]) -> Result<()> {
         let mut db = self.lock()?;
         let tx = db.transaction()?;
@@ -768,21 +832,61 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn conversation(&self, id: &str) -> Result<demodex_protocol::ConversationSnapshot> {
-        // Capture a finite high-water mark; later events are fetched by cursor.
+        self.conversation_page(id, None)
+    }
+
+    pub fn conversation_page(&self, id: &str, older: Option<&demodex_protocol::ConversationPageCursor>) -> Result<demodex_protocol::ConversationSnapshot> {
+        self.conversation_page_bytes(id, older, CONVERSATION_PAGE_BYTES)
+    }
+
+    fn conversation_page_bytes(&self, id: &str, older: Option<&demodex_protocol::ConversationPageCursor>, budget: usize) -> Result<demodex_protocol::ConversationSnapshot> {
         let end: i64 = self.lock()?.query_row("SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=?1", [id], |r| r.get(0))?;
-        let mut transcript = demodex_protocol::transcript::Transcript::default();
-        let mut count = 0usize;
-        let mut after = 0;
-        while after < end {
-            let batch: Vec<_> = self.events(id, after)?.into_iter().take_while(|event| event.seq <= end).collect();
-            if batch.is_empty() { break; }
-            after = batch.last().unwrap().seq;
-            count += batch.len();
-            transcript.append(&batch.into_iter().map(|event| json!(event)).collect::<Vec<_>>());
+        let through = older.map_or(end, |cursor| cursor.through);
+        ensure!((0..=end).contains(&through), "Invalid conversation cursor");
+        // Serialize projection builds separately from the database lock. State
+        // reads and event ingestion remain available while history is projected.
+        let mut cached = self.1.lock().map_err(|_|anyhow::anyhow!("conversation cache poisoned"))?;
+        let projection = if let Some(projection) = cached.as_ref().filter(|p|p.id == id && p.through == through) {
+            projection.clone()
+        } else {
+            let mut transcript = demodex_protocol::transcript::Transcript::for_projection();
+            let mut count = 0u64;
+            let mut after = 0;
+            while after < through {
+                let batch: Vec<_> = self.events(id, after)?.into_iter().take_while(|event| event.seq <= through).collect();
+                if batch.is_empty() { break; }
+                after = batch.last().unwrap().seq;
+                count += batch.len() as u64;
+                transcript.append_records(batch.iter().map(|event| (Some(event.seq), event.at.as_str(), &event.message)));
+            }
+            let items: Vec<_> = transcript.chunks.iter().flat_map(|chunk| chunk.iter().map(|item| item.as_ref().clone())).collect();
+            let sizes = items.iter().map(|item|serde_json::to_vec(item).map(|bytes|bytes.len() + 1)).collect::<std::result::Result<Vec<_>, _>>()?;
+            let projection = Arc::new(ConversationProjection { id:id.into(), through, event_count:count, items, sizes });
+            // Do not retain arbitrarily large histories between requests.
+            *cached = (projection.sizes.iter().sum::<usize>() <= 256 * 1024 * 1024).then(||projection.clone());
+            projection
+        };
+        drop(cached);
+        let before = older.map_or(projection.items.len() as u64, |cursor|cursor.before);
+        ensure!(before <= projection.items.len() as u64, "Invalid conversation item cursor");
+        let before = before as usize;
+        let mut start = before;
+        let mut bytes = 1024usize; // Reserve space for page metadata.
+        while start > 0 {
+            let size = projection.sizes[start - 1];
+            // An indivisible oversized item gets its own page; never truncate it
+            // or return an empty page with a cursor that cannot make progress.
+            if start < before && bytes.saturating_add(size) > budget { break; }
+            bytes = bytes.saturating_add(size);
+            start -= 1;
         }
-        let items: Vec<_> = transcript.chunks.iter().flat_map(|chunk| chunk.iter().map(|item| item.as_ref().clone())).collect();
-        Ok(demodex_protocol::ConversationSnapshot { items, cursor:end, event_count:count as u64 })
+        Ok(demodex_protocol::ConversationSnapshot {
+            items:projection.items[start..before].to_vec(), cursor:through,
+            event_count:projection.event_count,
+            older:(start > 0).then_some(demodex_protocol::ConversationPageCursor { through, before:start as u64 }),
+        })
     }
 
     pub fn events(&self, id: &str, after: i64) -> Result<Vec<Event>> {
@@ -867,6 +971,14 @@ impl crate::store::Store {
         self.0.lock().unwrap().execute("INSERT INTO prompt_settings VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET value=excluded.value", params![id, value.to_string()])?;
         Ok(())
     }
+    /// New Session form preference; never changes existing session policies.
+    pub(crate) fn default_sandbox(&self) -> Result<Option<Sandbox>> {
+        serde_json::from_value(self.prompt_record("default_sandbox")?)
+            .context("Invalid saved default sandbox")
+    }
+    pub(crate) fn set_default_sandbox(&self, sandbox: Option<Sandbox>) -> Result<()> {
+        self.put_prompt_record("default_sandbox", &serde_json::to_value(sandbox)?)
+    }
     pub(crate) fn prompt_settings(&self) -> Result<(u64, demodex_protocol::PromptSettings)> {
         let value = self.prompt_record("server")?;
         Ok((value["revision"].as_u64().unwrap_or(0), if value.is_null() { demodex_protocol::PromptSettings::default() } else { serde_json::from_value(value["settings"].clone())? }))
@@ -891,6 +1003,26 @@ impl Store { pub(crate) fn remove_legacy_prompt(&self,id:&str)->Result<()> { sel
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn default_sandbox_persists_without_changing_sessions_and_rejects_corruption() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("sandbox.db");
+        let store = Store::open(&path)?;
+        assert_eq!(store.default_sandbox()?, None);
+        let session = store.create("Existing", "ws://localhost:1", &[], Some("sandbox"))?;
+        store.sandbox(&session.id, Some(Sandbox::ReadOnly))?;
+        store.set_default_sandbox(Some(Sandbox::DangerFullAccess))?;
+        drop(store);
+        let store = Store::open(&path)?;
+        assert_eq!(store.default_sandbox()?, Some(Sandbox::DangerFullAccess));
+        assert_eq!(store.get(&session.id)?.sandbox, Some(Sandbox::ReadOnly));
+        store.set_default_sandbox(None)?;
+        assert_eq!(store.default_sandbox()?, None);
+        store.put_prompt_record("default_sandbox", &json!("invalid"))?;
+        assert!(store.default_sandbox().is_err());
+        Ok(())
+    }
+
     #[test]
     fn last_user_message_uses_only_accepted_submissions_and_survives_upgrade() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -974,6 +1106,49 @@ mod tests {
         assert_eq!(*restored.chunks[0][0], fresh.items[0]);
         assert_eq!(fresh.items[0]["_demodexAt"], at);
         assert_eq!(store.events(&id, snapshot.cursor - 1)?[0].message["method"], "future/unknown");
+        Ok(())
+    }
+
+    #[test]
+    fn conversation_pages_are_stable_complete_and_preserve_live_updates() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        let id = store.create("paged", "ws://localhost:1", &[], None)?.id;
+        for n in 0..8 {
+            store.event(&id, &json!({"method":"item/completed","params":{"item":{"id":format!("item-{n}"),"type":"agentMessage","text":"x".repeat(400)}}}))?;
+        }
+        let first = store.conversation_page_bytes(&id, None, 2300)?;
+        assert!(first.older.is_some());
+        assert!(serde_json::to_vec(&first)?.len() <= 2300);
+        assert_eq!(first.items.last().unwrap()["id"], "item-7");
+        let mut view = demodex_protocol::transcript::Transcript::restore(&first.items, first.cursor);
+        store.event(&id, &json!({"method":"item/completed","params":{"item":{"id":"item-0","type":"agentMessage","text":"newer completion"}}}))?;
+        let fresh = store.conversation_page(&id, None)?; // Evict the old projection.
+        view.append(&store.events(&id, first.cursor)?.into_iter().map(|e|json!(e)).collect::<Vec<_>>());
+        let live_cursor = view.cursor();
+        let mut older = first.older;
+        let mut all = first.items;
+        while let Some(cursor) = older {
+            let page = store.conversation_page_bytes(&id, Some(&cursor), 2300)?;
+            assert_eq!(page.cursor, first.cursor);
+            assert_eq!(page.event_count, 8);
+            assert!(!page.items.is_empty());
+            view.prepend(&page.items);
+            let mut items = page.items;
+            items.extend(all);
+            all = items;
+            older = page.older;
+        }
+        assert_eq!(all.len(), 8);
+        for (n, item) in all.iter().enumerate() { assert_eq!(item["id"], format!("item-{n}")); }
+        assert_eq!(view.cursor(), live_cursor);
+        assert_eq!(view.chunks[0][0]["text"], "newer completion");
+        assert_eq!(view.chunks.iter().map(|c|c.len()).sum::<usize>(), 8);
+        assert_eq!(fresh.items[0]["text"], "newer completion");
+        let oversized = store.conversation_page_bytes(&id, None, 1)?;
+        assert_eq!(oversized.items.len(), 1);
+        assert!(oversized.older.is_some());
+        let invalid = demodex_protocol::ConversationPageCursor { through:live_cursor, before:1000 };
+        assert!(store.conversation_page(&id, Some(&invalid)).is_err());
         Ok(())
     }
 

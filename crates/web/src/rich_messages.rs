@@ -18,6 +18,8 @@ pub struct Props {
     pub item_id: String,
     #[prop_or_default]
     pub file_revision: u64,
+    #[prop_or_default]
+    pub buttons: bool,
 }
 
 #[function_component(Message)]
@@ -38,7 +40,7 @@ pub fn message(props: &Props) -> Html {
     let open = { let selected = selected.clone(); Callback::from(move |link| selected.set(Some(link))) };
     let close = { let selected = selected.clone(); Callback::from(move |_| selected.set(None)) };
     let links = use_memo(source.clone(), |source| demodex_protocol::links::extract(source));
-    let tree = use_memo((source.clone(), open.clone()), |(source,open)| render_with_links(source, open));
+    let tree = use_memo((source.clone(), open.clone(), props.buttons), |(source,open,buttons)| render_with_buttons(source, open, *buttons));
     let toggle = {
         let formatted = formatted.clone();
         Callback::from(move |event: web_sys::Event| {
@@ -68,7 +70,7 @@ pub fn message(props: &Props) -> Html {
         {if tree.1 {html!{<div class="message-format-controls"><label><input type="checkbox" checked={*formatted} onchange={toggle}/>{"Format Markdown"}</label><button type="button" onclick={copy}>{if *copied {"Copied raw"} else {"Copy raw"}}</button>{if *copy_error {html!{<span role="status">{"Copy failed"}</span>}}else{Html::default()}}</div>}}else{Html::default()}}
         {if *formatted && !links.is_empty() {html!{<div class="message-destinations">{for links.iter().enumerate().map(|(index,link)| {
             let chosen=link.clone(); let open=open.clone();
-            html!{<div class="message-destination"><button type="button" class="message-link" onclick={Callback::from(move |_|open.emit(chosen.clone()))}>{format!("{} {} {}",crate::links::icon(&link.kind),index+1,link.title)}</button><div class="link-destination">{&link.destination}</div></div>}
+            html!{<div class="message-destination"><button type="button" class="message-link" onclick={Callback::from(move |_|open.emit(chosen.clone()))}><span class="message-link-icon" aria-hidden="true">{crate::links::icon(&link.kind)}</span><span class="message-link-index">{index+1}</span><span class="message-link-label">{&link.title}</span></button><div class="link-destination">{&link.destination}</div></div>}
         })}</div>}}else{Html::default()}}
         {if let Some(link)=(*selected).clone() {html!{<crate::links::LinkPopup {link} item={props.item_id.clone()} revision={props.file_revision} onclose={close}/>}}else{Html::default()}}
     </div>}
@@ -181,22 +183,33 @@ fn math_delimiters(source: &str) -> String {
 
 #[cfg(test)]
 fn render(source: &str) -> (Html, bool) {
-    render_with_links(source, &Callback::noop())
+    render_with_buttons(source, &Callback::noop(), false)
 }
 
-fn render_with_links(source: &str, open: &Callback<demodex_protocol::MessageLink>) -> (Html, bool) {
+fn render_with_buttons(source: &str, open: &Callback<demodex_protocol::MessageLink>, buttons: bool) -> (Html, bool) {
     let normalized = math_delimiters(source);
-    let mut events = Parser::new_ext(
+    let parser = Parser::new_ext(
         &normalized,
         Options::ENABLE_TABLES
             | Options::ENABLE_STRIKETHROUGH
             | Options::ENABLE_TASKLISTS
             | Options::ENABLE_MATH,
-    )
-    .peekable();
+    );
+    let mut raw = parser.into_offset_iter().peekable();
+    let mut prepared = Vec::new();
+    while let Some((event, range)) = raw.next() {
+        if buttons && matches!(event, Event::InlineHtml(_))
+            && let Some((length, _, _)) = parse_button(&normalized[range.start..])
+        {
+            let end = range.start + length;
+            while raw.peek().is_some_and(|(_, r)| r.start >= range.end && r.end <= end) { raw.next(); }
+            prepared.push(Event::Html(normalized[range.start..end].to_owned().into()));
+        } else { prepared.push(event); }
+    }
+    let mut events = prepared.into_iter().peekable();
     let mut changed = false;
     let links = demodex_protocol::links::extract(source);
-    let nodes = nodes(&mut events, &mut changed, false, &[], 0, &links, open);
+    let nodes = nodes(&mut events, &mut changed, false, &[], 0, &links, open, buttons);
     (html! {<>{for nodes}</>}, changed)
 }
 
@@ -208,6 +221,7 @@ fn nodes<'a>(
     depth: usize,
     links: &[demodex_protocol::MessageLink],
     open: &Callback<demodex_protocol::MessageLink>,
+    buttons: bool,
 ) -> Vec<Html> {
     let mut result = Vec::new();
     let mut column = 0;
@@ -269,7 +283,7 @@ fn nodes<'a>(
                         table_alignments
                     },
                     depth + 1,
-                    links, open,
+                    links, open, buttons && !matches!(tag, Tag::Link { .. } | Tag::Image { .. }),
                 );
                 let child = match tag {
                     Tag::Paragraph => element("p", children),
@@ -310,7 +324,7 @@ fn nodes<'a>(
                     Tag::Link { dest_url, .. } => {
                         if let Some((index, link)) = links.iter().enumerate().find(|(_,link)| link.destination == dest_url.as_ref()) {
                             let chosen=link.clone(); let open=open.clone();
-                            html!{<button type="button" class="message-link markdown-link" title={link.destination.clone()} onclick={Callback::from(move |_|open.emit(chosen.clone()))}><span aria-hidden="true">{format!("{} {} ",crate::links::icon(&link.kind),index+1)}</span>{for children}</button>}
+                            html!{<button type="button" class="message-link markdown-link" title={link.destination.clone()} onclick={Callback::from(move |_|open.emit(chosen.clone()))}><span class="message-link-icon" aria-hidden="true">{crate::links::icon(&link.kind)}</span><span class="message-link-index" aria-hidden="true">{index+1}</span><span class="message-link-label">{for children}</span></button>}
                         } else { html!{<span class="markdown-link">{for children}</span>} }
                     },
                     Tag::Image { dest_url, .. } => {
@@ -320,6 +334,19 @@ fn nodes<'a>(
                     _ => html! {<>{for children}</>},
                 };
                 result.push(child);
+            }
+            Event::Html(text) if buttons => {
+                let mut rest = text.as_ref();
+                loop {
+                    let trimmed = rest.trim_start();
+                    if let Some((length, tag, label)) = parse_button(trimmed) {
+                        result.push(html!{<>{rest[..rest.len() - trimmed.len()].to_owned()}</>});
+                        *changed = true;
+                        result.push(html!{<MessageButton {tag} {label}/>});
+                        rest = &trimmed[length..];
+                    } else { break; }
+                }
+                result.push(html!{<>{rest.to_owned()}</>});
             }
             Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
                 result.push(html! {<>{text.to_string()}</>})
@@ -353,6 +380,62 @@ fn nodes<'a>(
         }
     }
     result
+}
+
+
+/// A callback scoped to the currently displayed conversation, never a send action.
+#[derive(Clone, PartialEq)]
+pub struct ButtonContext(pub Callback<String>);
+
+#[derive(Properties, PartialEq)]
+struct ButtonProps {
+    tag: String,
+    label: String,
+}
+
+#[function_component(MessageButton)]
+fn message_button(props: &ButtonProps) -> Html {
+    let context = use_context::<ButtonContext>();
+    let disabled = context.is_none();
+    let quote = |s: &str| s.replace('\\', "\\\\").replace('\'', "\\'");
+    let insertion = format!("(button '{}' with label '{}' pressed)", quote(&props.tag), quote(&props.label));
+    let title = format!("Insert into message: {insertion}");
+    let onclick = Callback::from(move |_| {
+        if let Some(context) = &context { context.0.emit(insertion.clone()); }
+    });
+    html! {<button type="button" class="message-action" {disabled} {title} {onclick}>{&props.label}</button>}
+}
+
+// Deliberately small syntax: one quoted tag attribute and a plain-text label.
+// XML parsing decodes entities without ever installing supplied HTML in the DOM.
+fn parse_button(source: &str) -> Option<(usize, String, String)> {
+    if !source.starts_with("<button ") { return None; }
+    let end = source.find("</button>")? + "</button>".len();
+    if end > 4096 { return None; }
+    let doc = roxmltree::Document::parse(&source[..end]).ok()?;
+    let root = doc.root_element();
+    if root.tag_name().name() != "button" || root.tag_name().namespace().is_some()
+        || root.attributes().len() != 1 || root.children().any(|n| !n.is_text()) { return None; }
+    let tag = root.attribute("tag")?.trim();
+    let label = root.text()?.trim();
+    if tag.is_empty() || label.is_empty() || tag.chars().chain(label.chars()).any(char::is_control) { return None; }
+    Some((end, tag.to_owned(), label.to_owned()))
+}
+
+/// DOM selection offsets count UTF-16 units; Rust strings count UTF-8 bytes.
+/// Insert before a selection, preserving all existing draft text.
+pub fn insert_button(draft: &str, cursor: u32, text: &str) -> (String, u32) {
+    let mut units = 0;
+    let index = draft.char_indices().find_map(|(index, ch)| {
+        if units + ch.len_utf16() as u32 > cursor { Some(index) }
+        else { units += ch.len_utf16() as u32; None }
+    }).unwrap_or(draft.len());
+    let (before, after) = draft.split_at(index);
+    let left = if before.ends_with(|c: char| !c.is_whitespace()) { " " } else { "" };
+    let right = if after.starts_with(|c: char| !c.is_whitespace()) { " " } else { "" };
+    let inserted = format!("{left}{text}{right}");
+    let cursor = (before.encode_utf16().count() + inserted.encode_utf16().count()) as u32;
+    (format!("{before}{inserted}{after}"), cursor)
 }
 
 fn math(source: &str, display: bool) -> Html {
@@ -497,6 +580,35 @@ mod tests {
             _ => {}
         }
     }
+    #[test]
+    fn tagged_buttons_are_strict_and_decode_entities() {
+        let (_, tag, label) = parse_button("<button tag='apply&amp;check'>Yes &amp; go</button>").unwrap();
+        assert_eq!((tag.as_str(), label.as_str()), ("apply&check", "Yes & go"));
+        for source in ["<button>Yes</button>", "<button tag=''>Yes</button>",
+            "<button tag='x' onclick='evil()'>Yes</button>", "<button tag='x'><b>Yes</b></button>",
+            "<button tag='x'>", "<button tag='x'> </button>", "<button tag='x' tag='y'>Yes</button>"] {
+            assert!(parse_button(source).is_none(), "{source}");
+        }
+        let source = "<button tag='x'>Yes</button>";
+        assert!(!render_with_buttons(source, &Callback::noop(), false).1);
+        assert!(render_with_buttons(source, &Callback::noop(), true).1);
+        let (tree, _) = render_with_buttons(&format!("{source}\n\nFollowing paragraph"), &Callback::noop(), true);
+        assert!(image_label(&tree).contains("Following paragraph"));
+        for source in ["`<button tag='x'>Yes</button>`", "```html\n<button tag='x'>Yes</button>\n```"] {
+            let (tree, _) = render_with_buttons(source, &Callback::noop(), true);
+            assert!(image_label(&tree).contains("<button tag='x'>Yes</button>"));
+        }
+    }
+
+    #[test]
+    fn button_insertion_preserves_unicode_drafts_and_spacing() {
+        assert_eq!(insert_button("", 0, "(pressed)"), ("(pressed)".into(), 9));
+        assert_eq!(insert_button("😀tail", 2, "(pressed)"), ("😀 (pressed) tail".into(), 13));
+        assert_eq!(insert_button("a b", 2, "(pressed)"), ("a (pressed) b".into(), 12));
+        assert_eq!(insert_button("a\nb", 2, "(pressed)"), ("a\n(pressed) b".into(), 12));
+        assert_eq!(insert_button("end", 99, "(pressed)"), ("end (pressed)".into(), 13));
+    }
+
     #[test]
     fn all_links_and_images_are_inert_regardless_of_destination() {
         let source = "[Web](https://example.org) [Mail](mailto:person@example.org) [Local](/path) <https://example.org> ![Picture](https://example.org/a.png) <img src=\"https://example.org/raw.png\">";

@@ -210,7 +210,10 @@ impl Client {
     }
 
     pub async fn call(&self, operation: Operation, request_id: String) -> Result<Value> {
-        let response = self.api.ask(|reply| Api::Call { request_id, operation, reply }, Some(Duration::from_secs(60))).await
+        // The first conversation page projects durable history on the daemon;
+        // large cold histories can exceed the ordinary command deadline.
+        let timeout = if matches!(operation, Operation::Conversation { .. } | Operation::SearchConversation { .. }) { 180 } else { 60 };
+        let response = self.api.ask(|reply| Api::Call { request_id, operation, reply }, Some(Duration::from_secs(timeout))).await
             .context("Connection interrupted; the command may have been accepted. It will not be replayed")?
             .map_err(anyhow::Error::msg)?;
         Ok(response.into_value())

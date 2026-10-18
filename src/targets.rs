@@ -362,6 +362,49 @@ mod tests {
     use tokio::sync::Mutex;
 
     #[tokio::test]
+    async fn unchanged_reconnect_preserves_pending_state() -> Result<()> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("ws://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                while let Some(Ok(Message::Text(raw))) = ws.next().await {
+                    let req: Value = serde_json::from_str(&raw).unwrap();
+                    if req.get("id").is_none() { continue; }
+                    let result = match req["method"].as_str().unwrap() {
+                        "initialize" => json!({}),
+                        "thread/resume" => json!({"thread":{"id":"thread","turns":[{"id":"active","status":"inProgress","items":[]}]}}),
+                        "turn/steer" => json!({"turnId":"active"}),
+                        other => panic!("unexpected {other}"),
+                    };
+                    ws.send(Message::Text(json!({"id":req["id"],"result":result}).to_string().into())).await.unwrap();
+                }
+            }
+        });
+        let root = tempfile::tempdir()?;
+        let store = Store::open(&root.path().join("db"))?;
+        let session = store.create("Unchanged", &endpoint, &[], None)?;
+        store.thread(&session.id, "thread")?;
+        store.ensure_target_selection(&session.id)?;
+        let manager = Manager::new(store);
+        let orchestrator = Orchestrator::new(manager.clone(), root.path().into(), None, None, None);
+        orchestrator.connect_session(&session.id).await?;
+        assert!(!manager.store.targets_pending(&session.id)?);
+        manager.prompt(&session.id, "Keep working").await?;
+        assert!(!manager.store.targets_pending(&session.id)?);
+        manager.disconnect(&session.id, "fixture reconnect").await?;
+        // An already-pending idle selection must not be cleared by reconnect.
+        manager.store.save_target_selection(&session.id, &[], &[])?;
+        orchestrator.connect_session(&session.id).await?;
+        assert!(manager.store.targets_pending(&session.id)?);
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn reconnect_preserves_staged_and_active_targets_until_new_turn() -> Result<()> {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
@@ -402,6 +445,8 @@ mod tests {
         let manager = Manager::new(store);
         let orchestrator = Orchestrator::new(manager.clone(), root.path().into(), None, None, None);
         orchestrator.connect_session(&session.id).await?;
+        // External target resolution assigns a fresh executor identity.
+        assert!(manager.store.targets_pending(&session.id)?);
         let effective = manager.store.get(&session.id)?.targets;
         manager.store.stage_target_selection(&session.id, &selection, &staged)?;
         manager.disconnect(&session.id, "fixture connection lost").await?;

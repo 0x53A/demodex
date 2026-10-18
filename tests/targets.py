@@ -124,6 +124,9 @@ with tempfile.TemporaryDirectory(prefix='demodex-targets-') as temporary:
                 dialog.get_by_label('Second · external',exact=True).check()
                 dialog.get_by_label('Second working directory',exact=True).fill('/second/project')
                 dialog.get_by_role('button',name='Make primary',exact=True).click()
+                second=dialog.get_by_role('region',name='Executor Second',exact=True)
+                expect(second.get_by_text('Primary',exact=True)).to_be_visible()
+                expect(second.get_by_label('Second (primary) working directory',exact=True)).to_have_value('/second/project')
                 dialog.get_by_role('button',name='Save executors and directories',exact=True).click()
                 expect(dialog.locator('.target-picker')).to_contain_text('Executors and directories saved. Send a message')
                 expect(dialog.get_by_role('button',name='Start / resume goal',exact=True)).to_be_disabled()
@@ -147,12 +150,15 @@ with tempfile.TemporaryDirectory(prefix='demodex-targets-') as temporary:
                 page.set_viewport_size({'width':390,'height':844})
                 dialog.get_by_role('button',name='Interrupt and save',exact=True).scroll_into_view_if_needed()
                 page.screenshot(path=str(ROOT/'target'/'review-target-actions-mobile.png'))
+                dialog.locator('.target-picker').scroll_into_view_if_needed()
+                assert dialog.evaluate('(el) => el.scrollWidth <= el.clientWidth'), 'Session controls overflow on mobile'
+                page.screenshot(path=str(ROOT/'target'/'review-executor-controls-mobile.png'))
                 page.set_viewport_size({'width':1200,'height':850})
                 starts=sum(c['method']=='turn/start' for c in calls)
                 interrupts=sum(c['method']=='turn/interrupt' for c in calls)
                 # Directory-only edits are visible in Session Controls and can
                 # be staged while work continues, without a session restart.
-                expect(dialog.get_by_role('heading',name='Working directories',exact=True)).to_be_visible()
+                expect(dialog.get_by_role('region',name='Executor Second',exact=True).get_by_label('Second (primary) working directory',exact=True)).to_be_visible()
                 dialog.get_by_label('Second (primary) working directory',exact=True).fill('/second/next-project')
                 dialog.get_by_role('button',name='Save for next turn',exact=True).click()
                 expect(dialog.locator('.effective-targets')).to_contain_text('/second/project')

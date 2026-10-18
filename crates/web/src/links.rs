@@ -83,6 +83,12 @@ struct FileProps {
 enum Msg {
     Context(LinkContext),
     Refresh,
+    Recheck,
+    ChooseHost(String),
+    HostsLoaded(u64, Result<Value, String>),
+    SelectHost(String),
+    BindHost,
+    CancelHost,
     Loaded(u64, Result<Value, String>),
     Read(String, bool),
     ReadDone(u64, bool, Result<Value, String>),
@@ -102,6 +108,10 @@ struct FilePopup {
     error: String,
     preview: Option<Value>,
     pretty: bool,
+    pairing: Option<String>,
+    hosts: Value,
+    selected_host: String,
+    host_serial: u64,
 }
 
 fn date(ms: &Value) -> String {
@@ -166,9 +176,14 @@ impl Component for FilePopup {
             error: String::new(),
             preview: None,
             pretty: false,
+            pairing: None,
+            hosts: Value::Null,
+            selected_host: String::new(),
+            host_serial: 0,
         }
     }
-    fn changed(&mut self, ctx: &Context<Self>, _: &FileProps) -> bool {
+    fn changed(&mut self, ctx: &Context<Self>, old: &FileProps) -> bool {
+        if old.item != ctx.props().item || old.destination != ctx.props().destination { self.pairing = None; }
         ctx.link().send_message(Msg::Refresh);
         true
     }
@@ -176,9 +191,66 @@ impl Component for FilePopup {
         match msg {
             Msg::Tick => {}
             Msg::Context(value) => {
+                let changed_client = match (&value.client, &self.context.client) {
+                    (Some(a), Some(b)) => !Rc::ptr_eq(a,b),
+                    (None, None) => false,
+                    _ => true,
+                };
+                if value.session != self.context.session || !value.connected || changed_client { self.pairing = None; }
                 self.context = value;
                 self.preview = None;
                 ctx.link().send_message(Msg::Refresh);
+            }
+            Msg::ChooseHost(executor) => {
+                if self.loading || self.reading { return false; }
+                self.error.clear();
+                self.host_serial += 1;
+                self.pairing = Some(executor);
+                self.selected_host.clear();
+                self.hosts = Value::Null;
+                if let Some(client) = self.context.client.clone().filter(|_|self.context.connected) {
+                    let serial = self.host_serial;
+                    ctx.link().send_future(async move { Msg::HostsLoaded(serial, client.read(Operation::Targets).await.map_err(|e|format!("{e:#}"))) });
+                }
+            }
+            Msg::HostsLoaded(serial, result) => {
+                if serial != self.host_serial || self.pairing.is_none() { return false; }
+                match result { Ok(value) => self.hosts = value, Err(error) => self.error = error }
+            }
+            Msg::SelectHost(target) => self.selected_host = target,
+            Msg::CancelHost => self.pairing = None,
+            Msg::BindHost => {
+                if self.loading || self.reading || !self.context.connected || self.selected_host.is_empty() { return false; }
+                if let (Some(client), Some(executor)) = (self.context.client.clone(), self.pairing.take()) {
+                    self.serial += 1;
+                    let serial = self.serial;
+                    self.loading = true;
+                    self.error.clear();
+                    self.preview = None;
+                    let id = self.context.session.clone();
+                    let item = ctx.props().item.clone();
+                    let destination = ctx.props().destination.clone();
+                    let target = self.selected_host.clone();
+                    ctx.link().send_future(async move {
+                        Msg::Loaded(serial, client.call(Operation::BindMessageFileHost { id, item, destination, executor, target }, uuid::Uuid::new_v4().to_string()).await.map_err(|e|format!("{e:#}")))
+                    });
+                }
+            }
+            Msg::Recheck => {
+                if self.loading || self.reading || (self.context.client.is_none() || !self.context.connected) { return false; }
+                if let Some(client) = self.context.client.clone().filter(|_|self.context.connected) {
+                    self.serial += 1;
+                    let serial = self.serial;
+                    self.loading = true;
+                    self.preview = None;
+                    self.error.clear();
+                    let id = self.context.session.clone();
+                    let item = ctx.props().item.clone();
+                    let destination = ctx.props().destination.clone();
+                    ctx.link().send_future(async move {
+                        Msg::Loaded(serial, client.call(Operation::RefreshMessageFile { id, item, destination }, uuid::Uuid::new_v4().to_string()).await.map_err(|e| format!("{e:#}")))
+                    });
+                }
             }
             Msg::Refresh => {
                 self.serial += 1;
@@ -188,7 +260,7 @@ impl Component for FilePopup {
                     .context
                     .client
                     .clone()
-                    .filter(|_| self.context.connected)
+                    .filter(|_|self.context.connected)
                 {
                     let id = self.context.session.clone();
                     let item = ctx.props().item.clone();
@@ -205,7 +277,7 @@ impl Component for FilePopup {
                     });
                 } else {
                     self.loading = false;
-                    self.error = "Connect to view recorded file checks".into();
+                    self.error = "Connect to the server to view file checks".into();
                 }
             }
             Msg::Loaded(serial, result) => {
@@ -226,7 +298,7 @@ impl Component for FilePopup {
                     .context
                     .client
                     .clone()
-                    .filter(|_| self.context.connected)
+                    .filter(|_|self.context.connected)
                 {
                     self.reading = true;
                     self.error.clear();
@@ -286,30 +358,42 @@ impl Component for FilePopup {
             .find(|f| f["destination"] == ctx.props().destination);
         html! {<div class="file-link-popup">
             <div class="link-destination">{&ctx.props().destination}</div>
-            {if self.loading {html!{<p role="status">{"Loading recorded checks…"}</p>}}else{Html::default()}}
+            <button type="button" disabled={self.loading || self.reading || (self.context.client.is_none() || !self.context.connected) || !file.as_ref().is_some_and(|f| array(&f["checks"]).iter().any(|c| c["available"] == true))} onclick={ctx.link().callback(|_|Msg::Recheck)}>{"Refresh"}</button>
+            {if self.loading {html!{<p role="status">{"Loading file checks…"}</p>}}else{Html::default()}}
             {if !self.error.is_empty(){html!{<p class="error" role="alert">{&self.error}</p>}}else{Html::default()}}
             {if let Some(file)=file {
                 html!{<>
                     {if let Some(note)=file["note"].as_str(){html!{<p>{note}</p>}}else{Html::default()}}
                     <div class="file-matches">{for array(&file["checks"]).iter().map(|check|{
                         let executor=text(check,"executor").to_owned();
-                        let attached=self.context.connected && check["available"]==true && array(&self.context.targets).iter().any(|t|t["id"]==executor);
+                        let attached=self.context.connected && check["available"]==true;
                         let regular=check["metadata"]["isFile"]==true;
                         let enabled=attached && regular && check["state"]=="found" && !self.reading && !self.loading;
-                        let show=executor.clone();let save=executor.clone();
+                        let show=executor.clone();let save=executor.clone();let pair=executor.clone();
                         html!{<crate::ui::Group class={classes!("file-match",(!attached).then_some("executor-unavailable"))}>
                             <div class="file-match-heading"><strong title={executor.clone()}>{check["executor_name"].as_str().filter(|name|!name.is_empty()).unwrap_or(&executor)}</strong><span class="file-actions"><crate::ui::IconButton title="Show file" label="Show file" disabled={!enabled} onclick={ctx.link().callback(move |_|Msg::Read(show.clone(),true))}>{"◉"}</crate::ui::IconButton><crate::ui::IconButton title="Download file" label="Download file" disabled={!enabled} onclick={ctx.link().callback(move |_|Msg::Read(save.clone(),false))}>{"↓"}</crate::ui::IconButton></span></div>
                             <div class="link-destination">{text(check,"path")}</div>
                             {if check["state"]=="found" {html!{<><div class="file-metadata"><span>{format!("Created: {}",date(&check["metadata"]["createdAtMs"]))}</span><span>{format!("Modified: {}",date(&check["metadata"]["modifiedAtMs"]))}</span><span>{check["metadata"]["size"].as_u64().map(|n|format!("{n} bytes")).unwrap_or_else(||"Size unknown".into())}</span></div>{if !regular{html!{<p>{"Not a regular file; preview and download unavailable"}</p>}}else{Html::default()}}</>}}
                             else{html!{<p class="file-check-state">{match text(check,"state"){"not-found"=>"Not found", "timed-out"=>"Timed out", "pending"=>"Checking…", "not-checked"=>"Not checked", _=>"Check failed"}}{if check["state"]!="not-found"{format!(" · {}",text(check,"error"))}else{String::new()}}</p>}}}
+                            {if check["host"].is_null() {html!{<button type="button" disabled={self.loading || self.reading || (self.context.client.is_none() || !self.context.connected)} onclick={ctx.link().callback(move |_|Msg::ChooseHost(pair.clone()))}>{"Choose file host…"}</button>}}else{html!{<p class="muted">{"Saved host identity; session connection is not required."}</p>}}}
                             <small class="file-check-time">{checked(check)}</small>
-                            {if !attached{html!{<p class="muted">{"Original executor is no longer attached, has been replaced, or the session is disconnected."}</p>}}else{Html::default()}}
+                            {if !attached{html!{<p class="muted">{check["unavailable_reason"].as_str().unwrap_or("Original file host is unavailable.")}</p>}}else{Html::default()}}
                         </crate::ui::Group>}
                     })}</div>
                 </>}
             }else if !self.loading {html!{<p>{self.files["note"].as_str().unwrap_or("No metadata snapshot for this link. Checks run when an assistant message completes.")}</p>}}else{Html::default()}}
             {if self.reading {html!{<p role="status">{"Reading current file…"}</p>}}else{Html::default()}}
-            <p class="muted">{"Metadata reflects the check time. Show and Download read the current file (up to 4 MiB)."}</p>
+            <p class="muted">{"Metadata reflects the check time. Refresh rechecks the saved file host. Host identity is verified before access. Show and Download read the current file (up to 4 MiB)."}</p>
+            {if self.pairing.is_some() {html!{<crate::modal::Modal title="Choose file host" compact=true onclose={ctx.link().callback(|_|Msg::CancelHost)}>
+                <p>{"This link has no saved machine identity. Choose the machine that originally held this file. Demodex will check this path there and remember its machine and account identity."}</p>
+                <div class="link-destination">{&ctx.props().destination}</div>
+                {if !self.error.is_empty() {html!{<p class="error" role="alert">{&self.error}</p>}}else if self.hosts.is_null() {html!{<p role="status">{"Loading hosts…"}</p>}}else{Html::default()}}
+                <label>{"File host"}<select aria-label="File host" value={self.selected_host.clone()} onchange={ctx.link().callback(|e:Event|Msg::SelectHost(e.target_unchecked_into::<web_sys::HtmlSelectElement>().value()))}>
+                    <option value="">{"Choose a host"}</option>
+                    {for array(&self.hosts).iter().map(|host|html!{<option value={text(host,"id").to_owned()}>{format!("{} ({})",text(host,"name"),text(host,"id"))}</option>})}
+                </select></label>
+                <button type="button" disabled={self.selected_host.is_empty() || !self.context.connected || self.loading || self.reading} onclick={ctx.link().callback(|_|Msg::BindHost)}>{"Use this host"}</button>
+            </crate::modal::Modal>}}else{Html::default()}}
             {self.preview.as_ref().map(|value|self.preview_view(ctx,value)).unwrap_or_default()}
         </div>}
     }
@@ -320,6 +404,7 @@ impl FilePopup {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(text(value, "dataBase64"))
             .unwrap_or_default();
+        let image_mime = raster_mime(&bytes);
         let source = std::str::from_utf8(&bytes)
             .ok()
             .filter(|s| !s.contains('\0'));
@@ -337,10 +422,46 @@ impl FilePopup {
             <div class="link-destination">{text(value,"path")}</div><p class="muted">{format!("Read {} · {} bytes",date(&value["read_at_ms"]),bytes.len())}</p>
             <button type="button" title="Download these bytes" aria-label="Download these bytes" onclick={ctx.link().callback(|_|Msg::DownloadPreview)}>{"↓"}</button>
             {if json.is_some(){html!{<button type="button" onclick={ctx.link().callback(|_|Msg::Pretty)}>{if self.pretty{"Raw JSON"}else{"Pretty JSON"}}</button>}}else{Html::default()}}
-            {if bytes.len()>256*1024{html!{<p>{"Preview shortened. Download contains the complete file."}</p>}}else{Html::default()}}
-            {if let Some(svg)=source.filter(|_| text(value,"path").to_ascii_lowercase().ends_with(".svg")) {
+            {if image_mime.is_none() && bytes.len()>256*1024{html!{<p>{"Preview shortened. Download contains the complete file."}</p>}}else{Html::default()}}
+            {if let Some(mime)=image_mime {
+                html!{<FileImage key={text(value,"dataBase64").to_owned()} src={format!("data:{mime};base64,{}",text(value,"dataBase64"))} path={text(value,"path").to_owned()}/>}
+            }else if let Some(svg)=source.filter(|_| text(value,"path").to_ascii_lowercase().ends_with(".svg")) {
                 html!{<crate::svg::SvgPreview source={svg.to_owned()}/>}
             }else if let Some(display)=display {html!{<pre class="file-preview">{display}</pre>}}else{html!{<p>{"Binary file. Download to inspect its contents."}</p>}}}
         </crate::modal::Modal>}
     }
+}
+
+// Sniff bytes rather than trusting the filename or a supplied MIME label.
+fn raster_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+#[derive(Properties, PartialEq)]
+struct FileImageProps {
+    src: String,
+    path: String,
+}
+
+#[function_component(FileImage)]
+fn file_image(props: &FileImageProps) -> Html {
+    let failed = use_state(|| false);
+    let onerror = {
+        let failed = failed.clone();
+        Callback::from(move |_| failed.set(true))
+    };
+    html! {<>
+        <img class="image-expanded" src={props.src.clone()} alt={props.path.clone()} {onerror}/>
+        {if *failed {html!{<p role="alert">{"Image could not be decoded. Download to inspect its contents."}</p>}}else{Html::default()}}
+    </>}
 }

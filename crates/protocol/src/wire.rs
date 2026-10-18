@@ -89,11 +89,17 @@ pub struct Event {
     pub at: String,
     pub message: serde_json::Value,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, WormholeTransmaterializable)]
+pub struct ConversationPageCursor {
+    pub through: i64,
+    pub before: u64,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ConversationSnapshot {
     pub items: Vec<serde_json::Value>,
     pub cursor: i64,
     pub event_count: u64,
+    pub older: Option<ConversationPageCursor>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Pending {
@@ -123,9 +129,29 @@ pub struct SessionDetail {
     pub target_selection: Option<Vec<Selection>>,
     pub targets_pending: bool,
 }
+/// A report captures the originating session and project at filing time.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct BugReport {
+    pub id: i64,
+    pub created_at: String,
+    pub title: String,
+    pub description: String,
+    pub session_id: String,
+    pub thread_id: Option<String>,
+    pub session_title: String,
+    pub project: Option<UserVisibleContext>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct BugReportPage {
+    pub reports: Vec<BugReport>,
+    pub next_before: Option<i64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum Response {
+    BugReports(BugReportPage),
     Conversation(ConversationSnapshot),
+    ConversationSearch { matched: bool, older: Option<ConversationPageCursor> },
     Sessions(Vec<Session>),
     ProjectGit(Vec<ProjectGit>),
     Session(Session),
@@ -166,11 +192,13 @@ impl Response {
     /// Presentation adapter for dynamic renderers and persisted legacy receipts.
     pub fn into_value(self) -> serde_json::Value {
         match self {
+            Self::BugReports(value) => serde_json::json!(value),
             Self::ProjectGit(value) => serde_json::json!(value),
             Self::Sessions(value) => serde_json::json!(value),
             Self::Session(value) => serde_json::json!(value),
             Self::Detail(value) => serde_json::json!(value),
             Self::Conversation(value) => serde_json::json!(value),
+            Self::ConversationSearch { matched, older } => serde_json::json!({"matched":matched,"older":older}),
             Self::Events(value) => serde_json::json!(value),
             Self::Environments(value) => serde_json::json!(value),
             Self::Environment(value) => serde_json::json!(value),
@@ -182,6 +210,7 @@ impl Response {
         value: serde_json::Value,
     ) -> Result<Self, serde_json::Error> {
         Ok(match operation {
+            Operation::BugReports { .. } => Self::BugReports(serde_json::from_value(value)?),
             Operation::ProjectGit => Self::ProjectGit(serde_json::from_value(value)?),
             Operation::Sessions => Self::Sessions(serde_json::from_value(value)?),
             Operation::CreateSession { .. }
@@ -238,6 +267,7 @@ pub enum Notice {
 /// The transport itself is Wormhole: typed actor calls/reply ports and callbacks.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, WormholeTransmaterializable)]
 pub enum Operation {
+    BugReports { before: Option<i64> },
     PushSettings { device_id: String },
     RegisterPush { input: PushRegistration },
     RemovePush { device_id: String },
@@ -258,7 +288,8 @@ pub enum Operation {
     },
     Runtime,
     RuntimeModels,
-    Conversation { id: String },
+    Conversation { id: String, older: Option<ConversationPageCursor> },
+    SearchConversation { id: String, query: String, older: Option<ConversationPageCursor> },
     DefaultPrompt,
     PromptSettings,
     SavePromptSettings { expected_revision: u64, settings: PromptSettings },
@@ -269,6 +300,7 @@ pub enum Operation {
     HostSessionWithPrompt { input: HostSession, prompt: String },
     StartRuntime,
     SetRuntimeFeature { name: String, enabled: Option<bool> },
+    SetDefaultSandbox { sandbox: Option<Sandbox> },
     RestartRuntime,
     Login,
     SavedThreads {
@@ -334,6 +366,8 @@ pub enum Operation {
         id: String,
     },
     MessageFiles { id: String, item: String },
+    RefreshMessageFile { id: String, item: String, destination: String },
+    BindMessageFileHost { id: String, item: String, destination: String, executor: String, target: String },
     ReadMessageFile { id: String, item: String, destination: String, executor: String },
     /// Original shared file, encoded as base64.
     UploadFile { id: String, name: String, data: String },
@@ -398,6 +432,12 @@ pub enum Operation {
         id: String,
     },
     StopEnvironment {
+        id: String,
+    },
+    DetachEnvironmentExecutors {
+        id: String,
+    },
+    DeleteEnvironment {
         id: String,
     },
     EnvironmentSession {
@@ -569,10 +609,19 @@ pub struct MessageLink {
     pub kind: LinkDestination,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct FileHost {
+    pub target: String,
+    pub fingerprint: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct FileCheck {
     pub executor: String,
     #[serde(default)]
     pub executor_name: String,
+    #[serde(default)]
+    pub host: Option<FileHost>,
+    #[serde(default)]
+    pub unavailable_reason: Option<String>,
     pub path: String,
     pub state: String,
     pub checked_at_ms: Option<u64>,

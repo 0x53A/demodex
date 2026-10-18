@@ -48,13 +48,95 @@ Exact transport dependency versions constrain consumers with separate lockfiles.
 
 ## Library and native clients
 
-Protocol v40 removes the redundant project-context description from replies and
+Protocol v49 integrates the v40–48 changes below with the remote title update.
+It removes the redundant project-context description from replies and
 UI. Legacy saved contexts and older thread calls may still include it; it is
 ignored. Agents are instructed to set a short task title once the task is clear
 and update it when the task changes substantially. Context tools report only
 environment and project path. Deploy matching daemon and clients; receipt
 encoding remains v16. Existing threads retain their saved tool schemas, and
 custom integration prompt layers must be updated explicitly if desired.
+
+Protocol v48 adds read-only SearchConversation over daemon-projected saved history.
+Each request searches one bounded conversation page and returns a match or older
+cursor, never transcript bytes. The sidebar filters titles and working/project paths
+locally; explicit Full text search scans sessions sequentially, including archives.
+Query changes and connection generations invalidate late responses; Stop prevents
+further requests. No Codex resume or inference. Cold projection cost is shared with
+Conversation; matching is literal, case-insensitive, across message/tool content,
+excluding structural IDs and recording metadata. Deploy matching clients/daemon;
+receipts remain v16. Check with `DEMODEX_SEARCH_ONLY=1 uv run tests/rust_web.py`.
+
+Protocol v47 adds receipted DetachEnvironmentExecutors and DeleteEnvironment.
+VM deletion requires stopped state and no current or staged session selections;
+it removes the private VM directory and registry row, preserving shared base images
+and conversations. Detach validates idle connected sessions, decisions, queues,
+goals and background terminals, unsubscribes and disconnects them, then removes only
+this VM from current/staged selections. Disconnected attachments require a stopped
+VM. Legacy runtime ownership is retained. Reconnect explicitly; no turn is sent.
+Server settings offers confirmed Detach executors and Delete VM actions. Deploy
+matching daemon and clients; receipts remain v16. Tests: src/vm_lifecycle.rs and
+`uv run tests/vm_delete.py` (disposable data, no VM boot or inference).
+
+Protocol v46 stores a durable file-host binding (registry target plus hash of Linux
+machine-id and filesystem UID). New managed file checks capture it; reads
+and Refresh verify it on the same native-executor or SFTP connection used for file
+access, independently of session attachment. Host access still requires host mode;
+VMs/containers must already be running, removed targets fail, and SSH retains strict
+host-key checking. No remote fallback or conversation resume. A machine ID is an
+operational identity, not hardware attestation; cloned IDs/accounts are indistinguishable.
+Legacy snapshots retain exact-generation access and offer an explicit, receipted
+BindMessageFileHost / Choose file host action to pin the operator-selected host.
+Pairing cannot replace an existing fingerprint. Only registries established by
+orchestration can auto-bind; never derive authority from an executor name prefix.
+Uploaded images retain their existing attachment/digest rules. Deploy matching daemon
+and clients; receipts remain v16. Run `uv run tests/file_hosts.py` for disposable
+host/SFTP restart, disconnected access, pairing, identity mismatch and SSH trust checks.
+
+Protocol v45 adds receipted RefreshMessageFile and a file-dialog Refresh button.
+Only an explicit click rechecks one recorded destination, using still-attached original
+executor identities/endpoints and captured directories. Checks remain bounded; refresh
+reparses location suffixes and updates only that file snapshot. No automatic replay,
+new executor fallback or content read. Deploy matching daemon and clients; receipts
+remain v16.
+
+Protocol v44 adds Runtime.bug_reports with daemon identity and latest report ID.
+Server settings shows an orange new-report dot until the newest inbox page is
+successfully loaded. The per-daemon watermark persists in browser localStorage
+and syncs across tabs; opening settings or older pages does not acknowledge it.
+Successful filings push a Runtime notice; periodic runtime refresh recovers missed
+notices. Deploy matching daemon and clients; receipts remain v16.
+
+Protocol v43 parses positive `:line` and `:line:column` suffixes on local file
+paths before percent decoding. Metadata and reads use the underlying path; original
+destinations retain the location. Encode literal filename colons as `%3A`. Existing
+metadata snapshots remain unchanged, without replay. Deploy matching daemon and
+clients; receipts remain v16.
+
+Protocol v42 adds the read-only, paginated BugReports inbox in Server settings and
+new-thread `demodex.bug_report(title, description)` / `demodex.emergency_call(message, title?)`
+tools. Reports persist per daemon with session/project snapshots; no external
+tracker or notification is involved. Emergency calls are urgent chat notifications
+with high-priority encrypted Web Push to enabled devices, not telephone calls.
+Zero devices reports push disabled explicitly; provider acceptance is not confirmed
+delivery. Existing notification receipts/outbox prevent replay. New tools require
+new Codex threads. Deploy matching daemon and clients; receipts remain v16.
+
+Protocol v41 adds receipted SetDefaultSandbox and Runtime.default_sandbox.
+The server persists this New Session form preference; the form submits the
+reviewed policy explicitly. Existing/resumed sessions and native creation calls
+retain their prior behavior. Deploy matching daemon and clients; receipts remain v16.
+
+Protocol v40 pages Conversation snapshots backwards by a stable event high-water
+mark and item offset, targeting 10 MiB of item JSON per page. An indivisible
+larger item occupies its own page without truncation. The PWA initially loads the
+newest page and offers Show older messages, preserving live updates and scroll
+position. One bounded server projection cache avoids repeated event replay;
+evicted cursors reconstruct the same historical projection. Initial projection
+still reads durable history; browser Conversation reads allow 180 seconds for
+a cold projection. Codex RPC connections accept frames and messages up
+to 500 MiB for full-history resume replies. Deploy matching daemon and clients;
+receipt encoding remains v16.
 
 Protocol v39 allows read-only ProjectGit snapshots for all overview host project
 folders through the current daemon host executor, including disconnected sessions.
@@ -307,6 +389,8 @@ Persist UUID mutation receipts before execution. Duplicate requests return the
 recorded result; uncertain commands, prompts and approvals must never be replayed
 automatically. Replacing an executor invalidates its process/file handles and
 assigns a fresh executor identity. Never route old handles into a replacement.
+Process handles remain generation-scoped; only file snapshots with an explicitly
+verified durable host binding may resolve through a replacement executor.
 Requests from a lost RPC generation remain visibly unavailable. Unsupported
 approval types use explicit JSON response editing, not an automatic answer.
 Questions and approvals displayed by Demodex remain pending until the user
@@ -368,6 +452,9 @@ must leave the selection unchanged. Steering retains the current turn's targets.
 on the next `turn/start`, not through `thread/settings/update`; show that pending
 state and block goal/queue resumption until an explicit message applies it.
 Never send a hidden model turn to apply settings.
+Reconnecting with unchanged executor identities, endpoints and directories preserves
+the existing pending-target state; reconnect alone must not mark targets pending.
+Changed executors still require the next explicit turn to apply them.
 Directory-only edits use the same next-turn selection mechanism; no restart is
 needed, and steering keeps the old directory. Do not substitute a direct
 `thread/settings/update` cwd patch: a disposable Codex 0.157.1 check introduced
@@ -546,6 +633,17 @@ uv run tools/build-web.py
 ```
 
 Candidate outputs are `target/rust-pwa/debug/demodex` and `web/.rust-dist`.
+For deployment, build the optimized daemon with `cargo build --release --locked`
+and use `target/rust-pwa/release/demodex`; the debug binary above is for development
+and fixtures. Cold history reconstruction is substantially slower in debug builds.
+`uv run tests/history_benchmark.py --database /private/events.sqlite --session UUID
+--binary target/rust-pwa/release/demodex --verify-pages` benchmarks an existing saved
+session through a disposable API-only daemon, without Codex, host mode or model
+requests. It copies only selected events from the read-only input and can also
+read a three-column event snapshot. Do not put private snapshots in the repository.
+History projection indexes unfinished and steering items, preserves transcript
+order through removal/restore/prepend, and consumes typed storage events without
+another JSON envelope. These optimizations preserve the existing wire contract.
 Use `-j 2` for memory-constrained builds. Run relevant checks inside the shell:
 
 ```sh
@@ -711,3 +809,22 @@ Run `uv run tests/share.py` after building the default frontend and
 `uv run tools/build-web.py --public-url /demodex/ --dist web/.share-subpath-dist`.
 The browser fixture exercises real service-worker POSTs; Android OS share-sheet
 registration still requires an installed-device smoke test.
+
+Session executor controls keep each directory beside its executor selection, with
+primary selection and collapsible private SSH actions in the same entry. Preserve
+target draft, next-turn and interrupt semantics when changing this layout.
+
+## Tagged message buttons
+
+Assistant messages support `<button tag="apply-fix">Yes</button>` outside code.
+Use a descriptive tag and a plain-text label; quote attributes and XML-escape
+special characters. Only this narrow syntax is recognized, with no extra attributes
+or nested markup. The renderer creates its own button; arbitrary HTML stays inert.
+Clicking inserts `(button 'apply-fix' with label 'Yes' pressed)` at the composer's
+retained cursor, adds separating spaces as needed, preserves selected/existing text,
+and focuses the editable draft. Sending remains manual. Quotes and backslashes in
+tags/labels are escaped in the inserted text. Raw view/copy preserves exact source.
+
+Linked-file Show also renders signature-identified PNG/JPEG/GIF/WebP in a bounded
+image preview with decode errors and the original-byte download action. It uses
+ReadMessageFile and its existing executor/size checks; no automatic content reads.

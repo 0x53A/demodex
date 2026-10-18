@@ -11,7 +11,15 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc, oneshot};
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
+
+// Codex resume replies can contain the entire saved history in one frame.
+// Apply the same bound to frames and reassembled messages on every RPC path.
+fn websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(500 * 1024 * 1024))
+        .max_frame_size(Some(500 * 1024 * 1024))
+}
 
 type Reply = oneshot::Sender<Result<Value>>;
 type Waiters = Arc<Mutex<HashMap<u64, Reply>>>;
@@ -77,7 +85,7 @@ impl Rpc {
                 if let Some(path) = url.strip_prefix("unix://") {
                     let stream = tokio::net::UnixStream::connect(path).await?;
                     let (socket, _) =
-                        tokio_tungstenite::client_async("ws://localhost/", stream).await?;
+                        tokio_tungstenite::client_async_with_config("ws://localhost/", stream, Some(websocket_config())).await?;
                     let (sink, stream) = socket.split();
                     Ok::<(WsSink, WsStream), anyhow::Error>((Box::pin(sink), Box::pin(stream)))
                 } else {
@@ -85,7 +93,7 @@ impl Rpc {
                         url.starts_with("ws://"),
                         "use a private ws:// or unix:// app-server endpoint"
                     );
-                    let (socket, _) = tokio_tungstenite::connect_async(url).await?;
+                    let (socket, _) = tokio_tungstenite::connect_async_with_config(url, Some(websocket_config()), false).await?;
                     let (sink, stream) = socket.split();
                     Ok::<(WsSink, WsStream), anyhow::Error>((Box::pin(sink), Box::pin(stream)))
                 }
@@ -99,7 +107,7 @@ impl Rpc {
     pub(crate) async fn connect_unix(stream: tokio::net::UnixStream) -> Result<(Self, mpsc::Receiver<Result<Value>>)> {
         let (socket, _) = tokio::time::timeout(
             Duration::from_secs(10),
-            tokio_tungstenite::client_async("ws://localhost/", stream),
+            tokio_tungstenite::client_async_with_config("ws://localhost/", stream, Some(websocket_config())),
         ).await.context("app-server handshake timed out")??;
         let (sink, stream) = socket.split();
         Self::from_transport(Box::pin(sink), Box::pin(stream)).await
@@ -205,6 +213,57 @@ impl Rpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    async fn large_reply_server<S>(stream: S) -> Result<()>
+    where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {
+        let mut ws = tokio_tungstenite::accept_async(stream).await?;
+        while let Some(frame) = ws.next().await {
+            let frame = frame?;
+            if frame.is_close() { break; }
+            let request: Value = serde_json::from_str(frame.to_text()?)?;
+            if request["method"] == "initialized" { continue; }
+            let result = if request["method"] == "thread/resume" {
+                // Exceed both tungstenite defaults, in one unfragmented frame.
+                json!({"history":"x".repeat(65 * 1024 * 1024)})
+            } else { json!({}) };
+            ws.send(Message::Text(json!({"id":request["id"],"result":result}).to_string().into())).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn large_resume_reply_over_every_rpc_connection_path() -> Result<()> {
+        for path in 0..3 {
+            let directory = tempfile::tempdir()?;
+            let (rpc, _events, server) = if path == 0 {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+                let url = format!("ws://{}", listener.local_addr()?);
+                let server = tokio::spawn(async move {
+                    large_reply_server(listener.accept().await?.0).await
+                });
+                let (rpc, events) = Rpc::connect(&url).await?;
+                (rpc, events, server)
+            } else {
+                let socket = directory.path().join("rpc.sock");
+                let listener = tokio::net::UnixListener::bind(&socket)?;
+                let server = tokio::spawn(async move {
+                    large_reply_server(listener.accept().await?.0).await
+                });
+                let (rpc, events) = if path == 1 {
+                    Rpc::connect(&format!("unix://{}", socket.display())).await?
+                } else {
+                    Rpc::connect_unix(tokio::net::UnixStream::connect(&socket).await?).await?
+                };
+                (rpc, events, server)
+            };
+            let reply = rpc.call("thread/resume", json!({"threadId":"large"})).await?;
+            assert_eq!(reply["history"].as_str().unwrap().len(), 65 * 1024 * 1024);
+            assert_eq!(rpc.call("still-connected", json!({})).await?, json!({}));
+            rpc.close();
+            server.abort();
+        }
+        Ok(())
+    }
+
     #[test]
     fn fallback_requires_the_explicit_no_active_turn_error() {
         let reply =
