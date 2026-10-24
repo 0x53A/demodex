@@ -53,6 +53,13 @@ Exact transport dependency versions constrain consumers with separate lockfiles.
 
 ## Library and native clients
 
+Protocol v50 forwards Codex's rateLimitResetCredits through Runtime.weekly_usage.reset_credits.
+The usage popup displays the authoritative available count and optional grant/expiry
+details separately from spending credits. Missing data stays unavailable; detail
+rows may be capped. Explicit null expiry means no expiry, while a missing field
+stays unknown. This is read-only; no reset is redeemed. Deploy matching daemon and
+clients; receipts remain v16. Coverage lives in both usage.rs modules.
+
 Protocol v49 integrates the v40–48 changes below with the remote title update.
 It removes the redundant project-context description from replies and
 UI. Legacy saved contexts and older thread calls may still include it; it is
@@ -221,6 +228,9 @@ New Session defaults to inheriting the runtime profile's model, reasoning effort
 and service tier; choosing a model explicitly enables individual settings.
 Prompt reconnects hold lifecycle and session-settings locks through idle checks,
 unsubscribe and resume. Effort/tier-only and no-op model updates do not reconnect.
+Completed failed turns may leave Codex in `systemError`; allow session controls
+and prompt reapplication in that state once no active turn remains. Model changes
+still require a settings notification from the same thread and connection generation.
 
 Protocol v32 adds server prompt layers: per-model replacements, an appendix shared
 by all models, and an editable Demodex integration layer. Settings live in SQLite,
@@ -772,22 +782,34 @@ See the [Services documentation](https://tailscale.com/docs/features/tailscale-s
 
 ## Local SVG previews
 
-Fenced `svg` blocks and explicitly opened `.svg` files render through `crates/web/src/svg.rs`, which parses XML and
-constructs allowlisted Yew SVG nodes rather than inserting model HTML. Supported
-elements: svg (root only), g, rect, circle, ellipse, line, polyline, polygon, path,
-text, tspan, title and desc. Attributes are explicit geometry/presentation
-allowlists with bounded numeric values, local colors and generic font families.
-No href, CSS/style, images, definitions/references, scripts, animations or foreign
-content are supported. Reject the entire preview on unsupported input; retain the
-exact source and show a reason. Never strip unsupported content into a misleading
-partial drawing. DTDs and processing instructions are rejected.
-Bounds: 128 KiB input, 2,048 XML nodes, 32 nesting levels, 16 KiB per attribute,
-finite numeric magnitude <=1,000,000 and <=16 operations per transform attribute.
-Require a valid viewBox or positive numeric width/height. Thumbnail and expanded
-modal stay within bounded containers. The drawing itself has no interactive
-content; its enclosing button opens the larger preview. Preserve source controls,
-keyboard accessibility and modal close/outside-click behavior. Native tests live
-in svg.rs; rich-message browser checks cover actual SVG namespaces and preview UI.
+Fenced `svg` blocks and explicitly opened `.svg` files render through
+`crates/web/src/svg.rs`. It validates and serializes a bounded static XML subset
+into an image/svg+xml data URL for an HTML img, never an inline SVG DOM tree,
+object or iframe. Browser image-document mode isolates IDs and disables scripts
+and external resources. Keep explicit validation as well: no href, CSS/style,
+images, links, scripts, animation, foreign content, DTDs or processing instructions.
+Unsupported input rejects the entire preview; exact source remains available.
+
+Supported geometry/text elements are svg (root only), g, rect, circle, ellipse,
+line, polyline, polygon, path, text, tspan, title and desc. Root defs may contain
+linearGradient, radialGradient and pattern; gradients contain stops. Support
+bounded coordinates, gradient percentage coordinates/offsets, paint opacity,
+units/transforms, letter/word spacing, role=img and accessibility labels/references.
+IDs must be unique within a drawing; references must resolve locally. Paint
+references use only url(#id) to an approved paint server. Paint-server definitions
+and patterns cannot reference other paint servers; inherited paint references on
+ancestors of defs are also excluded. No paint inheritance references or recursive patterns. Patterns require
+numeric dimensions >=1 in userSpaceOnUse or >=0.01 in objectBoundingBox units.
+At most 32 paint servers and 16 IDs per accessibility-reference attribute; image
+labels are capped at 4,096 characters. These limits reduce complexity, not a browser CPU quota.
+
+Retain the 128 KiB input, 2,048 XML node, 32 nesting level, 16 KiB attribute,
+finite numeric magnitude <=1,000,000 and 16 transform-operation limits. Require a
+valid viewBox or positive numeric dimensions. Normalize the SVG namespace and
+missing viewBox; size images with object-fit:contain in bounded thumbnail/modal
+containers. Preserve exact source, download controls, decode-error feedback and
+keyboard/modal dismissal. Native tests live in svg.rs; rich_messages.py covers
+image decoding, local definitions and repeated IDs across thumbnails and modal.
 
 ## System share intake (protocol v33)
 
@@ -833,3 +855,8 @@ tags/labels are escaped in the inserted text. Raw view/copy preserves exact sour
 Linked-file Show also renders signature-identified PNG/JPEG/GIF/WebP in a bounded
 image preview with decode errors and the original-byte download action. It uses
 ReadMessageFile and its existing executor/size checks; no automatic content reads.
+
+When incremental Events contain a resume threadSnapshot and the browser still has
+unloaded older pages, reload Conversation from the daemon projection. Replaying
+that snapshot into a partial transcript would append old, unseen IDs as newly
+imported messages. Invalidate pending older-page reads when rebuilding the view.

@@ -1,5 +1,12 @@
 pub use demodex_protocol::transcript::*;
 
+/// A partial view cannot distinguish unseen old snapshot items from new ones.
+/// Rebuild it from the daemon's full projection before consuming that batch.
+pub fn needs_history_reload(has_older: bool, events: &[serde_json::Value]) -> bool {
+    has_older && events.iter().any(|event|
+        event["message"]["method"] == "demodex/threadSnapshot")
+}
+
 /// Recently visited conversations, owned only by the current browser/host.
 /// Moving projections preserves their cursor and avoids rebuilding render chunks.
 #[derive(Default)]
@@ -27,6 +34,34 @@ impl ConversationCache {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn partial_history_reloads_resume_snapshots_but_keeps_live_events_incremental() {
+        let snapshot = json!({"seq": 43, "message": {"method": "demodex/threadSnapshot",
+            "params": {"thread": {"turns": [{"items": [
+                {"id": "old", "type": "userMessage", "content": []},
+                {"id": "recent", "type": "agentMessage", "text": "Recent"}
+            ]}]}}}});
+        let live = json!({"seq": 44, "message": {"method": "item/completed",
+            "params": {"item": {"id": "new", "type": "agentMessage", "text": "New"}}}});
+        // Reproduce the pagination boundary: the old ID exists only on an
+        // unloaded page. Naive replay puts it after the recent message.
+        let recent = json!({"id": "recent", "type": "agentMessage", "text": "Recent"});
+        let mut partial = Transcript::restore(&[recent], 42);
+        partial.append(&[snapshot.clone()]);
+        assert_eq!(partial.chunks[0][1]["id"], "old");
+        // A full daemon projection knows both IDs and retains their order.
+        let mut full = Transcript::default();
+        full.append(&[snapshot.clone()]);
+        full.append(&[json!({"seq": 45, "message": snapshot["message"].clone()})]);
+        assert_eq!(full.chunks[0].len(), 2);
+        assert_eq!(full.chunks[0][0]["id"], "old");
+        assert_eq!(full.chunks[0][1]["id"], "recent");
+        assert!(needs_history_reload(true, &[snapshot.clone(), live.clone()]));
+        assert!(!needs_history_reload(false, &[snapshot]));
+        assert!(!needs_history_reload(true, &[live]));
+        assert!(!needs_history_reload(true, &[]));
+    }
 
     #[test]
     fn returning_preserves_render_chunks_and_incremental_cursor() {

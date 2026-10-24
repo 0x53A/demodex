@@ -152,7 +152,10 @@ impl Manager {
             )
             .await?;
         ensure!(
-            state["thread"]["status"]["type"] == "idle" && live.turn.lock().await.is_none(),
+            // A failed completed turn leaves Codex in systemError. The local
+            // turn must still be cleared by completion before controls can change.
+            matches!(state["thread"]["status"]["type"].as_str(), Some("idle" | "systemError"))
+                && live.turn.lock().await.is_none(),
             "finish or interrupt the current turn before changing these session controls"
         );
         Ok(())
@@ -343,6 +346,15 @@ mod tests {
     }
     #[tokio::test]
     async fn model_update_needs_confirmation_from_its_own_thread() -> Result<()> {
+        model_update_fixture("idle", false).await
+    }
+
+    #[tokio::test]
+    async fn model_change_after_failed_turn_requires_completion_and_confirmation() -> Result<()> {
+        model_update_fixture("systemError", true).await
+    }
+
+    async fn model_update_fixture(status: &'static str, confirm: bool) -> Result<()> {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -356,15 +368,18 @@ mod tests {
                     "initialized" => continue,
                     "initialize" => json!({}),
                     "thread/resume" => {
-                        json!({"thread":{"id":"thread","turns":[]},"model":"fixture","reasoningEffort":"low"})
+                        json!({"thread":{"id":"thread","turns":[]},"model":"previous-model","reasoningEffort":"low"})
                     }
-                    "thread/read" => json!({"thread":{"status":{"type":"idle"}}}),
+                    "thread/read" => json!({"thread":{"status":{"type":status}}}),
                     "model/list" => {
                         json!({"data":[{"model":"fixture","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}],"nextCursor":null})
                     }
                     "thread/settings/update" => {
                         // An unrelated thread must not turn an acknowledgement into confirmation.
                         ws.send(Message::Text(json!({"method":"thread/settings/updated","params":{"threadId":"other","threadSettings":{"model":"fixture","effort":"high"}}}).to_string().into())).await.unwrap();
+                        if confirm {
+                            ws.send(Message::Text(json!({"method":"thread/settings/updated","params":{"threadId":"thread","threadSettings":{"model":"fixture","effort":"high"}}}).to_string().into())).await.unwrap();
+                        }
                         json!({})
                     }
                     method => panic!("unexpected RPC: {method}"),
@@ -383,6 +398,12 @@ mod tests {
             .store
             .create("fixture", &endpoint, &[], Some("thread"))?;
         manager.connect(&session.id).await?;
+        if status == "systemError" {
+            let live = manager.runtime(&session.id).await?;
+            *live.turn.lock().await = Some("failing-turn".into());
+            assert!(Manager::require_idle(&live).await.is_err());
+            *live.turn.lock().await = None;
+        }
         let result = manager
             .change_model(
                 &session.id,
@@ -393,9 +414,17 @@ mod tests {
                 },
             )
             .await;
-        assert!(result.unwrap_err().to_string().contains("did not confirm"));
         let saved = manager.store.model_settings(&session.id)?;
-        assert!(saved["effective"].is_null() && saved["selection"].is_null());
+        if confirm {
+            let accepted = result?;
+            assert_eq!(accepted["model"], "fixture");
+            assert_eq!(accepted["effort"], "high");
+            assert_eq!(saved["effective"], accepted);
+            assert_eq!(saved["selection"], accepted);
+        } else {
+            assert!(result.unwrap_err().to_string().contains("did not confirm"));
+            assert!(saved["effective"].is_null() && saved["selection"].is_null());
+        }
         manager.disconnect(&session.id, "done").await?;
         server.await?;
         Ok(())

@@ -49,6 +49,12 @@ def expect_diagram(article):
     assert dimensions['svg'] > 30, dimensions
     assert dimensions['height'] <= dimensions['frame'] + 1, dimensions
 
+def expect_svg_image(image):
+    expect(image).to_be_visible()
+    assert image.get_attribute('src').startswith('data:image/svg+xml;base64,')
+    image.evaluate("e => e.decode()")
+    assert image.evaluate("e => e.naturalWidth > 0 && e.naturalHeight > 0")
+
 class Codex:
     socket = None
     submissions = 0
@@ -433,17 +439,50 @@ sequenceDiagram
             svg_source='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 100"><rect x="5" y="5" width="230" height="90" fill="#ff8800"/><text x="20" y="55" fill="black" font-size="18">Local drawing</text></svg>'
             codex.message('svg-preview','```svg\n'+svg_source+'\n```')
             svg_article=page.locator('[data-item-id="svg-preview"]')
-            expect(svg_article.locator('.svg-thumbnail svg')).to_be_visible()
-            assert svg_article.locator('svg').evaluate('(e)=>e.namespaceURI')=='http://www.w3.org/2000/svg'
-            expect(svg_article.locator('svg text')).to_have_text('Local drawing')
+            expect(svg_article.locator('.svg-thumbnail img')).to_be_visible()
+            expect(svg_article.locator('svg')).to_have_count(0)
+            expect_svg_image(svg_article.locator('.svg-thumbnail img'))
             svg_article.get_by_role('button',name='Enlarge SVG preview').click()
             svg_popup=page.get_by_role('dialog',name='SVG preview',exact=True)
-            expect(svg_popup.locator('svg')).to_be_visible()
-            expect(svg_popup.locator('a,image,foreignObject,[href],[src]')).to_have_count(0)
+            expect(svg_popup.locator('.svg-expanded img')).to_be_visible()
+            expect_svg_image(svg_popup.locator('.svg-expanded img'))
+            expect(svg_popup.locator('svg,object,iframe')).to_have_count(0)
             page.keyboard.press('Escape')
             expect(svg_popup).to_have_count(0)
             svg_article.get_by_text('SVG source',exact=True).click()
             assert svg_article.locator('.svg-source code').text_content()==svg_source+'\n'
+            # Repeated IDs are isolated in separate image documents, including modal.
+            rover = (ROOT / 'tests/fixtures/mars-rover.svg').read_text()
+            for ident in ['svg-rover-one', 'svg-rover-two']:
+                codex.message(ident, '```svg\n' + rover + '\n```')
+                svg_case = page.locator(f'[data-item-id="{ident}"]')
+                expect_svg_image(svg_case.locator('.svg-thumbnail img'))
+            first_rover = page.locator('[data-item-id="svg-rover-one"]')
+            first_rover.get_by_role('button', name='Enlarge SVG preview').click()
+            expect_svg_image(page.get_by_role('dialog', name='SVG preview', exact=True).locator('.svg-expanded img'))
+            assert page.locator('svg #sky, svg #solar, svg #title').count() == 0
+            page.keyboard.press('Escape')
+            expect(first_rover.locator('.svg-thumbnail img')).to_have_attribute('alt', 'A small rover, a big universe An orange exploration rover crosses a red Martian landscape beneath a pale sun and scattered stars.')
+            # Canvas sampling confirms paint-server rendering, not just XML acceptance.
+            pixels = first_rover.locator('.svg-thumbnail img').evaluate("""img => {
+                const canvas = document.createElement('canvas');
+                canvas.width = 800; canvas.height = 600;
+                const ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0, 800, 600);
+                return [[400, 20], [400, 200], [611, 136], [350, 345], [360, 345]].map(([x,y]) => Array.from(ctx.getImageData(x,y,1,1).data));
+            }""")
+            assert pixels[0] != pixels[1], pixels
+            assert pixels[2][:3] == [246, 223, 189], pixels
+            assert pixels[3][:3] == [38, 62, 83] and pixels[3] != pixels[4], pixels
+            for ident, body in [
+                ('svg-script', '<script>window.svgExecuted=true</script>'),
+                ('svg-external', '<rect fill="url(https://example.org/paint.svg#g)"/>'),
+                ('svg-resource', '<image href="https://example.org/pixel.png"/>'),
+            ]:
+                codex.message(ident, '```svg\n<svg viewBox="0 0 10 10">' + body + '</svg>\n```')
+                svg_case = page.locator(f'[data-item-id="{ident}"]')
+                expect(svg_case).to_contain_text('SVG preview unavailable')
+                expect(svg_case.locator('img,svg,iframe,object,script')).to_have_count(0)
+            assert page.evaluate('window.svgExecuted === undefined')
             drawing=directory/'drawing.svg'
             drawing.write_text(svg_source)
             codex.message('svg-file',f'[Drawing]({drawing})')
@@ -454,9 +493,9 @@ sequenceDiagram
             page.locator('[data-item-id="svg-file"] .markdown-link').click()
             page.get_by_role('dialog',name='Drawing',exact=True).get_by_role('button',name='Show file',exact=True).click()
             drawing_preview=page.get_by_role('dialog',name='File preview',exact=True)
-            expect(drawing_preview.locator('svg')).to_be_visible()
+            expect(drawing_preview.locator('.svg-thumbnail img')).to_be_visible()
             drawing_preview.get_by_role('button',name='Enlarge SVG preview',exact=True).click()
-            expect(page.get_by_role('dialog',name='SVG preview',exact=True).locator('svg')).to_be_visible()
+            expect(page.get_by_role('dialog',name='SVG preview',exact=True).locator('.svg-expanded img')).to_be_visible()
             page.keyboard.press('Escape')
             expect(drawing_preview).to_be_visible()
             drawing_preview.get_by_role('button',name='Close',exact=True).click()
@@ -488,7 +527,7 @@ sequenceDiagram
                 assert Path(downloaded.value.path()).read_bytes() == payload
                 preview.get_by_role('button', name='Close', exact=True).click()
                 popup.get_by_role('button', name='Close', exact=True).click()
-            codex.message('svg-unsupported','```svg\n<svg viewBox="0 0 10 10"><defs/></svg>\n```')
+            codex.message('svg-unsupported','```svg\n<svg viewBox="0 0 10 10"><filter/></svg>\n```')
             expect(page.locator('[data-item-id="svg-unsupported"]')).to_contain_text('SVG preview unavailable')
             expect(page.locator('[data-item-id="svg-unsupported"] svg')).to_have_count(0)
             codex.message('plain','A plain message. No formatting.')
@@ -523,7 +562,7 @@ sequenceDiagram
             page.wait_for_timeout(300)
             svg_article.get_by_role('button',name='Enlarge SVG preview').click()
             page.wait_for_timeout(200)
-            expect(page.get_by_role('dialog',name='SVG preview').locator('svg')).to_be_visible()
+            expect(page.get_by_role('dialog',name='SVG preview').locator('.svg-expanded img')).to_be_visible()
             assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
             page.mouse.click(1,1)
             expect(page.get_by_role('dialog',name='SVG preview')).to_have_count(0)

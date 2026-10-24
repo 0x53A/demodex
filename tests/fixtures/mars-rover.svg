@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600" role="img" aria-labelledby="title desc">
+  <title id="title">A small rover, a big universe</title>
+  <desc id="desc">An orange exploration rover crosses a red Martian landscape beneath a pale sun and scattered stars.</desc>
+  <defs>
+    <linearGradient id="sky" x2="0" y2="1">
+      <stop stop-color="#111c2b"/>
+      <stop offset="1" stop-color="#394150"/>
+    </linearGradient>
+    <linearGradient id="ground" x2="0" y2="1">
+      <stop stop-color="#c76543"/>
+      <stop offset="1" stop-color="#743d35"/>
+    </linearGradient>
+    <pattern id="solar" width="24" height="20" patternUnits="userSpaceOnUse">
+      <rect width="24" height="20" fill="#263e53"/>
+      <path d="M0 0H24M0 0V20" fill="none" stroke="#73929d" stroke-width="2"/>
+    </pattern>
+  </defs>
+  <path fill="url(#sky)" d="M0 0H800V600H0z"/>
+  <g fill="#f6dfbd">
+    <circle cx="109" cy="92" r="2"/><circle cx="260" cy="66" r="2"/>
+    <circle cx="390" cy="134" r="1.5"/><circle cx="699" cy="185" r="2"/>
+    <circle cx="728" cy="61" r="1.5"/><circle cx="191" cy="194" r="1.5"/>
+    <circle cx="520" cy="49" r="1.5"/>
+    <circle cx="611" cy="136" r="53"/>
+  </g>
+  <circle cx="611" cy="136" r="69" fill="none" stroke="#f6dfbd" stroke-opacity=".12"/>
+  <path d="M0 331 104 234 221 337 343 263 494 350 653 273 800 333V600H0Z" fill="#6d4c49"/>
+  <path d="m0 368 164-62 179 82 150-55 176 47 131-41v261H0Z" fill="#9d5846"/>
+  <path d="M0 417Q195 347 400 410T800 394V600H0Z" fill="url(#ground)"/>
+  <g fill="none" stroke="#572f30" stroke-width="9" stroke-dasharray="5 17" opacity=".4">
+    <path d="M295 450Q220 480 101 600"/><path d="M454 450Q377 510 287 600"/>
+  </g>
+  <ellipse cx="406" cy="461" rx="175" ry="24" fill="#472c2d" opacity=".4"/>
+  <g stroke="#182635" stroke-linejoin="round">
+    <path d="m293 428 54-44 74 49 78-49 44 44" fill="none" stroke-width="14"/>
+    <path d="M324 359h168l-19 58H339Z" fill="#ef763b" stroke-width="7"/>
+    <path d="M345 378h124" fill="none" stroke="#ffbe73" stroke-width="5"/>
+    <path d="M407 339v-79" fill="none" stroke-width="12"/>
+    <path d="m378 231 64 5v39l-64-5Z" fill="#e9d8b8" stroke-width="6"/>
+    <circle cx="424" cy="253" r="10" fill="#263e53" stroke-width="4"/>
+    <circle cx="426" cy="250" r="3" fill="#a8e2df" stroke="none"/>
+    <path d="m353 332-16-53" fill="none" stroke-width="5"/>
+    <circle cx="336" cy="276" r="5" fill="#f7b86e" stroke="none"/>
+    <path d="m276 325 213-11 47 43-219 14Z" fill="url(#solar)" stroke-width="6"/>
+    <g fill="#263442" stroke-width="7">
+      <circle cx="293" cy="435" r="32"/><circle cx="418" cy="444" r="32"/>
+      <circle cx="543" cy="435" r="32"/>
+    </g>
+    <g fill="#e1b18b" stroke-width="5">
+      <circle cx="293" cy="435" r="13"/><circle cx="418" cy="444" r="13"/>
+      <circle cx="543" cy="435" r="13"/>
+    </g>
+  </g>
+  <g fill="#673c35">
+    <path d="m643 491 22-12 28 7 9 14h-62Z"/>
+    <path d="m128 418 17-11 21 14Z"/>
+    <path d="m564 552 14-9 19 12Z"/>
+  </g>
+  <path d="M48 50h32M48 50v32M752 518v32h-32" fill="none" stroke="#f7d9b5" stroke-width="2" opacity=".55"/>
+  <text x="49" y="533" fill="#ffe4c4" font-family="monospace" font-size="13" letter-spacing="3">KEEP EXPLORING.</text>
+  <text x="49" y="555" fill="#e5b291" font-family="monospace" font-size="10" letter-spacing="2">SOL 001 / SOMEWHERE OUT THERE</text>
+</svg>

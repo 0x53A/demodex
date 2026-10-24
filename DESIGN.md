@@ -495,19 +495,23 @@ omit session identity and message content from the OS notification.
 preserves older threads' original tool catalogue. Real push-provider/device acceptance
 is an explicit deployment smoke test, not performed by fixture tests.
 
-SVG fenced blocks and explicitly opened SVG files use a deliberately small local drawing subset. Geometry, groups,
-text, title and description elements become an allowlisted Yew SVG tree; raw HTML
-insertion is never used. Source CSS, resource references, images, links, definitions,
-animations and foreign content are unsupported. Any unsupported element or attribute
-rejects the whole preview, with a readable reason and exact source available.
-Accepted drawings appear in a bounded thumbnail button; clicking opens a larger
-modal with Close, Escape and outside-click dismissal. Preview rendering never fetches
-resources. Limit input to 128 KiB, 2,048 XML nodes, 32 nesting levels and 16 KiB per
-attribute; numeric values must be finite and at most 1,000,000 in magnitude. A
-transform attribute accepts at most 16 operations. Require a valid viewBox or positive
-numeric width and height. Fill/stroke accept hex and a limited set of color names;
-fonts are generic serif, sans-serif or monospace. Raw source remains independently
-expandable for both supported and unsupported drawings.
+SVG fenced blocks and explicitly opened SVG files use a bounded static drawing
+subset, rendered as vector SVG image documents through HTML img data URLs. SVG
+nodes never enter the application DOM, so repeated IDs in thumbnails and expanded
+views are isolated. Geometry, text, labels, local linear/radial gradients and simple
+patterns are supported. CSS, external resources, links, scripts, animation and
+foreign content are rejected. Paint references must resolve to local definitions;
+references from paint-server definitions/patterns are unsupported. Unsupported input rejects
+the whole preview with a readable reason and exact source retained.
+
+The thumbnail button opens a larger modal with Close, Escape and outside-click
+dismissal. Images use object-fit:contain in bounded containers and display decode
+errors. Preview rendering never fetches external resources. Keep the 128 KiB input,
+2,048 XML nodes, 32 nesting levels, 16 KiB attribute, finite numeric magnitude
+<=1,000,000 and 16 transform-operation bounds, plus at most 32 paint servers and
+minimum numeric pattern dimensions. Require a valid viewBox or positive numeric
+width and height. Fonts remain generic serif, sans-serif or monospace. Raw source
+remains independently expandable; file download preserves the original bytes.
 
 Popup sizing uses the shared Modal component: content-sized forms grow to the
 viewport with 32px margins on desktop and 8px on mobile, then scroll internally.
@@ -544,6 +548,11 @@ below the path, before session cards. It opens the New Session form with that ta
 Private SSH targets stage a new private attachment using the same SSH settings.
 The usage popup shows every reported quota window with relative and absolute reset
 times, plus reported credit balances or an explicit unavailable state.
+Available resets appear in their own section, using Codex's reported count rather
+than counting detail rows. Show each reported reset's title, description, grant
+date and expiry date; explicit null expiry means Does not expire. Missing details
+remain explicit, including when only part of the available resets is listed.
+This section is informational and has no redemption action.
 
 The composer action row always includes the model picker. Selection shares the
 Session controls draft and requires Apply model; active sessions keep the picker

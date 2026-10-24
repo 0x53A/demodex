@@ -88,6 +88,40 @@ fn credit_label(credits: &Value) -> String {
         None => "Not reported".into(),
     }
 }
+fn reset_count(summary: &Value) -> Option<u64> {
+    summary["availableCount"].as_u64()
+}
+fn reset_details_note(summary: &Value) -> Option<String> {
+    match summary["credits"].as_array() {
+        None if reset_count(summary).is_some() => Some("Reset details not reported".into()),
+        Some(rows) if reset_count(summary).is_some_and(|count| count > rows.len() as u64) =>
+            Some(format!("Details reported for {} of {} available resets", rows.len(), reset_count(summary).unwrap())),
+        _ => None,
+    }
+}
+fn reset_expiry(credit: &Value) -> String {
+    match credit.get("expiresAt") {
+        Some(Value::Null) => "Does not expire".into(),
+        Some(value) => format!("Expires: {}", timestamp(value)),
+        None => "Expiry not reported".into(),
+    }
+}
+fn reset_credits(summary: &Value) -> Html {
+    html! {<div class="usage-resets">
+        <strong>{"Available resets"}</strong>
+        <p>{reset_count(summary).map(|count| format!("{count} available")).unwrap_or_else(|| "Not reported by Codex".into())}</p>
+        {for array(&summary["credits"]).iter().map(|credit| {
+            let title = credit["title"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or("Rate-limit reset");
+            html!{<div class="weekly-window usage-reset">
+                <strong>{title}</strong>
+                {if let Some(description)=credit["description"].as_str().filter(|s| !s.trim().is_empty()) {html!{<small>{description}</small>}} else {Html::default()}}
+                <small>{format!("Granted: {}",timestamp(&credit["grantedAt"]))}</small>
+                <small>{reset_expiry(credit)}</small>
+            </div>}
+        })}
+        {if let Some(note)=reset_details_note(summary) {html!{<small>{note}</small>}} else {Html::default()}}
+    </div>}
+}
 pub fn weekly(runtime: &Value, connected: bool) -> Html {
     let usage = &runtime["weekly_usage"];
     let weekly = array(&usage["windows"]);
@@ -117,6 +151,7 @@ pub fn weekly(runtime: &Value, connected: bool) -> Html {
                     {for array(&usage["credits"]).iter().map(|entry|html!{<p>{format!("{} · {}",text(entry,"name"),credit_label(&entry["credits"]))}</p>})}
                 </>}}}
             </div>
+            {reset_credits(&usage["reset_credits"])}
             {if usage["checked_at"].is_number(){html!{<small>{format!("Last updated: {}",timestamp(&usage["checked_at"]))}</small>}}else{Html::default()}}
         </div>
     </details>}
@@ -126,6 +161,20 @@ pub fn weekly(runtime: &Value, connected: bool) -> Html {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn available_resets_use_authoritative_count_and_explain_missing_details() {
+        assert_eq!(reset_count(&Value::Null), None);
+        assert_eq!(reset_count(&json!({"availableCount":-1})), None);
+        let zero = json!({"availableCount":0,"credits":[]});
+        assert_eq!(reset_count(&zero), Some(0));
+        assert_eq!(reset_details_note(&zero), None);
+        let partial = json!({"availableCount":3,"credits":[{}]});
+        assert_eq!(reset_count(&partial), Some(3));
+        assert_eq!(reset_details_note(&partial).as_deref(), Some("Details reported for 1 of 3 available resets"));
+        assert_eq!(reset_details_note(&json!({"availableCount":2,"credits":null})).as_deref(), Some("Reset details not reported"));
+        assert_eq!(reset_expiry(&json!({"expiresAt":null})), "Does not expire");
+        assert_eq!(reset_expiry(&json!({})), "Expiry not reported");
+    }
     #[test]
     fn cold_estimate_uses_last_input_and_age_and_never_marks_active_work() {
         let mut session = json!({"status":"idle","context_usage":{"input_tokens":123456,"cached_input_tokens":120000,"used_tokens":150000,"reported_at":1000}});

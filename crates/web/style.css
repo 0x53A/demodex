@@ -286,6 +286,7 @@ input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px soli
 .app-header button{font-size:12px;min-height:34px;padding:6px 10px}
 .weekly-window{display:grid;grid-template-columns:1fr auto;gap:6px 10px}
 .weekly-window strong{grid-column:1 / -1;font-size:12px}
+.usage-reset small{grid-column:1 / -1}
 .weekly-window meter{width:100%;height:9px}
 meter{appearance:none;-webkit-appearance:none;border:0;border-radius:0;background:#343a32}
 meter::-webkit-meter-bar{border:0;border-radius:0;background:#343a32}

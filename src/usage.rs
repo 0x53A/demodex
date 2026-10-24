@@ -72,7 +72,7 @@ pub fn weekly(response: &Value) -> Value {
     {
         credits.push(json!({"id":legacy_id,"name":legacy["limitName"].as_str().unwrap_or(legacy_id),"credits":legacy["credits"]}));
     }
-    json!({"windows":windows,"all_windows":all_windows,"credits":credits,"checked_at":now(),"error":if windows.is_empty(){Some("No weekly usage window reported by Codex")}else{None}})
+    json!({"windows":windows,"all_windows":all_windows,"credits":credits,"reset_credits":response["rateLimitResetCredits"],"checked_at":now(),"error":if windows.is_empty(){Some("No weekly usage window reported by Codex")}else{None}})
 }
 
 struct Cached {
@@ -218,6 +218,21 @@ mod tests {
         assert_eq!(store.get(&id)?.context_usage["used_tokens"], 0);
         assert_eq!(store.events(&id, 0)?.len(), 2);
         Ok(())
+    }
+
+    #[test]
+    fn reset_credits_preserve_unknown_zero_and_partial_details_without_windows() {
+        assert!(weekly(&json!({}))["reset_credits"].is_null());
+        for summary in [
+            json!({"availableCount":0,"credits":[]}),
+            json!({"availableCount":3,"credits":null}),
+            json!({"availableCount":3,"credits":[
+                {"id":"reset-1","status":"available","grantedAt":1800000000,"expiresAt":1900000000,"title":"Referral reset"},
+                {"id":"reset-2","status":"available","grantedAt":1800000000,"expiresAt":null}
+            ]}),
+        ] {
+            assert_eq!(weekly(&json!({"rateLimitResetCredits":summary}))["reset_credits"], summary);
+        }
     }
 
     #[test]

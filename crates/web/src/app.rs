@@ -1172,7 +1172,17 @@ impl Component for App {
                                 } else { self.error = "Invalid conversation response".into(); }
                             } else if let Some(batch) = value.as_array() {
                                 let incoming: Vec<_> = batch.iter().filter(|v|v["seq"].as_i64().unwrap_or(0)>cursor).cloned().collect();
-                                if !incoming.is_empty() {
+                                if crate::transcript::needs_history_reload(self.older.is_some(), &incoming) {
+                                    // Old IDs outside the loaded page must not become new
+                                    // messages at the tail when a session resumes.
+                                    self.history_loaded = false;
+                                    self.older = None;
+                                    self.older_serial += 1;
+                                    self.older_loading = false;
+                                    self.older_error.clear();
+                                    self.prepend_scroll = None;
+                                    self.reads.invalidate(Resource::Events);
+                                } else if !incoming.is_empty() {
                                     self.transcript.append(&incoming);
                                     self.event_count += incoming.len();
                                     // Render each page before fetching the next, rather than

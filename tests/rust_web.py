@@ -1185,6 +1185,23 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             expect(older).to_have_count(1,timeout=30000)
             expect(page.locator('[data-item-id="page-marker-14"]')).to_have_count(1)
             expect(page.locator('[data-item-id="page-marker-0"]')).to_have_count(0)
+            # A reconnect snapshot can include IDs from unloaded older pages.
+            # Exercise the App's asynchronous Events -> Conversation reload:
+            # those IDs must not appear as newly appended messages at the tail.
+            with sqlite3.connect(directory/'state/state.sqlite') as db:
+                snapshot = {'method':'demodex/threadSnapshot','params':{'thread':{'turns':[{'items':[
+                    {'id':f'page-marker-{number}','type':'agentMessage','text':f'Paging marker {number}\n'+'Visible paragraph. '*40}
+                    for number in range(15)
+                ]}]}}}
+                tail = {'method':'item/completed','params':{'item':{
+                    'id':'post-resume-marker','type':'agentMessage','text':'After the paged resume snapshot'
+                }}}
+                for event in [snapshot, tail]:
+                    db.execute('INSERT INTO events(session_id,message) VALUES(?,?)',(session_id,json.dumps(event)))
+            page.evaluate("window.dispatchEvent(new Event('online'))")
+            expect(page.locator('[data-item-id="post-resume-marker"]')).to_have_count(1,timeout=30000)
+            expect(page.locator('[data-item-id="page-marker-0"]')).to_have_count(0)
+            expect(older).to_have_count(1)
             transcript = page.locator('.transcript')
             transcript.evaluate('e=>{e.scrollTop=0;e.dispatchEvent(new Event("scroll"));}')
             anchor = page.locator('[data-item-id^="page-marker-"]').first

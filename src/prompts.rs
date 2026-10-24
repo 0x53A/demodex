@@ -274,7 +274,7 @@ impl crate::orchestrator::Orchestrator {
             ensure!(
                 matches!(
                     state["thread"]["status"]["type"].as_str(),
-                    Some("idle" | "notLoaded")
+                    Some("idle" | "systemError" | "notLoaded")
                 ),
                 "Prompt settings require an idle thread before reconnecting"
             );

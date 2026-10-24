@@ -1,56 +1,15 @@
-//! Local-only SVG subset: geometry, groups and text; no URL-bearing attributes,
-//! CSS, definitions/references, animation, HTML, or external resources. Unsupported
-//! input fails as a whole and remains available as exact source.
+//! Bounded static SVG images. Validated XML is loaded through an img data URL,
+//! never inserted into the application DOM. Local paint servers are supported;
+//! external references, scripts, CSS, HTML and animation remain unsupported.
 use crate::modal::Modal;
-use yew::{prelude::*, virtual_dom::VTag};
+use base64::Engine;
+use std::collections::HashMap;
+use yew::prelude::*;
 
 const MAX_BYTES: usize = 128 * 1024;
 const MAX_NODES: usize = 2048;
 const MAX_DEPTH: usize = 32;
 const MAX_ATTRIBUTE: usize = 16 * 1024;
-const ATTRIBUTE_NAMES: &[&str] = &[
-    "x",
-    "y",
-    "x1",
-    "y1",
-    "x2",
-    "y2",
-    "cx",
-    "cy",
-    "dx",
-    "dy",
-    "width",
-    "height",
-    "r",
-    "rx",
-    "ry",
-    "stroke-width",
-    "stroke-miterlimit",
-    "font-size",
-    "textLength",
-    "opacity",
-    "fill-opacity",
-    "stroke-opacity",
-    "fill",
-    "stroke",
-    "transform",
-    "points",
-    "d",
-    "stroke-linecap",
-    "stroke-linejoin",
-    "fill-rule",
-    "clip-rule",
-    "stroke-dasharray",
-    "stroke-dashoffset",
-    "text-anchor",
-    "dominant-baseline",
-    "font-family",
-    "font-weight",
-    "font-style",
-    "lengthAdjust",
-    "viewBox",
-    "preserveAspectRatio",
-];
 const SVG_NS: &str = "http://www.w3.org/2000/svg";
 
 type SvgResult<T> = Result<T, String>;
@@ -171,6 +130,22 @@ fn path(value: &str) -> bool {
     }
     !value.is_empty()
 }
+fn identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+}
+fn paint_reference(value: &str) -> Option<&str> {
+    value
+        .strip_prefix("url(#")
+        .and_then(|s| s.strip_suffix(')'))
+        .filter(|s| identifier(s))
+}
+fn coordinate(value: &str) -> bool {
+    number(value.strip_suffix('%').unwrap_or(value)).is_some()
+}
 fn attribute(name: &str, value: &str) -> bool {
     if value.len() > MAX_ATTRIBUTE {
         return false;
@@ -184,10 +159,30 @@ fn attribute(name: &str, value: &str) -> bool {
         "opacity" | "fill-opacity" | "stroke-opacity" => {
             number(value).is_some_and(|n| (0.0..=1.0).contains(&n))
         }
-        "fill" | "stroke" => color(value),
+        "fill" | "stroke" => color(value) || paint_reference(value).is_some(),
+        "stop-color" => color(value),
+        "stop-opacity" => number(value).is_some_and(|n| (0.0..=1.0).contains(&n)),
+        "offset" => match value.strip_suffix('%') {
+            Some(v) => number(v).is_some_and(|n| (0.0..=100.0).contains(&n)),
+            None => number(value).is_some_and(|n| (0.0..=1.0).contains(&n)),
+        },
+        "id" => identifier(value),
+        "role" => value == "img",
+        "aria-label" => !value.is_empty(),
+        "aria-labelledby" | "aria-describedby" => {
+            !value.trim().is_empty()
+                && value.split_ascii_whitespace().count() <= 16
+                && value.split_ascii_whitespace().all(identifier)
+        }
+        "letter-spacing" | "word-spacing" => number(value).is_some(),
+        "gradientUnits" | "patternUnits" | "patternContentUnits" => {
+            matches!(value, "userSpaceOnUse" | "objectBoundingBox")
+        }
+        "gradientTransform" | "patternTransform" => transform(value),
+        "spreadMethod" => matches!(value, "pad" | "reflect" | "repeat"),
         "transform" => transform(value),
         "points" => numbers(value).is_some_and(|n| n.len() >= 4 && n.len() % 2 == 0),
-        // Only geometry command letters and bounded finite numbers reach the DOM.
+        // Only geometry command letters and bounded finite numbers enter the image.
         "d" => path(value),
         "stroke-linecap" => matches!(value, "butt" | "round" | "square"),
         "stroke-linejoin" => matches!(value, "miter" | "round" | "bevel"),
@@ -249,7 +244,17 @@ fn attribute(name: &str, value: &str) -> bool {
     }
 }
 
-pub fn render(source: &str) -> SvgResult<Html> {
+fn escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+// Re-serialize the validated subset, supplying an SVG namespace even for fenced
+// snippets that omit it. The original source remains untouched in source controls.
+fn image_source(source: &str) -> SvgResult<String> {
     if source.len() > MAX_BYTES {
         return Err("SVG exceeds the 128 KiB preview limit".into());
     }
@@ -283,20 +288,46 @@ pub fn render(source: &str) -> SvgResult<Html> {
             format!("0 0 {w} {h}")
         }
     };
-    fn node(n: roxmltree::Node<'_, '_>, depth: usize) -> SvgResult<Html> {
+    let mut ids = HashMap::new();
+    let mut paint_servers = 0;
+    for n in root.descendants().filter(|n| n.is_element()) {
+        if let Some(id) = n.attribute("id") {
+            if !identifier(id) || ids.insert(id, n.tag_name().name()).is_some() {
+                return Err("Invalid or duplicate SVG ID".into());
+            }
+        }
+        if matches!(
+            n.tag_name().name(),
+            "linearGradient" | "radialGradient" | "pattern"
+        ) {
+            paint_servers += 1;
+            if paint_servers > 32 {
+                return Err("SVG exceeds the 32 paint-server limit".into());
+            }
+        }
+    }
+    fn node(
+        n: roxmltree::Node<'_, '_>,
+        depth: usize,
+        ids: &HashMap<&str, &str>,
+        view_box: &str,
+        output: &mut String,
+    ) -> SvgResult<()> {
         if depth > MAX_DEPTH {
             return Err("SVG exceeds the 32-level nesting limit".into());
         }
         if n.is_text() {
-            return Ok(Html::from(n.text().unwrap_or_default().to_owned()));
+            output.push_str(&escape(n.text().unwrap_or_default()));
+            return Ok(());
         }
         if n.is_comment() {
-            return Ok(Html::default());
+            return Ok(());
         }
         if !n.is_element() {
             return Err("Unsupported SVG content".into());
         }
         let name = n.tag_name().name();
+        let parent = n.parent_element().map(|p| p.tag_name().name());
         if n.tag_name().namespace().is_some_and(|ns| ns != SVG_NS)
             || !matches!(
                 name,
@@ -313,46 +344,180 @@ pub fn render(source: &str) -> SvgResult<Html> {
                     | "tspan"
                     | "title"
                     | "desc"
+                    | "defs"
+                    | "linearGradient"
+                    | "radialGradient"
+                    | "stop"
+                    | "pattern"
             )
             || name == "svg" && depth != 0
         {
             return Err(format!("Unsupported SVG element: {name}"));
         }
-        let mut tag = VTag::new(name.to_owned());
-        for a in n.attributes() {
-            if a.namespace().is_some() || !attribute(a.name(), a.value()) {
-                return Err(format!("Unsupported SVG attribute: {}", a.name()));
+        let gradient = matches!(name, "linearGradient" | "radialGradient");
+        if (name == "defs" && parent != Some("svg"))
+            || ((gradient || name == "pattern") && parent != Some("defs"))
+            || (name == "stop" && !matches!(parent, Some("linearGradient" | "radialGradient")))
+            || (matches!(parent, Some("linearGradient" | "radialGradient")) && name != "stop")
+        {
+            return Err(format!("Unsupported SVG placement: {name}"));
+        }
+        if name == "pattern" {
+            // Limit tile density in either coordinate system. Nested/reference-
+            // based patterns are excluded below rather than expanding a graph.
+            let minimum = if n.attribute("patternUnits") == Some("userSpaceOnUse") {
+                1.0
+            } else {
+                0.01
+            };
+            for key in ["width", "height"] {
+                if !n
+                    .attribute(key)
+                    .and_then(number)
+                    .is_some_and(|v| v >= minimum)
+                {
+                    return Err(
+                        "SVG pattern needs bounded positive numeric width and height".into(),
+                    );
+                }
             }
-            let key = ATTRIBUTE_NAMES
-                .iter()
-                .copied()
-                .find(|key| *key == a.name())
-                .ok_or_else(|| format!("Unsupported SVG attribute: {}", a.name()))?;
-            tag.add_attribute(key, a.value().to_owned());
         }
+        output.push('<');
+        output.push_str(name);
+        if depth == 0 {
+            output.push_str(" xmlns=\"http://www.w3.org/2000/svg\"");
+        }
+        for a in n.attributes() {
+            let key = a.name();
+            let value = a.value();
+            let gradient_coordinate = gradient
+                && matches!(
+                    key,
+                    "x1" | "y1" | "x2" | "y2" | "cx" | "cy" | "r" | "fx" | "fy" | "fr"
+                );
+            if a.namespace().is_some()
+                || value.len() > MAX_ATTRIBUTE
+                || !(if gradient_coordinate {
+                    coordinate(value)
+                } else {
+                    attribute(key, value)
+                })
+            {
+                return Err(format!("Unsupported SVG attribute: {key}"));
+            }
+            if let Some(id) = paint_reference(value).filter(|_| matches!(key, "fill" | "stroke")) {
+                if !matches!(
+                    ids.get(id),
+                    Some(&"linearGradient" | &"radialGradient" | &"pattern")
+                ) {
+                    return Err("SVG paint reference must name a local paint server".into());
+                }
+                if n.ancestors().any(|p| p.has_tag_name("pattern"))
+                    || n.descendants().any(|p| p.has_tag_name("defs"))
+                    || matches!(name, "defs" | "linearGradient" | "radialGradient" | "stop")
+                {
+                    return Err("SVG paint references inside definitions are unsupported".into());
+                }
+            }
+            if matches!(key, "aria-labelledby" | "aria-describedby")
+                && !value
+                    .split_ascii_whitespace()
+                    .all(|id| matches!(ids.get(id), Some(&"title" | &"desc")))
+            {
+                return Err(
+                    "SVG accessibility reference must name a local title or description".into(),
+                );
+            }
+            if depth == 0 && matches!(key, "width" | "height") {
+                continue;
+            }
+            output.push(' ');
+            output.push_str(key);
+            output.push_str("=\"");
+            output.push_str(&escape(value));
+            output.push('"');
+        }
+        if depth == 0 && n.attribute("viewBox").is_none() {
+            output.push_str(" viewBox=\"");
+            output.push_str(&escape(view_box));
+            output.push('"');
+        }
+        output.push('>');
         for child in n.children() {
-            tag.add_child(node(child, depth + 1)?);
+            node(child, depth + 1, ids, view_box, output)?;
         }
-        Ok(tag.into())
+        output.push_str("</");
+        output.push_str(name);
+        output.push('>');
+        Ok(())
     }
-    let mut tree = node(root, 0)?;
-    if let yew::virtual_dom::VNode::VTag(tag) = &mut tree {
-        let tag = std::rc::Rc::make_mut(tag);
-        tag.add_attribute("viewBox", view_box);
-        tag.add_attribute("width", "100%");
-        tag.add_attribute("height", "100%");
-        if root.attribute("preserveAspectRatio").is_none() {
-            tag.add_attribute("preserveAspectRatio", "xMidYMid meet");
-        }
-        tag.add_attribute("role", "img");
-        tag.add_attribute("aria-label", "SVG preview");
-    }
-    Ok(tree)
+    let mut normalized = String::new();
+    node(root, 0, &ids, &view_box, &mut normalized)?;
+    Ok(normalized)
+}
+
+pub fn render(source: &str) -> SvgResult<Html> {
+    let source = image_source(source)?;
+    let doc = roxmltree::Document::parse(&source).map_err(|_| "Invalid normalized SVG")?;
+    let root = doc.root_element();
+    let referenced_label = root.attribute("aria-labelledby").map(|ids| {
+        ids.split_ascii_whitespace()
+            .filter_map(|id| root.descendants().find(|n| n.attribute("id") == Some(id)))
+            .flat_map(|n| {
+                n.descendants()
+                    .filter(|n| n.is_text())
+                    .filter_map(|n| n.text())
+            })
+            .flat_map(|text| text.chars().chain(std::iter::once(' ')))
+            .take(4096)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    });
+    let title = root.children().find(|n| n.has_tag_name("title")).map(|n| {
+        n.descendants()
+            .filter(|n| n.is_text())
+            .filter_map(|n| n.text())
+            .collect::<String>()
+    });
+    let label = referenced_label
+        .as_deref()
+        .or_else(|| root.attribute("aria-label"))
+        .or(title.as_deref())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("SVG preview")
+        .chars()
+        .take(4096)
+        .collect::<String>();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(source.as_bytes());
+    let uri = format!("data:image/svg+xml;base64,{encoded}");
+    Ok(html! { <SvgImage key={uri.clone()} source={uri.clone()} {label}/> })
 }
 
 #[derive(Properties, PartialEq)]
 pub struct Props {
     pub source: AttrValue,
+}
+
+// Image documents isolate IDs and prohibit scripts/external loads in the browser.
+// Decode failure still leaves the exact source and file download available.
+#[derive(Properties, PartialEq)]
+struct ImageProps {
+    source: AttrValue,
+    label: AttrValue,
+}
+
+#[function_component(SvgImage)]
+fn svg_image(props: &ImageProps) -> Html {
+    let failed = use_state(|| false);
+    let onerror = {
+        let failed = failed.clone();
+        Callback::from(move |_| failed.set(true))
+    };
+    html! { <>
+        <img src={props.source.clone()} alt={props.label.clone()} {onerror}/>
+        {if *failed { html! { <p role="alert">{"SVG preview unavailable: browser could not decode the image."}</p> } } else { Html::default() }}
+    </> }
 }
 
 #[function_component(SvgPreview)]
@@ -396,9 +561,70 @@ mod tests {
         assert!(render(r#"<svg width="100" height="50"><line x1="0" x2="50" /></svg>"#).is_ok());
     }
     #[test]
+    fn supports_rover_and_normalizes_namespace_without_inserting_markup() {
+        let rover = include_str!("../../../tests/fixtures/mars-rover.svg");
+        let output = image_source(rover).unwrap();
+        assert!(output.contains("url(#solar)"));
+        assert!(output.contains("aria-labelledby=\"title desc\""));
+        assert!(render(rover).is_ok());
+        let minimal = image_source(
+            r#"<svg width="100" height="50"><text>&lt;script&gt; &amp; &quot;</text></svg>"#,
+        )
+        .unwrap();
+        let doc = roxmltree::Document::parse(&minimal).unwrap();
+        assert_eq!(doc.root_element().tag_name().namespace(), Some(SVG_NS));
+        assert_eq!(doc.root_element().attribute("viewBox"), Some("0 0 100 50"));
+        assert_eq!(
+            doc.root_element().first_element_child().unwrap().text(),
+            Some("<script> & \"")
+        );
+        assert!(image_source(r#"<svg viewBox="0 0 10 10"><defs><radialGradient id="g" cx="50%" r="50%"><stop offset="100%" stop-color="red"/></radialGradient></defs><circle r="5" fill="url(#g)"/></svg>"#).is_ok());
+    }
+    #[test]
+    fn rejects_active_content_external_or_recursive_references() {
+        for body in [
+            r#"<script>alert(1)</script>"#,
+            r#"<foreignObject/>"#,
+            r#"<image href="https://example.com/pixel"/>"#,
+            r##"<use href="#shape"/>"##,
+            r#"<rect onload="alert(1)"/>"#,
+            r#"<rect fill="url(https://example.com/paint.svg#g)"/>"#,
+            r#"<rect fill="url(#missing)"/>"#,
+            r#"<rect id="g"/><circle fill="url(#g)"/>"#,
+            r#"<title id="a"/><desc id="a"/>"#,
+            r#"<text aria-labelledby="missing"/>"#,
+            r##"<defs><linearGradient id="g" href="#g"/></defs>"##,
+            r#"<defs><pattern id="p" width="1" height="1"><rect fill="url(#p)"/></pattern></defs>"#,
+            r#"<defs><pattern width="0.00001" height="1"/></defs>"#,
+            r#"<defs><pattern width="1" height="1"><defs/></pattern></defs>"#,
+        ] {
+            assert!(
+                image_source(&format!("<svg viewBox=\"0 0 10 10\">{body}</svg>")).is_err(),
+                "{body}"
+            );
+        }
+        assert!(
+            image_source(r#"<!DOCTYPE svg [<!ENTITY x "bad">]><svg viewBox="0 0 10 10">&x;</svg>"#)
+                .is_err()
+        );
+        assert!(
+            image_source(
+                r#"<?xml-stylesheet href="https://example.com/x"?><svg viewBox="0 0 10 10"/>"#
+            )
+            .is_err()
+        );
+        assert!(
+            image_source(&format!(
+                "<svg viewBox=\"0 0 10 10\"><defs>{}</defs></svg>",
+                "<linearGradient/>".repeat(33)
+            ))
+            .is_err()
+        );
+    }
+    #[test]
     fn unsupported_features_retain_fallback() {
         for source in [
-            r#"<svg viewBox="0 0 10 10"><defs/></svg>"#,
+            r#"<svg viewBox="0 0 10 10"><filter/></svg>"#,
             r#"<svg viewBox="0 0 10 10" style="fill:red"/>"#,
             r#"<svg viewBox="0 0 10 10"><image/></svg>"#,
             r#"<svg viewBox="0 0 10 10"><rect width="100%"/></svg>"#,
@@ -433,5 +659,6 @@ mod tests {
         assert!(!transform(&"scale(1) ".repeat(17)));
         assert!(!transform("scale(NaN)"));
         assert!(!transform("translate(1,2,3)"));
+        assert!(!attribute("aria-labelledby", &"label ".repeat(17)));
     }
 }
