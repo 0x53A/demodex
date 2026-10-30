@@ -4,6 +4,7 @@ mod approval;
 mod client;
 mod sync;
 mod controls;
+mod context_window;
 mod conversation;
 mod diff;
 mod directory_picker;

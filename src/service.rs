@@ -49,8 +49,7 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         }
         Runtime => runtime_status(app).await?,
         RuntimeModels => {
-            let (rpc, _) = app.orchestrator.runtime_rpc().await?;
-            crate::controls::runtime_model_catalog(&rpc).await?
+            app.orchestrator.context_model_catalog(None).await?
         }
         PromptSettings => app.orchestrator.prompt_settings_view().await?,
         SavePromptSettings { expected_revision, settings } => {
@@ -63,7 +62,7 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         ApplySessionPromptSettings { id, include_project } => app.orchestrator.apply_session_prompt(&id,include_project).await?,
         DefaultPrompt => app.orchestrator.default_prompt().await?,
         CreateSessionWithPrompt { input, prompt } => {
-            return Ok(Response::Session(app.orchestrator.selected_session(&input.name, &input.targets, input.sandbox, Some(&prompt), input.include_project, input.model.as_ref()).await?));
+            return Ok(Response::Session(app.orchestrator.selected_session(&input.name, &input.targets, input.sandbox, Some(&prompt), input.include_project, input.model.as_ref(), input.context_window).await?));
         }
         HostSessionWithPrompt { input, prompt } => {
             ensure!(input.thread_id.is_none(), "Prompt overrides require a new thread");
@@ -108,6 +107,7 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         Sandbox { id, input } => change_sandbox(app, id, input).await?,
         Models { id } => models(app, id).await?,
         Model { id, input } => change_model(app, id, input).await?,
+        SetContextWindow { id, window } => app.orchestrator.set_context_window(&id, window).await?,
         Goal { id, input } => change_goal(app, id, input).await?,
         Prompt { id, text } => app.manager.prompt(&id, &text).await?,
         QueuePrompt { id, text } => app.manager.queue_prompt(&id, &text).await?,
@@ -420,6 +420,7 @@ async fn detail(app: &App, id: String) -> Result<SessionDetail> {
     };
     let mut controls = app.manager.control_snapshot(&id).await?;
     controls["prompts"]=app.orchestrator.session_prompt_view(&id)?;
+    controls["context_window"]=app.manager.store.prompt_record(&format!("context/{id}"))?;
     controls["takeover"]=app.orchestrator.takeover_view(&session).await;
     let background = app.manager.background_snapshot(&id).await;
     Ok(SessionDetail {
@@ -485,7 +486,7 @@ async fn change_sandbox(app: &App, id: String, input: SandboxChoice) -> Result<V
     Ok(json!({"ok":true}))
 }
 async fn models(app: &App, id: String) -> Result<Value> {
-    app.manager.model_catalog(&id).await
+    app.orchestrator.context_model_catalog(Some(&id)).await
 }
 async fn change_model(app: &App, id: String, input: controls::ModelChoice) -> Result<Value> {
     app.orchestrator.change_session_model(&id, input).await
@@ -544,7 +545,7 @@ async fn runtime_login(app: &App) -> Result<Value> {
 
 async fn selected_session(app: &App, input: SelectedSession) -> Result<store::Session> {
     app.orchestrator
-        .selected_session(&input.name, &input.targets, input.sandbox, None, input.include_project, input.model.as_ref())
+        .selected_session(&input.name, &input.targets, input.sandbox, None, input.include_project, input.model.as_ref(), input.context_window)
         .await
 }
 

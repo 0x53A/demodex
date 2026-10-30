@@ -5,6 +5,7 @@ mod prompts;
 mod notifications;
 mod subagents;
 mod controls;
+mod context_window;
 mod directories;
 mod message_files;
 pub mod daemon;

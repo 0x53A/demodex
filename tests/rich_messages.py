@@ -55,6 +55,16 @@ def expect_svg_image(image):
     image.evaluate("e => e.decode()")
     assert image.evaluate("e => e.naturalWidth > 0 && e.naturalHeight > 0")
 
+def expect_svg_motion(image):
+    expect_svg_image(image)
+    # Read rendered frames: canvas drawImage can snapshot SVG's initial frame.
+    first = image.screenshot(animations='allow')
+    for _ in range(8):
+        image.page.wait_for_timeout(150)
+        if image.screenshot(animations='allow') != first:
+            return
+    raise AssertionError('SVG image decoded but did not animate')
+
 class Codex:
     socket = None
     submissions = 0
@@ -483,8 +493,29 @@ sequenceDiagram
                 expect(svg_case).to_contain_text('SVG preview unavailable')
                 expect(svg_case.locator('img,svg,iframe,object,script')).to_have_count(0)
             assert page.evaluate('window.svgExecuted === undefined')
+            animated_source = (ROOT / 'tests/fixtures/animated-circle.svg').read_text()
+            codex.message('svg-animated', '```svg\n' + animated_source + '\n```')
+            animated_case = page.locator('[data-item-id="svg-animated"]')
+            expect_svg_motion(animated_case.locator('.svg-thumbnail img'))
+            animated_case.get_by_role('button', name='Enlarge SVG preview').click()
+            expect_svg_motion(page.get_by_role('dialog', name='SVG preview', exact=True).locator('.svg-expanded img'))
+            page.keyboard.press('Escape')
+            animated_case.get_by_text('SVG source', exact=True).click()
+            assert animated_case.locator('.svg-source code').text_content() == animated_source + '\n'
+            transform_source = '<svg viewBox="0 0 100 100"><rect x="30" y="10" width="40" height="20" fill="orange"><animateTransform attributeName="transform" type="rotate" from="0 50 50" to="360 50 50" dur="2s" repeatCount="indefinite"/></rect></svg>'
+            codex.message('svg-transform', '```svg\n' + transform_source + '\n```')
+            expect_svg_motion(page.locator('[data-item-id="svg-transform"] .svg-thumbnail img'))
+            for animation_id, target, values in [
+                ('svg-animate-href', 'href', 'https://example.org/pixel;https://example.org/other'),
+                ('svg-animate-paint', 'fill', 'red;url(https://example.org/paint.svg#g)'),
+                ('svg-animate-handler', 'onload', 'alert(1);alert(2)'),
+            ]:
+                codex.message(animation_id, f'```svg\n<svg viewBox="0 0 100 100"><circle r="10"><animate attributeName="{target}" values="{values}" dur="1s"/></circle></svg>\n```')
+                rejected_animation = page.locator(f'[data-item-id="{animation_id}"]')
+                expect(rejected_animation).to_contain_text('SVG preview unavailable')
+                expect(rejected_animation.locator('img')).to_have_count(0)
             drawing=directory/'drawing.svg'
-            drawing.write_text(svg_source)
+            drawing.write_text(animated_source)
             codex.message('svg-file',f'[Drawing]({drawing})')
             for _ in range(100):
                 drawing_check=call(host,token,{'MessageFiles':{'id':created['id'],'item':'svg-file'}})
@@ -493,7 +524,7 @@ sequenceDiagram
             page.locator('[data-item-id="svg-file"] .markdown-link').click()
             page.get_by_role('dialog',name='Drawing',exact=True).get_by_role('button',name='Show file',exact=True).click()
             drawing_preview=page.get_by_role('dialog',name='File preview',exact=True)
-            expect(drawing_preview.locator('.svg-thumbnail img')).to_be_visible()
+            expect_svg_motion(drawing_preview.locator('.svg-thumbnail img'))
             drawing_preview.get_by_role('button',name='Enlarge SVG preview',exact=True).click()
             expect(page.get_by_role('dialog',name='SVG preview',exact=True).locator('.svg-expanded img')).to_be_visible()
             page.keyboard.press('Escape')

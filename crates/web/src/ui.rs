@@ -51,6 +51,7 @@ pub struct IconButtonProps {
     #[prop_or_default] pub disabled: bool,
     #[prop_or_default] pub destructive: bool,
     #[prop_or_default] pub pressed: Option<AttrValue>,
+    #[prop_or_default] pub expanded: Option<AttrValue>,
     #[prop_or_default] pub autofocus: bool,
     pub onclick: Callback<MouseEvent>,
     pub children: Html,
@@ -59,7 +60,7 @@ pub struct IconButtonProps {
 pub fn icon_button(props: &IconButtonProps) -> Html {
     html!{<button type="button" class={classes!("icon-button",props.class.clone(),props.destructive.then_some("destructive"))}
         aria-label={props.label.clone()} title={props.title.clone().unwrap_or_else(||props.label.clone())}
-        aria-pressed={props.pressed.clone()} disabled={props.disabled} autofocus={props.autofocus} onclick={props.onclick.clone()}>
+        aria-pressed={props.pressed.clone()} aria-expanded={props.expanded.clone()} disabled={props.disabled} autofocus={props.autofocus} onclick={props.onclick.clone()}>
         <span aria-hidden="true">{props.children.clone()}</span>
     </button>}
 }

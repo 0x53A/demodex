@@ -346,6 +346,10 @@ pub enum Operation {
         id: String,
         input: ModelChoice,
     },
+    SetContextWindow {
+        id: String,
+        window: Option<i64>,
+    },
     Goal {
         id: String,
         input: GoalAction,
@@ -495,6 +499,7 @@ pub struct SelectedSession {
     pub sandbox: Option<Sandbox>,
     pub include_project: Option<bool>,
     pub model: Option<ModelChoice>,
+    pub context_window: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, WormholeTransmaterializable)]

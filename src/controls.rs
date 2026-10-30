@@ -71,7 +71,7 @@ pub(crate) async fn model_catalog(rpc: &crate::rpc::Rpc) -> Result<Value> {
     Ok(json!({"data":models}))
 }
 
-fn runtime_defaults(config: &Value, models: &[Value]) -> Value {
+pub(crate) fn runtime_defaults(config: &Value, models: &[Value]) -> Value {
     let model = config["model"].as_str().or_else(|| models.iter().find(|m|m["isDefault"] == true).and_then(|m|m["model"].as_str()));
     let record = models.iter().find(|m|m["model"].as_str() == model);
     let effort = config["model_reasoning_effort"].as_str().or_else(||record.and_then(|m|m["defaultReasoningEffort"].as_str()));

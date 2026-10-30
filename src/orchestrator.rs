@@ -54,7 +54,7 @@ pub struct Orchestrator {
     machines: Mutex<HashMap<String, Machine>>,
     containers: Mutex<HashMap<String, ContainerRuntime>>,
     ssh: Mutex<HashMap<String, crate::ssh::Engine>>,
-    jobs: Mutex<HashMap<String, JoinHandle<()>>>,
+    pub(crate) jobs: Mutex<HashMap<String, JoinHandle<()>>>,
 }
 
 impl Orchestrator {
@@ -1656,6 +1656,7 @@ impl Orchestrator {
             session.endpoint
         };
         if managed {
+            self.prepare_context_window(id).await?;
             if let Some(prepared) = prepared_prompt {
                 self.manager.store.put_prompt_record(&format!("prepared/{id}"), prepared)?;
             } else {
@@ -1706,13 +1707,24 @@ impl Orchestrator {
             || self.manager.store.host_sessions()?.iter().any(|s| s == id);
         let current = self.manager.store.model_settings(id)?;
         let model_changed = current["effective"]["model"].as_str() != Some(input.model.as_str());
+        let context = self.manager.store.prompt_record(&format!("context/{id}"))?;
+        let reconnect_context = model_changed && !context.is_null();
+        if reconnect_context {
+            self.require_context_history(id).await?;
+            let catalog = self.context_model_catalog(Some(id)).await?;
+            crate::context_window::validate(&catalog, &input.model, context["window"].as_i64())?;
+        }
         let reapply = model_changed && managed && self.manager.store.prompt(id)?.is_none()
             && (applied["base"].is_string() || !self.manager.store.prompt_settings()?.1.models.is_empty());
-        if reapply { self.require_prompt_change_idle(id).await?; }
+        if reapply || reconnect_context { self.require_prompt_change_idle(id).await?; }
         let result = self.manager.change_model_locked(id, input, &settings).await?;
         if reapply {
             let project = self.manager.store.prompt_record(&format!("policy/{id}"))?["include_project"].as_bool();
             self.apply_session_prompt_locked(id, project, &settings).await?;
+        } else if reconnect_context {
+            self.unsubscribe_for_context(id).await?;
+            self.manager.disconnect(id, "Reconnecting to apply context window").await?;
+            self.connect_session_locked(id, &settings, None).await?;
         }
         Ok(result)
     }
@@ -1725,6 +1737,7 @@ impl Orchestrator {
         prompt: Option<&str>,
         include_project: Option<bool>,
         model: Option<&demodex_protocol::ModelChoice>,
+        context_window: Option<i64>,
     ) -> Result<Session> {
         validate_prompt(prompt)?;
         let name = if name.trim().is_empty() { "Untitled session" } else { name };
@@ -1757,6 +1770,13 @@ impl Orchestrator {
             };
             crate::ssh::require_local_app_server(&endpoint, selection)?;
             let targets = self.resolve_targets(selection).await?;
+            let context = if let Some(window) = context_window {
+                let cwd = if targets.len()==1 { Some(targets[0].cwd.clone()) } else { None };
+                let catalog = self.context_catalog_for_cwd(cwd).await?;
+                let slug = model.as_ref().and_then(|m|m["model"].as_str())
+                    .or_else(||catalog["defaults"]["model"].as_str()).context("Default model unavailable")?;
+                Some(json!({"window":window,"resolved":crate::context_window::validate(&catalog,slug,Some(window))?}))
+            } else { None };
             for target in &targets {
                 rpc.call(
                     "environment/add",
@@ -1773,6 +1793,9 @@ impl Orchestrator {
             )?;
             if let Some(model) = model {
                 self.manager.store.model_selection(&session.id, &model)?;
+            }
+            if let Some(context) = context {
+                self.manager.store.put_prompt_record(&format!("context/{}",session.id), &context)?;
             }
             session
         };

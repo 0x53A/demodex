@@ -200,7 +200,7 @@ def git_executor(ws):
 with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
     directory = Path(temporary)
     candidate = directory / "web"
-    shutil.copytree(ROOT / "web/.rust-dist", candidate)
+    shutil.copytree(Path(os.environ.get("DEMODEX_WEB", ROOT / "web/.rust-dist")), candidate)
     daemon_port, web_port, codex_port = port(), port(), port()
     origin = f"http://127.0.0.1:{web_port}"
     host = f"http://127.0.0.1:{daemon_port}"
@@ -294,11 +294,40 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             sort.select_option('name')
             page.reload()
             expect(sort).to_have_value('name', timeout=20000)
-            page.get_by_role('button', name='Reorder', exact=True).click()
+            sort.select_option('reorder')
+            page.get_by_role('button', name='Done reordering', exact=True).click()
             expect(sort).to_have_value('manual')
-            expect(page.get_by_role('button', name='Done reordering', exact=True)).to_be_visible()
             sort.select_option('last_user_message')
-            expect(page.get_by_role('button', name='Reorder', exact=True)).to_be_visible()
+            search_toggle = page.get_by_role('button', name='Search sessions', exact=True)
+            search_box = page.get_by_role('searchbox', name='Search sessions', exact=True)
+            expect(search_box).to_have_count(0)
+            search_toggle.click()
+            expect(search_box).to_be_focused()
+            search_box.fill('keep this filter visible')
+            search_toggle.click()
+            expect(search_box).to_have_value('keep this filter visible')
+            search_box.fill('')
+            search_toggle.click()
+            expect(search_box).to_have_count(0)
+            for width in (320, 390, 1200):
+                page.set_viewport_size({'width': width, 'height': 850})
+                geometry = page.locator('aside').evaluate("""e => {
+                    const h=e.querySelector('.session-sidebar-header'), r=h.getBoundingClientRect();
+                    return {top:r.top, asideTop:e.getBoundingClientRect().top, height:r.height,
+                        overflow:e.scrollWidth>e.clientWidth};
+                }""")
+                assert abs(geometry['top'] - geometry['asideTop']) < 1, geometry
+                assert geometry['height'] < 120 and not geometry['overflow'], geometry
+                if os.environ.get('DEMODEX_HEADER_SCREENSHOTS'):
+                    page.screenshot(path=str(Path(os.environ['DEMODEX_HEADER_SCREENSHOTS']) / f'header-{width}.png'))
+                # Force a long list to verify the sticky position after scrolling.
+                page.locator('aside').evaluate("e=>{const s=document.createElement('div');s.id='scroll-fixture';s.style.height='2000px';e.append(s);e.scrollTop=500;}")
+                assert abs(page.locator('.session-sidebar-header').bounding_box()['y'] - page.locator('aside').bounding_box()['y']) < 1
+                page.locator('aside').evaluate("e=>{document.getElementById('scroll-fixture').remove();e.scrollTop=0;}")
+            if os.environ.get('DEMODEX_HEADER_ONLY'):
+                page.screenshot(path=str(directory / 'compact-header.png'))
+                print('PASS: compact session header, search focus, sorting/reorder, mobile and sticky geometry', flush=True)
+                raise SystemExit(0)
 
             expect(page.get_by_role("alert")).to_have_count(0)
             page.set_viewport_size({"width": 1200, "height": 850})
@@ -355,13 +384,14 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             if os.environ.get('DEMODEX_SEARCH_ONLY'):
                 search = page.get_by_role('searchbox', name='Search sessions', exact=True)
                 cards = page.locator('aside .session')
+                page.get_by_role('button', name='Search sessions', exact=True).click()
                 search.fill('WORMHOLE')
                 expect(cards).to_have_count(1)
                 search.fill('/HOME/OPERATOR')
                 expect(cards).to_have_count(1)
                 search.fill('not-a-session')
                 expect(cards).to_have_count(0)
-                expect(page.get_by_role('button',name='Reorder',exact=True)).to_be_disabled()
+                expect(page.locator('.session-sort-control option[value="reorder"]')).to_be_disabled()
                 expect(page.get_by_role('button',name='Full text search',exact=True)).to_be_visible()
                 search.fill('')
                 codex.send('item/completed', {'item':{'id':'search-message','type':'agentMessage','text':'Unique search body: Cobalt%_Needle'}})

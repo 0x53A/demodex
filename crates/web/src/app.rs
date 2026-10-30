@@ -106,6 +106,9 @@ pub struct App {
     show_background: bool,
     show_controls: bool,
     reorder_mode: bool,
+    search_open: bool,
+    focus_search: bool,
+    search_ref: NodeRef,
     reveal_selected_session: bool,
     show_new_session: bool,
     show_saved_search: bool,
@@ -151,6 +154,7 @@ pub struct App {
 }
 
 pub enum Msg {
+    ToggleSearch,
     SearchQuery(String),
     SearchStart,
     SearchStop,
@@ -599,6 +603,9 @@ impl Component for App {
             show_background: false,
             show_controls: false,
             reorder_mode: false,
+            search_open: false,
+            focus_search: false,
+            search_ref: NodeRef::default(),
             reveal_selected_session: false,
             show_new_session: false,
             show_saved_search: false,
@@ -681,6 +688,14 @@ impl Component for App {
                 | Msg::Connected(_, Ok(_))
         );
         match msg {
+            Msg::ToggleSearch => {
+                if !self.search.query.is_empty() {
+                    self.search_open = true;
+                } else {
+                    self.search_open = !self.search_open;
+                }
+                self.focus_search = self.search_open;
+            }
             Msg::SearchQuery(query) => {
                 self.search.reset(query);
                 self.reorder_mode = false;
@@ -1719,6 +1734,9 @@ impl Component for App {
                                     self.saved.fields.remove(&format!("control:{id}:{field}"));
                                 }
                             }
+                            Operation::SetContextWindow { id, .. } if same_dialog => {
+                                self.saved.fields.remove(&format!("control:{id}:context_window"));
+                            }
                             Operation::Goal { id, input } if same_dialog => {
                                 // Status actions do not submit the objective/budget draft.
                                 // Pausing or resuming must leave those unsaved edits intact.
@@ -1910,6 +1928,10 @@ impl Component for App {
         true
     }
     fn rendered(&mut self, _ctx: &Context<Self>, _first: bool) {
+        if self.focus_search {
+            self.focus_search = false;
+            if let Some(input) = self.search_ref.cast::<HtmlInputElement>() { let _ = input.focus(); }
+        }
         if let Some(cursor) = self.button_cursor.take()
             && let Some(el) = self.prompt_ref.cast::<HtmlTextAreaElement>() {
             let _ = el.focus();
@@ -2014,13 +2036,27 @@ impl Component for App {
                             <div class="section-title"><h2>{"Sessions"}</h2><div class="session-view-switch" role="group" aria-label="Session layout">
                                 <button type="button" aria-pressed={(self.saved.field("session_view")!="flat").to_string()} onclick={ctx.link().callback(|_|Msg::Field("session_view".into(),"tree".into()))}>{"Tree"}</button>
                                 <button type="button" aria-pressed={(self.saved.field("session_view")=="flat").to_string()} onclick={ctx.link().callback(|_|Msg::Field("session_view".into(),"flat".into()))}>{"List"}</button>
-                            </div><button type="button" class="reorder-toggle" disabled={!self.search.query.trim().is_empty()} aria-pressed={self.reorder_mode.to_string()} onclick={ctx.link().callback(|_|Msg::ReorderMode)}>{if self.reorder_mode{"Done reordering"}else{"Reorder"}}</button></div>
-                            <label class="session-search">{"Search sessions"}<input type="search" aria-label="Search sessions" placeholder="Title or working folder" maxlength="256" value={self.search.query.clone()} oninput={ctx.link().callback(|e|Msg::SearchQuery(input(e)))}/></label>
-                            <label class="session-sort">{"Sort"}<select aria-label="Sort sessions" onchange={ctx.link().callback(|e:Event|Msg::Field("session_sort".into(),e.target_unchecked_into::<HtmlSelectElement>().value()))}>
-                                <option value="last_user_message" selected={crate::overview::Sort::from_saved(&self.saved.field("session_sort"))==crate::overview::Sort::LastUserMessage}>{"Last user message"}</option>
-                                <option value="name" selected={self.saved.field("session_sort")=="name"}>{"Name"}</option>
-                                <option value="manual" selected={self.saved.field("session_sort")=="manual"}>{"Manual"}</option>
-                            </select></label>
+                            </div>
+                            <crate::ui::IconButton label="Search sessions" expanded={Some((self.search_open || !self.search.query.is_empty()).to_string())} onclick={ctx.link().callback(|_|Msg::ToggleSearch)}>
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></svg>
+                            </crate::ui::IconButton>
+                            {if self.reorder_mode {html!{
+                                <button type="button" class="session-reorder-done" aria-label="Done reordering" onclick={ctx.link().callback(|_|Msg::ReorderMode)}>{"Done"}</button>
+                            }} else {html!{
+                                <div class="session-sort-control" title={format!("Sort: {}",match self.saved.field("session_sort").as_str(){"name"=>"Name","manual"=>"Manual",_=>"Last user message"})}>
+                                    <span aria-hidden="true">{"↕"}</span>
+                                    <select aria-label="Sort sessions" onchange={ctx.link().callback(|e:Event|{let value=e.target_unchecked_into::<HtmlSelectElement>().value(); if value=="reorder"{Msg::ReorderMode}else{Msg::Field("session_sort".into(),value)}})}>
+                                        <option value="last_user_message" selected={crate::overview::Sort::from_saved(&self.saved.field("session_sort"))==crate::overview::Sort::LastUserMessage}>{"Last user message"}</option>
+                                        <option value="name" selected={self.saved.field("session_sort")=="name"}>{"Name"}</option>
+                                        <option value="manual" selected={self.saved.field("session_sort")=="manual"}>{"Manual"}</option>
+                                        <option value="reorder" disabled={!self.search.query.trim().is_empty()}>{"Reorder…"}</option>
+                                    </select>
+                                </div>
+                            }}}
+                            </div>
+                            {if self.search_open || !self.search.query.is_empty() {html!{
+                                <div class="session-search"><input ref={self.search_ref.clone()} type="search" aria-label="Search sessions" placeholder="Title or working folder" maxlength="256" value={self.search.query.clone()} oninput={ctx.link().callback(|e|Msg::SearchQuery(input(e)))} onkeydown={ctx.link().batch_callback(|e:KeyboardEvent|if e.key()=="Escape"{Some(Msg::ToggleSearch)}else{None})}/></div>
+                            }}else{Html::default()}}
                             <button class="new-session-nav primary" disabled={!self.connected} onclick={ctx.link().callback(|_|Msg::NewSession(true))}>{"+ New Session"}</button>
                             </div>
                             {if !self.project_git_error.is_empty() {html!{<div class="error" role="alert">{format!("Git refresh failed; displayed results may be out of date: {}",self.project_git_error)}</div>}}else{Html::default()}}

@@ -214,7 +214,7 @@ pub fn compose(
 }
 
 impl crate::orchestrator::Orchestrator {
-    fn prompt_profile(&self) -> std::path::PathBuf {
+    pub(crate) fn prompt_profile(&self) -> std::path::PathBuf {
         self.codex_home
             .clone()
             .unwrap_or_else(|| self.root.join("runtime/home"))

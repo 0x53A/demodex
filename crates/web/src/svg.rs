@@ -1,6 +1,6 @@
-//! Bounded static SVG images. Validated XML is loaded through an img data URL,
+//! Bounded SVG images with declarative animation. Validated XML is loaded through an img data URL,
 //! never inserted into the application DOM. Local paint servers are supported;
-//! external references, scripts, CSS, HTML and animation remain unsupported.
+//! external references, scripts, CSS and HTML remain unsupported.
 use crate::modal::Modal;
 use base64::Engine;
 use std::collections::HashMap;
@@ -244,6 +244,146 @@ fn attribute(name: &str, value: &str) -> bool {
     }
 }
 
+// Animation is a separate grammar: e.g. fill="freeze" controls timing, not paint.
+// Never pass arbitrary attributeName/from/to values through the static allowlist.
+fn clock_seconds(value: &str) -> Option<f64> {
+    let (value, factor) = if let Some(v) = value.strip_suffix("ms") {
+        (v, 0.001)
+    } else {
+        (value.strip_suffix('s').unwrap_or(value), 1.0)
+    };
+    number(value).map(|n| n * factor)
+}
+
+fn animation(n: roxmltree::Node<'_, '_>) -> SvgResult<()> {
+    let parent = n
+        .parent_element()
+        .ok_or("Animation needs a drawing parent")?;
+    let parent_name = parent.tag_name().name();
+    if !matches!(
+        parent_name,
+        "g" | "rect"
+            | "circle"
+            | "ellipse"
+            | "line"
+            | "polyline"
+            | "polygon"
+            | "path"
+            | "text"
+            | "tspan"
+    ) || n.ancestors().any(|p| p.has_tag_name("defs"))
+        || n.children().any(|c| {
+            c.is_element() || c.is_text() && !c.text().unwrap_or_default().trim().is_empty()
+        })
+    {
+        return Err(
+            "SVG animation requires a drawing parent outside definitions and no content".into(),
+        );
+    }
+    let target = n
+        .attribute("attributeName")
+        .ok_or("SVG animation needs attributeName")?;
+    let is_transform = n.has_tag_name("animateTransform");
+    let kind = n.attribute("type").unwrap_or_default();
+    let target_allowed = if is_transform {
+        target == "transform" && matches!(kind, "translate" | "scale" | "rotate")
+    } else {
+        match target {
+            "fill" | "stroke" | "opacity" | "fill-opacity" | "stroke-opacity" | "stroke-width"
+            | "stroke-dashoffset" => true,
+            "cx" | "cy" => matches!(parent_name, "circle" | "ellipse"),
+            "r" => parent_name == "circle",
+            "rx" | "ry" => matches!(parent_name, "rect" | "ellipse"),
+            "x" | "y" => matches!(parent_name, "rect" | "text" | "tspan"),
+            "width" | "height" => parent_name == "rect",
+            "x1" | "x2" | "y1" | "y2" => parent_name == "line",
+            "dx" | "dy" | "font-size" | "letter-spacing" | "word-spacing" => {
+                matches!(parent_name, "text" | "tspan")
+            }
+            _ => false,
+        }
+    };
+    if !target_allowed {
+        return Err(format!("Unsupported SVG animation target: {target}"));
+    }
+    let values: Vec<_> = if let Some(values) = n.attribute("values") {
+        if n.attribute("from").is_some() || n.attribute("to").is_some() {
+            return Err("SVG animation must use values or from/to, not both".into());
+        }
+        values.split(';').map(str::trim).collect()
+    } else {
+        vec![
+            n.attribute("from")
+                .ok_or("SVG animation needs values or from/to")?,
+            n.attribute("to").ok_or("SVG animation needs from and to")?,
+        ]
+    };
+    if !(2..=64).contains(&values.len()) {
+        return Err("SVG animation needs 2–64 values".into());
+    }
+    let mut arity = None;
+    for value in &values {
+        let valid = if is_transform {
+            numbers(value).is_some_and(|v| {
+                let valid = match kind {
+                    "translate" | "scale" => matches!(v.len(), 1 | 2),
+                    "rotate" => matches!(v.len(), 1 | 3),
+                    _ => false,
+                } && arity.is_none_or(|len| len == v.len());
+                arity = Some(v.len());
+                valid
+            })
+        } else if matches!(target, "fill" | "stroke") {
+            // Do not let animated paints bypass local-reference validation.
+            color(value)
+        } else {
+            attribute(target, value)
+        };
+        if !valid {
+            return Err(format!("Invalid SVG animation value for {target}"));
+        }
+    }
+    if !n
+        .attribute("dur")
+        .and_then(clock_seconds)
+        .is_some_and(|v| (0.1..=3600.0).contains(&v))
+    {
+        return Err("SVG animation duration must be between 100ms and 3600s".into());
+    }
+    for a in n.attributes() {
+        let value = a.value();
+        let valid = match a.name() {
+            "attributeName" | "values" | "from" | "to" | "dur" => true, // validated above
+            "type" => is_transform,
+            "attributeType" => matches!(value, "XML" | "auto"),
+            "begin" => clock_seconds(value).is_some_and(|v| (0.0..=3600.0).contains(&v)),
+            "repeatCount" => {
+                value == "indefinite" || number(value).is_some_and(|v| v > 0.0 && v <= 1000.0)
+            }
+            "fill" => matches!(value, "remove" | "freeze"),
+            "calcMode" => matches!(value, "linear" | "discrete"),
+            "additive" => value == "replace",
+            "accumulate" => value == "none",
+            "keyTimes" => {
+                let times: Option<Vec<_>> = value.split(';').map(|v| number(v.trim())).collect();
+                times.is_some_and(|times| {
+                    times.len() == values.len()
+                        && times.first() == Some(&0.0)
+                        && (n.attribute("calcMode") == Some("discrete")
+                            || times.last() == Some(&1.0))
+                        && times.iter().all(|v| (0.0..=1.0).contains(v))
+                        && times.windows(2).all(|pair| pair[0] <= pair[1])
+                })
+            }
+            _ => false,
+        };
+        if a.namespace().is_some() || value.len() > MAX_ATTRIBUTE || !valid {
+            return Err(format!("Unsupported SVG animation attribute: {}", a.name()));
+        }
+    }
+    Ok(())
+}
+
 fn escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -290,7 +430,14 @@ fn image_source(source: &str) -> SvgResult<String> {
     };
     let mut ids = HashMap::new();
     let mut paint_servers = 0;
+    let mut animations = 0;
     for n in root.descendants().filter(|n| n.is_element()) {
+        if matches!(n.tag_name().name(), "animate" | "animateTransform") {
+            animations += 1;
+            if animations > 64 {
+                return Err("SVG exceeds the 64-animation limit".into());
+            }
+        }
         if let Some(id) = n.attribute("id") {
             if !identifier(id) || ids.insert(id, n.tag_name().name()).is_some() {
                 return Err("Invalid or duplicate SVG ID".into());
@@ -349,10 +496,26 @@ fn image_source(source: &str) -> SvgResult<String> {
                     | "radialGradient"
                     | "stop"
                     | "pattern"
+                    | "animate"
+                    | "animateTransform"
             )
             || name == "svg" && depth != 0
         {
             return Err(format!("Unsupported SVG element: {name}"));
+        }
+        if matches!(name, "animate" | "animateTransform") {
+            animation(n)?;
+            output.push('<');
+            output.push_str(name);
+            for a in n.attributes() {
+                output.push(' ');
+                output.push_str(a.name());
+                output.push_str("=\"");
+                output.push_str(&escape(a.value()));
+                output.push('"');
+            }
+            output.push_str("/>");
+            return Ok(());
         }
         let gradient = matches!(name, "linearGradient" | "radialGradient");
         if (name == "defs" && parent != Some("svg"))
@@ -620,6 +783,56 @@ mod tests {
             ))
             .is_err()
         );
+    }
+    #[test]
+    fn supports_bounded_parent_targeted_animation() {
+        assert!(image_source(include_str!("../../../tests/fixtures/animated-circle.svg")).is_ok());
+        for body in [
+            r#"<animate attributeName="r" from="5" to="10" dur="200ms" begin="0.5s" repeatCount="3" fill="freeze"/>"#,
+            r##"<animate attributeName="fill" values="#ff8800;blue;#ff8800" keyTimes="0;0.25;1" dur="2s"/>"##,
+            r#"<animateTransform attributeName="transform" type="rotate" values="0 50 50;360 50 50" dur="3s" repeatCount="indefinite"/>"#,
+            r#"<animateTransform attributeName="transform" type="translate" from="0 0" to="30 10" dur="1s"/>"#,
+            r#"<animateTransform attributeName="transform" type="scale" values="1;2;1" dur="1s"/>"#,
+        ] {
+            assert!(
+                image_source(&format!(
+                    "<svg viewBox=\"0 0 100 100\"><circle r=\"5\">{body}</circle></svg>"
+                ))
+                .is_ok(),
+                "{body}"
+            );
+        }
+    }
+    #[test]
+    fn animation_cannot_bypass_static_validation_or_timing_limits() {
+        let basic = r#"<animate attributeName="cx" values="0;50" dur="1s"/>"#;
+        for bad in [
+            basic.replace("cx", "href"), basic.replace("cx", "id"), basic.replace("cx", "style"),
+            basic.replace("cx", "onload"), basic.replace("cx", "viewBox"),
+            basic.replace("0;50", "NaN;50"), basic.replace("0;50", "0;1e30"),
+            basic.replace("1s", "0s"), basic.replace("1s", "-1s"), basic.replace("1s", "indefinite"),
+            basic.replace("/>", " begin=\"click\"/>"), basic.replace("/>", " begin=\"other.end\"/>"),
+            basic.replace("/>", " href=\"#other\"/>"), basic.replace("/>", " onend=\"alert(1)\"/>"),
+            basic.replace("/>", " accumulate=\"sum\"/>"), basic.replace("/>", " additive=\"sum\"/>"),
+            basic.replace("/>", " repeatCount=\"1001\"/>"), basic.replace("/>", " keyTimes=\"0;0.5;1\"/>"),
+            basic.replace("/>", " keyTimes=\"1;0\"/>"),
+            basic.replace("0;50", &"0;".repeat(65)),
+            basic.replace("cx", "fill").replace("0;50", "red;url(https://example.com/p.svg#g)"),
+            basic.replace("cx", "fill").replace("0;50", "red;url(#local)"),
+            basic.replace("cx", "r").replace("0;50", "-1;50"),
+            basic.replace("/>", "><animate/></animate>"),
+            r#"<animateTransform attributeName="transform" type="rotate" values="0;360 50 50" dur="1s"/>"#.to_owned(),
+        ] {
+            assert!(image_source(&format!("<svg viewBox=\"0 0 100 100\"><circle>{bad}</circle></svg>")).is_err(), "{bad}");
+        }
+        for body in [
+            basic.to_owned(),
+            format!("<defs><circle>{basic}</circle></defs>"),
+            format!("<rect>{basic}</rect>"),
+            format!("<circle>{}</circle>", basic.repeat(65)),
+        ] {
+            assert!(image_source(&format!("<svg viewBox=\"0 0 100 100\">{body}</svg>")).is_err());
+        }
     }
     #[test]
     fn unsupported_features_retain_fallback() {

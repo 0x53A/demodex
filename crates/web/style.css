@@ -601,9 +601,18 @@ input[aria-invalid="true"] { border-color:#f2594e; }
 .session-view-switch button { min-height:32px;padding:3px 8px;font-size:11px; }
 .session-view-switch button + button { margin-left:-1px; }
 .session-view-switch button[aria-pressed="true"] { background:#30352e;color:#ffbf69;border-color:#ff792f;position:relative;z-index:1; }
-.session-view-switch + .reorder-toggle { margin-left:0; }
-.session-sidebar-header { position:sticky;top:0;z-index:2;background:#141615;margin:-20px -20px 0;padding:20px 20px 12px;border-bottom:1px solid #3b403a; }
-.session-sidebar-header > .section-title { flex-wrap:wrap;gap:6px; }
+.layout > aside { padding-top:0; }
+.session-sidebar-header { position:sticky;top:0;z-index:4;background:#141615;margin:0 -20px;padding:8px 12px 12px;border-bottom:1px solid #3b403a; }
+.session-sidebar-header > .section-title { flex-wrap:nowrap;gap:6px; }
+.session-sidebar-header h2 { margin:0; }
+.session-sidebar-header .new-session-nav { margin:8px 0 0; }
+.session-sidebar-header .session-search { margin:8px 0 0; }
+.session-sort-control { position:relative;display:flex;align-items:center;justify-content:center;flex:none;width:38px;height:38px;border:1px solid #4c5248;background:#1b1e1a;font:20px/1 monospace; }
+.session-sort-control select { position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer; }
+.session-sort-control:hover { background:#30352e;color:#ffbf69;border-color:#ff792f; }
+.session-sort-control:focus-within { outline:2px solid #ff9b61;outline-offset:2px; }
+.session-reorder-done { padding:0 6px;min-height:38px;font-size:11px; }
+@media(pointer:coarse) { .session-sort-control { width:42px;height:42px; } .session-reorder-done { min-height:42px; } }
 @media(max-width:700px) { .compact-controls .form-actions { bottom:-12px; } }
 @media(pointer:coarse) {
  :root .icon-button { width:42px;height:42px;min-width:42px;min-height:42px; }
@@ -659,3 +668,7 @@ input[aria-invalid="true"] { border-color:#f2594e; }
 .session-search input { width: 100%; min-width: 0; }
 .session-search-footer { padding: 12px 0; }
 .session-search-footer small { display: block; margin-top: 8px; }
+.context-window { display: flex; flex-direction: column; gap: 6px; }
+.context-window-slider { display: flex; align-items: center; gap: 12px; }
+.context-window-slider input[type="range"] { flex: 1; min-width: 0; accent-color: #ff7a32; }
+.context-window-slider output { font-family: monospace; font-variant-numeric: tabular-nums; }

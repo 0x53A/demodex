@@ -90,6 +90,17 @@ impl Component for SessionControls {
             },
         );
         let goal = &props.state["goal"];
+        let context_value = field("context_window", &props.state["context_window"]["window"].as_i64().map(|n|n.to_string()).unwrap_or_default());
+        let context_bounds = models.iter().find(|m|m["model"] == effective["model"])
+            .map(|m|m["context_window"].clone()).unwrap_or_default();
+        let context_change = { let callback = props.onfield.clone(); Callback::from(move |value|callback.emit(("context_window".into(),value))) };
+        let context_submit = {
+            let run = props.onrun.clone(); let id = props.id.clone(); let value = context_value.clone();
+            Callback::from(move |event: SubmitEvent| {
+                event.prevent_default();
+                run.emit(Operation::SetContextWindow { id:id.clone(), window:if value.is_empty(){None}else{Some(value.parse().unwrap_or(0))} });
+            })
+        };
         let objective = field("objective", text(goal, "objective"));
         let budget = field("budget", "");
         let model_disabled = props.disabled || props.working || models.is_empty();
@@ -192,6 +203,10 @@ impl Component for SessionControls {
 
                 {if props.working{html!{<p class="muted control-warning" role="status">{"Session active — wait until idle to change the model."}</p>}}else{Html::default()}}
             </crate::ui::Group></crate::ui::Form>
+            <crate::ui::Form onsubmit={context_submit} actions={html!{<button disabled={model_disabled||props.targets_pending}>{"Apply context window"}</button>}}>
+                <crate::context_window::ContextWindow value={context_value} bounds={context_bounds} disabled={model_disabled||props.targets_pending} onchange={context_change}/>
+                {if let Some(error)=props.models["context_window_error"].as_str(){html!{<p class="error" role="status">{error}</p>}}else{Html::default()}}
+            </crate::ui::Form>
             <crate::ui::Group title="System prompt">
                 <p class="muted">{"Apply the latest server prompt settings by reconnecting this idle session. Pause goals and clear queued work first. Changing models also reconnects when prompt layers are active."}</p>
                 {if props.state["prompts"]["pending"]==true{html!{<p role="status" class="control-warning">{"New server prompt settings are available."}</p>}}else{Html::default()}}

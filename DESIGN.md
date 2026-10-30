@@ -51,6 +51,12 @@ Small, deliberate, slightly odd. A session console, not a decorative dashboard.
 
 ## Session overview and context
 
+- Context-window controls in New Session and Session controls have a checked
+  Default checkbox. Unchecking it shows an enabled slider and its numeric token
+  value. No descriptions, pricing notes, presets or compaction controls. Bounds
+  follow the selected model's runtime catalogue; an unavailable catalogue disables
+  overrides. Session controls apply the value explicitly while idle.
+
 - Project folders show containing-worktree Git branch, clean or changed counts,
   conflicts and locally known ahead/behind counts. A parent repository shows
   `../` or `../../`; deeper ancestry is `../ × N`. The tooltip gives the repository
@@ -495,14 +501,22 @@ omit session identity and message content from the OS notification.
 preserves older threads' original tool catalogue. Real push-provider/device acceptance
 is an explicit deployment smoke test, not performed by fixture tests.
 
-SVG fenced blocks and explicitly opened SVG files use a bounded static drawing
+SVG fenced blocks and explicitly opened SVG files use a bounded drawing
 subset, rendered as vector SVG image documents through HTML img data URLs. SVG
 nodes never enter the application DOM, so repeated IDs in thumbnails and expanded
 views are isolated. Geometry, text, labels, local linear/radial gradients and simple
-patterns are supported. CSS, external resources, links, scripts, animation and
+patterns are supported. CSS, external resources, links, scripts and
 foreign content are rejected. Paint references must resolve to local definitions;
 references from paint-server definitions/patterns are unsupported. Unsupported input rejects
 the whole preview with a readable reason and exact source retained.
+
+Parent-targeted animate and animateTransform support movement, size, color,
+opacity and translate/scale/rotate animations in the image document. Keep target
+and value allowlists separate from static SVG attributes, with finite numeric
+bounds, at most 64 animations/64 values each and duration 100ms–3600s. Loops may
+repeat indefinitely; event-triggered timing, accumulation, animated URLs and
+structural attributes are excluded. Thumbnail and expanded image timelines are
+browser-owned; opening a preview does not promise synchronized playback.
 
 The thumbnail button opens a larger modal with Close, Escape and outside-click
 dismissal. Images use object-fit:contain in bounded containers and display decode
@@ -567,9 +581,12 @@ disconnected, active session, unsupported permissions) remain separate from fiel
 validation. Use `ui::Input` for names, paths, required fields, URLs, ports and
 numeric limits, with stable accessible labels and error descriptions.
 
-The sidebar keeps its Sessions heading, Tree/List, Reorder, Sort and New Session
-controls in an opaque pinned header while the session list scrolls. Selection
-reveal accounts for the header so the selected row remains below it.
+The sidebar has a compact, opaque pinned header flush with the top of its scrollport.
+The first row holds Sessions, Tree/List, a search icon and a sort icon. Search
+expands and focuses a field between the rows; an active query keeps it visible.
+Sort offers Last user message, Name, Manual and Reorder; reordering replaces the
+picker with Done. The full-width orange New Session button occupies the second
+row. Selection reveal accounts for the header so the selected row remains below it.
 
 Tree and List are explicit mutually exclusive buttons, with the selected state
 exposed to keyboard and assistive technology. Switching layouts reveals the selected

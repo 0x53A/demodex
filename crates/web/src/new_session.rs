@@ -51,6 +51,8 @@ impl App {
         let selected_tier = self.saved.field("new_tier");
         let defaults = &self.new_models["defaults"];
         let default_record = models.iter().find(|m|m["model"] == defaults["model"]);
+        let context_window = self.saved.field("new_context_window");
+        let context_bounds = selected_record.or(default_record).map(|m|m["context_window"].clone()).unwrap_or_default();
         let inherited_label = |value: Option<&str>| match value.filter(|v|!v.is_empty()) {
             Some(value) => format!("Default ({value})"),
             None if self.new_models.is_null() && self.new_model_error.is_empty() => "Default (loading…)".into(),
@@ -77,6 +79,7 @@ impl App {
                 })
                 .collect(),
             sandbox,
+            context_window: if context_window.is_empty() { None } else { Some(context_window.parse().unwrap_or(0)) },
             model: (!selected_model.is_empty() && !selected_effort.is_empty()).then(|| demodex_protocol::ModelChoice {
                 model: selected_model.clone(),
                 effort: selected_effort.clone(),
@@ -139,6 +142,8 @@ impl App {
                         <option value="" selected={selected_tier.is_empty()}>{default_tier_label}</option>
                         {for selected_record.into_iter().flat_map(|model|array(&model["serviceTiers"])).filter(|tier|text(tier,"id")!="default").map(|tier|html!{<option value={text(&tier,"id").to_owned()} selected={text(&tier,"id")==selected_tier}>{if text(&tier,"name").is_empty(){text(&tier,"id")}else{text(&tier,"name")}}</option>})}
                     </select></label>
+                    <crate::context_window::ContextWindow value={context_window} bounds={context_bounds} disabled={self.busy||!self.connected}
+                        onchange={ctx.link().callback(|value|Msg::Field("new_context_window".into(),value))}/>
                     {if let Some(error)=self.new_models["defaults_error"].as_str(){html!{<p class="error" role="alert">{error}</p>}}else{Html::default()}}
                     {if !self.new_model_error.is_empty(){html!{<p class="error" role="alert">{&self.new_model_error}<button type="button" onclick={ctx.link().callback(|_|Msg::LoadNewModels)}>{"Retry models"}</button></p>}}else if models.is_empty(){html!{<p role="status">{"Loading models…"}</p>}}else{Html::default()}}
                     </crate::ui::Group><crate::ui::Group title="Permissions">

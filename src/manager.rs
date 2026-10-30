@@ -180,6 +180,9 @@ impl Manager {
                     params["config"] = json!({"model_reasoning_effort":effort});
                 }
             }
+            if let Some(window) = self.store.prompt_record(&format!("context/{id}"))?["resolved"].as_i64() {
+                params["config"]["model_context_window"] = json!(window);
+            }
             if let Some(prompt) = self.store.prompt(id)? {
                 params["baseInstructions"] = json!(prompt);
                 params["developerInstructions"] = json!("");
@@ -1218,6 +1221,8 @@ mod tests {
                         assert_eq!(request["params"]["baseInstructions"], "Custom Codex base");
                         assert_eq!(request["params"]["developerInstructions"], "");
                         assert_eq!(request["params"]["config"]["project_doc_max_bytes"], 0);
+                        assert_eq!(request["params"]["config"]["model_context_window"], 500000);
+                        assert_eq!(request["params"]["config"]["model_reasoning_effort"], "high");
                         json!({"thread":{"id":"thread","turns":[]},"sandbox":{"type":"readOnly","networkAccess":false}})
                     };
                     ws.send(Message::Text(json!({"id":request["id"],"result":result}).to_string().into())).await.unwrap();
@@ -1229,6 +1234,8 @@ mod tests {
         let manager = Manager::new(Store::open(&path)?);
         let session = manager.store.create("custom", &url, &[], None)?;
         manager.store.save_prompt(&session.id, "Custom Codex base")?;
+        manager.store.put_prompt_record(&format!("context/{}",session.id), &json!({"window":500000,"resolved":500000}))?;
+        manager.store.model_selection(&session.id, &json!({"model":"fixture","effort":"high"}))?;
         manager.connect(&session.id).await?;
         manager.disconnect(&session.id, "restart").await?;
         let resumed = Manager::new(Store::open(&path)?);

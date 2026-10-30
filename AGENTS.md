@@ -53,6 +53,20 @@ Exact transport dependency versions constrain consumers with separate lockfiles.
 
 ## Library and native clients
 
+Protocol v51 adds per-session context windows on CreateSession and the receipted
+SetContextWindow operation. New Session and Session controls use a Default checkbox
+and a slider shown only for overrides, with no descriptive copy. Model catalogues
+include context limits from the runtime profile's custom catalogue or recent cache;
+missing metadata disables overrides. The server validates explicit values rather
+than silently clamping them. The slider preserves exact integer catalogue limits,
+including defaults not divisible by 1,000. Settings persist in SQLite and are passed as thread
+start/resume configuration, never written to the Codex profile. Existing sessions
+require idle state and saved history, with prompt-reconnect guards, unsubscribe and
+resume without a turn. Empty threads are rejected before disconnecting. Model changes
+revalidate overrides and reconnect when needed. Default is resolved again on resume.
+Deploy matching daemon and clients; receipts remain v16. Check with
+`uv run tests/context_window.py` using `web/.context-window-dist`, or DEMODEX_WEB.
+
 Protocol v50 forwards Codex's rateLimitResetCredits through Runtime.weekly_usage.reset_credits.
 The usage popup displays the authoritative available count and optional grant/expiry
 details separately from spending credits. Missing data stays unavailable; detail
@@ -783,11 +797,11 @@ See the [Services documentation](https://tailscale.com/docs/features/tailscale-s
 ## Local SVG previews
 
 Fenced `svg` blocks and explicitly opened `.svg` files render through
-`crates/web/src/svg.rs`. It validates and serializes a bounded static XML subset
+`crates/web/src/svg.rs`. It validates and serializes a bounded XML subset
 into an image/svg+xml data URL for an HTML img, never an inline SVG DOM tree,
 object or iframe. Browser image-document mode isolates IDs and disables scripts
 and external resources. Keep explicit validation as well: no href, CSS/style,
-images, links, scripts, animation, foreign content, DTDs or processing instructions.
+images, links, scripts, foreign content, DTDs or processing instructions.
 Unsupported input rejects the entire preview; exact source remains available.
 
 Supported geometry/text elements are svg (root only), g, rect, circle, ellipse,
@@ -802,6 +816,20 @@ ancestors of defs are also excluded. No paint inheritance references or recursiv
 numeric dimensions >=1 in userSpaceOnUse or >=0.01 in objectBoundingBox units.
 At most 32 paint servers and 16 IDs per accessibility-reference attribute; image
 labels are capped at 4,096 characters. These limits reduce complexity, not a browser CPU quota.
+
+Declarative animation supports animate and animateTransform only, targeting the
+immediate drawing parent outside defs. Animate permits selected geometry, paint
+colors, opacity and text metrics; animateTransform permits translate/scale/rotate.
+Validate every value against its target's bounds; animated paints cannot use URLs.
+Use 2–64 values or explicit from/to, optional matching keyTimes, linear/discrete
+calcMode, numeric begin offsets, dur from 100ms to 3600s, finite repeatCount <=1000
+or indefinite, and fill=remove/freeze. At most 64 animations. Only replace/none
+additive/accumulate modes are accepted. No href targets, event/syncbase timing,
+structural/ID/reference animation, animateMotion, set, CSS animation or scripts.
+The browser runs accepted animations inside the isolated img document. Native
+validation tests and rich_messages.py cover the moving-circle example, transform
+animation, thumbnail/modal/file motion and rejected animation-based URL/handler
+attempts. No protocol change or automatic file reads are involved.
 
 Retain the 128 KiB input, 2,048 XML node, 32 nesting level, 16 KiB attribute,
 finite numeric magnitude <=1,000,000 and 16 transform-operation limits. Require a
@@ -860,3 +888,8 @@ When incremental Events contain a resume threadSnapshot and the browser still ha
 unloaded older pages, reload Conversation from the daemon projection. Replaying
 that snapshot into a partial transcript would append old, unseen IDs as newly
 imported messages. Invalidate pending older-page reads when rebuilding the view.
+
+The Sessions sidebar uses a compact pinned two-row header: heading/layout/search/sort,
+then the full-width New Session action. Search expands on demand and retains visible
+active filters; Reorder lives in the sort picker. Verify with
+`DEMODEX_HEADER_ONLY=1 uv run tests/rust_web.py`; `DEMODEX_WEB` selects a candidate build.
