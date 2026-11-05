@@ -3,6 +3,12 @@ use demodex_protocol::{LinkDestination, Operation};
 use pulldown_cmark::{Event, Parser, Tag};
 use yew::prelude::*;
 
+#[derive(Clone, Default, PartialEq)]
+pub struct MessageImageContext {
+    pub item: String,
+    pub revision: u64,
+}
+
 #[derive(Properties, PartialEq)]
 pub struct ImageProps {
     pub destination: String,
@@ -15,6 +21,7 @@ pub struct ImageProps {
 #[function_component(Image)]
 pub fn image(props: &ImageProps) -> Html {
     let context = use_context::<LinkContext>().unwrap_or_default();
+    let message = use_context::<MessageImageContext>().unwrap_or_default();
     let source = use_state(|| None::<(LinkContext, String, String)>);
     let error = use_state(String::new);
     let opened = use_state(|| false);
@@ -116,13 +123,21 @@ pub fn image(props: &ImageProps) -> Html {
     } else {
         &props.label
     };
+    // Uploaded attachments keep their verified thumbnails. Other local images
+    // use the completed message's captured executors and explicit file preview.
+    let file_link = matches!(&kind, LinkDestination::File { .. })
+        && !message.item.is_empty()
+        && (!local || error.contains("No recorded image upload for this path"));
     html! {<span class="image-widget">
         <button type="button" class={classes!("image-button",(!local).then_some("remote-image-button"))} title={props.destination.clone()} aria-label={format!("Preview {label}")} onclick={open}>
             {if let Some(src)=source { html!{<img class="image-thumbnail" src={src.clone()} alt={label.to_owned()}/>} }
             else if local { html!{<span>{if error.is_empty(){"◻"}else{"▧"}}{" "}{label}</span>} }
             else { html!{<><span class="image-warning" aria-label="External image">{"⚠"}</span>{" "}{label}</>} }}
         </button>
-        {if *opened {html!{<crate::modal::Modal title="Image preview" icon_close=true dismiss_outside=true onclose={close}>
+        {if *opened && file_link {html!{<crate::links::LinkPopup
+            link={demodex_protocol::MessageLink { title: label.to_owned(), destination: props.destination.clone(), kind: kind.clone() }}
+            item={message.item.clone()} revision={message.revision} onclose={close.clone()}/>} }
+        else if *opened {html!{<crate::modal::Modal title="Image preview" icon_close=true dismiss_outside=true onclose={close}>
             <div class="link-destination">{&props.destination}</div>
             {if local {
                 if let Some(src)=source {html!{<img class="image-expanded" src={src.clone()} alt={label.to_owned()}/>}}

@@ -135,9 +135,13 @@ async fn request(socket: &mut Socket, id: u64, method: &str, params: Value) -> R
 }
 
 async fn connect(target: &Target) -> Result<Socket> {
+    connect_with_limit(target, 6 * 1024 * 1024).await
+}
+
+async fn connect_with_limit(target: &Target, limit: usize) -> Result<Socket> {
     let config = WebSocketConfig::default()
-        .max_message_size(Some(6 * 1024 * 1024))
-        .max_frame_size(Some(6 * 1024 * 1024));
+        .max_message_size(Some(limit))
+        .max_frame_size(Some(limit));
     let (mut socket, _) =
         tokio_tungstenite::connect_async_with_config(&target.url, Some(config), false).await?;
     request(
@@ -460,15 +464,15 @@ pub async fn read_uploaded_image(manager: &crate::manager::Manager, id: &str, pa
     // Uploads use the next-turn selection, which may not be active yet.
     let staged = manager.store.staged_targets(id)?.unwrap_or_default();
     ensure!(current.targets.iter().chain(&staged).any(|t| t.id == target.id && t.url == target.url), "The original image executor is unavailable or replaced");
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(60), async {
         let _permit = manager.file_slots.acquire().await?;
-        let mut socket = connect(&target).await?;
+        let mut socket = connect_with_limit(&target, 48 * 1024 * 1024).await?;
         let params = json!({"path":crate::ssh::sftp::path_uri(path)});
         let metadata = request(&mut socket, 2, "fs/getMetadata", params.clone()).await?;
-        ensure!(metadata["isFile"] == true && metadata["size"].as_u64().is_some_and(|n| n <= LIMIT as u64), "Image must be a regular file of at most 4 MiB");
+        ensure!(metadata["isFile"] == true && metadata["size"].as_u64().is_some_and(|n| n <= crate::uploads::MAX_BYTES as u64), "Image must be a regular file of at most 32 MiB");
         let result = request(&mut socket, 3, "fs/readFile", params).await?;
         let encoded = result["dataBase64"].as_str().context("Executor returned no image bytes")?;
-        ensure!(encoded.len() <= LIMIT.div_ceil(3)*4, "Image exceeds 4 MiB");
+        ensure!(encoded.len() <= crate::uploads::MAX_BYTES.div_ceil(3)*4, "Image exceeds 32 MiB");
         let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
         let extension = crate::uploads::extension(&bytes)?;
         ensure!(Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>() == digest, "Uploaded image has changed");

@@ -1,9 +1,12 @@
+mod claude;
 mod bug_reports;
 mod background;
 mod project_git;
 mod prompts;
 mod notifications;
 mod subagents;
+mod subagent_limit;
+mod reconnect;
 mod controls;
 mod context_window;
 mod directories;
@@ -24,11 +27,14 @@ mod usage;
 mod vm;
 mod vm_lifecycle;
 mod wormhole;
+pub mod voice;
+mod voice_archive;
 
 use manager::Manager;
 use std::sync::Arc;
 #[derive(Clone)]
 pub struct Service {
+    voice: Arc<voice::Relay>,
     manager: Arc<Manager>,
     _lock: Option<Arc<std::fs::File>>,
     orchestrator: Arc<orchestrator::Orchestrator>,
@@ -62,6 +68,7 @@ pub struct Runtime {
     stop: tokio_util::sync::CancellationToken,
     worker: Option<tokio::task::JoinHandle<()>>,
     push_worker: Option<tokio::task::JoinHandle<()>>,
+    index_worker: Option<tokio::task::JoinHandle<()>>,
 }
 impl Runtime {
     pub async fn start(config: Config) -> anyhow::Result<Self> {
@@ -86,9 +93,29 @@ impl Runtime {
                 }
             }
         });
+        let index_stop = stop.clone();
+        let index_service = service.clone();
+        let index_worker = tokio::spawn(async move {
+            loop {
+                if index_stop.is_cancelled() { break; }
+                let service = index_service.clone();
+                // Await each blocking batch even on cancellation. Its items and
+                // progress commit together before the runtime releases storage.
+                let busy = match tokio::task::spawn_blocking(move || service.manager.store.index_conversations_batch()).await {
+                    Ok(Ok(busy)) => busy,
+                    result => { tracing::warn!(?result, "conversation indexing failed"); false }
+                };
+                tokio::select! {
+                    biased;
+                    _ = index_stop.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(if busy { 10 } else { 1000 })) => {}
+                }
+            }
+        });
         let stopped = stop.clone();
         let app = service.clone();
         let worker = tokio::spawn(async move {
+            app.orchestrator.reconnect_active_goals(&stopped).await;
             loop {
                 tokio::select! {
                     biased;
@@ -107,6 +134,7 @@ impl Runtime {
             stop,
             worker: Some(worker),
             push_worker: Some(push_worker),
+            index_worker: Some(index_worker),
         })
     }
     pub fn service(&self) -> Service {
@@ -115,6 +143,9 @@ impl Runtime {
     pub async fn shutdown(mut self) -> anyhow::Result<()> {
         self.service.lifecycle.close();
         self.stop.cancel();
+        if let Some(worker) = self.index_worker.take() {
+            worker.await?;
+        }
         if let Some(worker) = self.push_worker.take() {
             worker.await?;
         }
@@ -136,6 +167,7 @@ pub use demodex_protocol as protocol;
 
 /// Storage and executor configuration for an embedded service. No network listener.
 pub struct Config {
+    pub stt: Option<voice::Config>,
     pub data_dir: std::path::PathBuf,
     pub vm_image: Option<std::path::PathBuf>,
     pub host_workspace: Option<std::path::PathBuf>,
@@ -173,6 +205,8 @@ impl Service {
             .codex_home
             .map(|path| path.canonicalize())
             .transpose()?;
+        let claude = claude::Claude::new(&config.data_dir, codex_home.clone().unwrap_or_else(|| config.data_dir.join("runtime/home")))?;
+        let _ = manager.claude.set(claude);
         let orchestrator = orchestrator::Orchestrator::new(
             manager.clone(),
             config.data_dir.canonicalize()?,
@@ -181,6 +215,7 @@ impl Service {
             codex_home,
         );
         Ok(Self {
+            voice: Arc::new(voice::Relay::new(config.stt, &config.data_dir)?),
             manager,
             orchestrator,
             commands: Arc::new(tokio::sync::Mutex::new(())),
@@ -190,6 +225,7 @@ impl Service {
     }
     /// Start the configured native runtime; isolated deployments start explicitly.
     async fn start(&self) -> anyhow::Result<()> {
+        self.voice.recover();
         self.orchestrator.reap_stale_containers().await?;
         if self.orchestrator.is_host_mode() {
             self.orchestrator.start_runtime().await?;
@@ -201,6 +237,7 @@ impl Service {
         self.orchestrator.monitor().await
     }
     async fn shutdown(&self) {
+        self.voice.shutdown().await;
         self.lifecycle.close();
         let _drained = self.lifecycle.calls.write().await;
         {
@@ -209,6 +246,7 @@ impl Service {
         }
         self.manager.file_jobs.wait().await;
         self.orchestrator.shutdown().await;
+        if let Some(claude) = self.manager.claude.get() { claude.shutdown().await; }
     }
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<()> {
         self.manager.updates.subscribe()
@@ -220,6 +258,7 @@ mod lifecycle_tests {
     use super::*;
     fn config(root: &std::path::Path) -> Config {
         Config {
+            stt: None,
             data_dir: root.join("state"),
             vm_image: None,
             host_workspace: None,
@@ -269,3 +308,5 @@ mod lifecycle_tests {
         Ok(())
     }
 }
+
+mod plugin_settings;

@@ -227,16 +227,19 @@ with tempfile.TemporaryDirectory(prefix='demodex-host-') as temporary:
             prompt.fill('🙂 replace end')
             prompt.evaluate('(el) => el.setSelectionRange(3, 10)')
             png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
+            # Exercise the exact image limit through upload and authenticated preview.
+            small_png = png
+            png += bytes(32 * 1024 * 1024 - len(png))
             with page.expect_file_chooser() as chooser:
-                page.get_by_role('button', name='Attach image', exact=True).click()
+                page.get_by_role('button', name='Attach file', exact=True).click()
             chooser.value.set_files({'name': '../../screenshot.png', 'mimeType': 'image/png', 'buffer': png})
-            expect(prompt).to_have_value(re.compile(r'🙂 !\[Attached image\]\(</.*/uploads/[^/]+\.png>\) end'), timeout=20000)
+            expect(prompt).to_have_value(re.compile(r'🙂 !\[Attached image\]\(</.*/uploads/[^/]+\.png>\) end'), timeout=60000)
             image_path = Path(prompt.input_value().split('](<')[1].split('>)')[0])
             assert image_path.read_bytes() == png
             assert image_path.parent == data / 'uploads'
             assert image_path.stat().st_mode & 0o777 == 0o600
             page.set_viewport_size({'width':390,'height':844})
-            expect(page.locator('.composer-images img')).to_have_count(1, timeout=20000)
+            expect(page.locator('.composer-images img')).to_have_count(1, timeout=60000)
             assert page.locator('.composer-images img').evaluate('(e)=>e.complete && e.naturalWidth > 0')
             page.locator('.composer-images button').click()
             expect(page.get_by_role('dialog').locator('img')).to_have_count(1)
@@ -246,20 +249,38 @@ with tempfile.TemporaryDirectory(prefix='demodex-host-') as temporary:
             draft = prompt.input_value()
             page.reload()
             expect(prompt).to_have_value(draft, timeout=20000)
-            expect(page.locator('.composer-images img')).to_have_count(1, timeout=20000)
+            expect(page.locator('.composer-images img')).to_have_count(1, timeout=60000)
             # Clipboard uploads append at the current selection and remain unsent.
+            png = small_png
             prompt.evaluate('(el) => el.setSelectionRange(el.value.length, el.value.length)')
             prompt.evaluate("""(el, data) => {
                 const clipboardData = new DataTransfer();
                 clipboardData.items.add(new File([new Uint8Array(data)], 'paste.png', {type:'image/png'}));
                 el.dispatchEvent(new ClipboardEvent('paste', {clipboardData, bubbles:true, cancelable:true}));
             }""", list(png))
-            expect(page.get_by_role('button', name='Attach image', exact=True)).to_be_enabled(timeout=20000)
+            expect(page.get_by_role('button', name='Attach file', exact=True)).to_be_enabled(timeout=20000)
             expect(prompt).to_have_value(re.compile(r' end !\[Attached image\]\(</.*/uploads/[^/]+\.png>\)$'), timeout=20000)
             assert len(list((data/'uploads').iterdir())) == 2
-            page.get_by_label('Upload image', exact=True).set_input_files({'name':'bad.png','mimeType':'image/png','buffer':b'not an image'})
+            page.get_by_label('Upload file', exact=True).set_input_files({'name':'bad.png','mimeType':'image/png','buffer':b'not an image'})
             expect(page.get_by_role('alert')).to_contain_text('Choose a PNG', timeout=20000)
             assert len(list((data/'uploads').iterdir())) == 2
+            # General attachments retain bytes/name and insert a link without sending.
+            prompt.fill('Please inspect')
+            prompt.evaluate('(el) => el.setSelectionRange(el.value.length, el.value.length)')
+            payload=b'%PDF-1.7\nfixture bytes\x00\xff'
+            page.get_by_label('Upload file', exact=True).set_input_files({'name':'report [draft] #1.pdf','mimeType':'application/pdf','buffer':payload})
+            expect(prompt).to_have_value(re.compile(r'Please inspect \[report'), timeout=20000)
+            from urllib.parse import unquote
+            attached=Path(unquote(prompt.input_value().split('](<')[1].split('>)')[0]))
+            assert attached.name=='report [draft] #1.pdf' and attached.read_bytes()==payload
+            assert attached.stat().st_mode & 0o777 == 0o600
+            assert '![' not in prompt.input_value()
+            page.get_by_label('Upload file', exact=True).set_input_files({'name':'empty.txt','mimeType':'text/plain','buffer':b''})
+            expect(prompt).to_have_value(re.compile(r'\[empty.txt\]'),timeout=20000)
+            draft=prompt.input_value()
+            page.get_by_label('Upload file', exact=True).set_input_files({'name':'too-large.bin','mimeType':'application/octet-stream','buffer':b'x'*(32*1024*1024+1)})
+            expect(page.get_by_role('alert')).to_contain_text('32 MiB')
+            expect(prompt).to_have_value(draft)
             assert not any(e['message'].get('method') == 'demodex/promptAccepted' for e in api('/sessions/'+session['id']+'/events'))
             page.get_by_role('button',name='+ New Session',exact=True).click()
             page.get_by_label('Resume existing session',exact=True).check()

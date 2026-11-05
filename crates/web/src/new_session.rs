@@ -79,6 +79,7 @@ impl App {
                 })
                 .collect(),
             sandbox,
+            max_subagents: if self.saved.field("new_max_subagents").is_empty() { None } else { Some(self.saved.field("new_max_subagents").parse().unwrap_or(0)) },
             context_window: if context_window.is_empty() { None } else { Some(context_window.parse().unwrap_or(0)) },
             model: (!selected_model.is_empty() && !selected_effort.is_empty()).then(|| demodex_protocol::ModelChoice {
                 model: selected_model.clone(),
@@ -142,6 +143,7 @@ impl App {
                         <option value="" selected={selected_tier.is_empty()}>{default_tier_label}</option>
                         {for selected_record.into_iter().flat_map(|model|array(&model["serviceTiers"])).filter(|tier|text(tier,"id")!="default").map(|tier|html!{<option value={text(&tier,"id").to_owned()} selected={text(&tier,"id")==selected_tier}>{if text(&tier,"name").is_empty(){text(&tier,"id")}else{text(&tier,"name")}}</option>})}
                     </select></label>
+                    <label>{"Max concurrent subagents"}<input type="number" min="1" max="4294967295" placeholder="Codex default" value={self.saved.field("new_max_subagents")} disabled={self.busy||!self.connected} oninput={ctx.link().callback(|e:InputEvent|Msg::Field("new_max_subagents".into(),e.target_unchecked_into::<web_sys::HtmlInputElement>().value()))}/></label>
                     <crate::context_window::ContextWindow value={context_window} bounds={context_bounds} disabled={self.busy||!self.connected}
                         onchange={ctx.link().callback(|value|Msg::Field("new_context_window".into(),value))}/>
                     {if let Some(error)=self.new_models["defaults_error"].as_str(){html!{<p class="error" role="alert">{error}</p>}}else{Html::default()}}

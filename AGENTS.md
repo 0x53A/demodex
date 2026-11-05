@@ -1,895 +1,375 @@
 # Demodex
 
 Rust manager and mobile-first Rust/Yew PWA for Codex sessions and isolated NixOS
-work VMs. Instances are independent; the browser connects directly to a selected
-daemon. There is no central coordinator. See `DESIGN.md` for the UI design system.
-
-## Code and transport
-
-- `src/`: core library, daemon, orchestration, persistence and VM management.
-- `src/service.rs`: transport-independent operation dispatch and durable receipts.
-- `src/wormhole.rs`: authenticated actors; `src/http.rs`: static assets and upgrades.
-- `crates/client/`: reusable native Wormhole client, used by Frosticus and the CLI.
-- `crates/web/`: the maintained Yew HTML/WASM frontend. No Node/pnpm toolchain is
-  needed. Small JavaScript files provide PWA startup and service-worker glue.
-- `crates/protocol/`: shared actor API and compatibility contract.
-- `nix/host-service.nix`: NixOS `services.demodex` module.
-- `tools/build-web.py`: frontend builds; `tests/`: Rust-adjacent integration and
-  browser checks, run with UV.
-
-Use Codex app-server JSON-RPC, never terminal scraping. The compatibility
-baseline is codex-cli 0.163.0; this is an experimental API. Preserve unknown
-events for inspection and report unsupported requests explicitly.
-
-The 0.163.0 complete upstream Linux binary package no longer bundles patched
-zsh. Host/resume, prompt settings, runtime feature/restart, failed-startup
-cleanup and durable native/SFTP file tests pass against this version without
-inference. Packaging recipes must not require the retired zsh helper.
-
-The PWA uses ractor_wormhole at `/wormhole`. A JSON hello checks protocol VERSION
-and wire-schema fingerprint before the Wormhole handshake or authentication.
-Both peers reject mismatches. Keep wire declarations in
-`crates/protocol/src/wire.rs`: build.rs hashes normalized declarations and locked
-transport dependencies. Do not move wire types into unhashed modules or introduce
-target-specific shapes. The fingerprint is not Rust TypeId or proof of semantic
-compatibility. Bump VERSION for semantic changes, including JSON payloads;
-`crates/protocol/src/lib.rs` is the source of truth for the version.
-
-After login, typed actor calls and pushed change notices carry UI traffic. The
-frontend coalesces notices and fetches snapshots and event pages by cursor;
-periodic server notices refresh account/runtime state. Render through Yew's
-Message/update/view model. There is no REST API or Axum dependency. Wormhole calls
-the core Service directly with shared typed operations and responses. Diagnostics
-use `demodex call`; library and native-client integration are described below.
-
-Storage and service dispatch reuse the shared session/event records directly,
-without JSON round-trips between duplicate types. Extensible upstream Codex
-records retain serde_json::Value; the browser converts typed replies to its dynamic
-view model. Forms construct shared command types directly. Invalid saved sandbox
-choices produce validation messages, never silently select default access.
-Data-record serde encoding lives alongside the wire declarations; encoding changes
-require a version bump because the structural hash excludes implementations.
-Exact transport dependency versions constrain consumers with separate lockfiles.
-
-## Library and native clients
-
-Protocol v51 adds per-session context windows on CreateSession and the receipted
-SetContextWindow operation. New Session and Session controls use a Default checkbox
-and a slider shown only for overrides, with no descriptive copy. Model catalogues
-include context limits from the runtime profile's custom catalogue or recent cache;
-missing metadata disables overrides. The server validates explicit values rather
-than silently clamping them. The slider preserves exact integer catalogue limits,
-including defaults not divisible by 1,000. Settings persist in SQLite and are passed as thread
-start/resume configuration, never written to the Codex profile. Existing sessions
-require idle state and saved history, with prompt-reconnect guards, unsubscribe and
-resume without a turn. Empty threads are rejected before disconnecting. Model changes
-revalidate overrides and reconnect when needed. Default is resolved again on resume.
-Deploy matching daemon and clients; receipts remain v16. Check with
-`uv run tests/context_window.py` using `web/.context-window-dist`, or DEMODEX_WEB.
-
-Protocol v50 forwards Codex's rateLimitResetCredits through Runtime.weekly_usage.reset_credits.
-The usage popup displays the authoritative available count and optional grant/expiry
-details separately from spending credits. Missing data stays unavailable; detail
-rows may be capped. Explicit null expiry means no expiry, while a missing field
-stays unknown. This is read-only; no reset is redeemed. Deploy matching daemon and
-clients; receipts remain v16. Coverage lives in both usage.rs modules.
-
-Protocol v49 integrates the v40–48 changes below with the remote title update.
-It removes the redundant project-context description from replies and
-UI. Legacy saved contexts and older thread calls may still include it; it is
-ignored. Agents are instructed to set a short task title once the task is clear
-and update it when the task changes substantially. Context tools report only
-environment and project path. Deploy matching daemon and clients; receipt
-encoding remains v16. Existing threads retain their saved tool schemas, and
-custom integration prompt layers must be updated explicitly if desired.
-
-Protocol v48 adds read-only SearchConversation over daemon-projected saved history.
-Each request searches one bounded conversation page and returns a match or older
-cursor, never transcript bytes. The sidebar filters titles and working/project paths
-locally; explicit Full text search scans sessions sequentially, including archives.
-Query changes and connection generations invalidate late responses; Stop prevents
-further requests. No Codex resume or inference. Cold projection cost is shared with
-Conversation; matching is literal, case-insensitive, across message/tool content,
-excluding structural IDs and recording metadata. Deploy matching clients/daemon;
-receipts remain v16. Check with `DEMODEX_SEARCH_ONLY=1 uv run tests/rust_web.py`.
-
-Protocol v47 adds receipted DetachEnvironmentExecutors and DeleteEnvironment.
-VM deletion requires stopped state and no current or staged session selections;
-it removes the private VM directory and registry row, preserving shared base images
-and conversations. Detach validates idle connected sessions, decisions, queues,
-goals and background terminals, unsubscribes and disconnects them, then removes only
-this VM from current/staged selections. Disconnected attachments require a stopped
-VM. Legacy runtime ownership is retained. Reconnect explicitly; no turn is sent.
-Server settings offers confirmed Detach executors and Delete VM actions. Deploy
-matching daemon and clients; receipts remain v16. Tests: src/vm_lifecycle.rs and
-`uv run tests/vm_delete.py` (disposable data, no VM boot or inference).
-
-Protocol v46 stores a durable file-host binding (registry target plus hash of Linux
-machine-id and filesystem UID). New managed file checks capture it; reads
-and Refresh verify it on the same native-executor or SFTP connection used for file
-access, independently of session attachment. Host access still requires host mode;
-VMs/containers must already be running, removed targets fail, and SSH retains strict
-host-key checking. No remote fallback or conversation resume. A machine ID is an
-operational identity, not hardware attestation; cloned IDs/accounts are indistinguishable.
-Legacy snapshots retain exact-generation access and offer an explicit, receipted
-BindMessageFileHost / Choose file host action to pin the operator-selected host.
-Pairing cannot replace an existing fingerprint. Only registries established by
-orchestration can auto-bind; never derive authority from an executor name prefix.
-Uploaded images retain their existing attachment/digest rules. Deploy matching daemon
-and clients; receipts remain v16. Run `uv run tests/file_hosts.py` for disposable
-host/SFTP restart, disconnected access, pairing, identity mismatch and SSH trust checks.
-
-Protocol v45 adds receipted RefreshMessageFile and a file-dialog Refresh button.
-Only an explicit click rechecks one recorded destination, using still-attached original
-executor identities/endpoints and captured directories. Checks remain bounded; refresh
-reparses location suffixes and updates only that file snapshot. No automatic replay,
-new executor fallback or content read. Deploy matching daemon and clients; receipts
-remain v16.
-
-Protocol v44 adds Runtime.bug_reports with daemon identity and latest report ID.
-Server settings shows an orange new-report dot until the newest inbox page is
-successfully loaded. The per-daemon watermark persists in browser localStorage
-and syncs across tabs; opening settings or older pages does not acknowledge it.
-Successful filings push a Runtime notice; periodic runtime refresh recovers missed
-notices. Deploy matching daemon and clients; receipts remain v16.
-
-Protocol v43 parses positive `:line` and `:line:column` suffixes on local file
-paths before percent decoding. Metadata and reads use the underlying path; original
-destinations retain the location. Encode literal filename colons as `%3A`. Existing
-metadata snapshots remain unchanged, without replay. Deploy matching daemon and
-clients; receipts remain v16.
-
-Protocol v42 adds the read-only, paginated BugReports inbox in Server settings and
-new-thread `demodex.bug_report(title, description)` / `demodex.emergency_call(message, title?)`
-tools. Reports persist per daemon with session/project snapshots; no external
-tracker or notification is involved. Emergency calls are urgent chat notifications
-with high-priority encrypted Web Push to enabled devices, not telephone calls.
-Zero devices reports push disabled explicitly; provider acceptance is not confirmed
-delivery. Existing notification receipts/outbox prevent replay. New tools require
-new Codex threads. Deploy matching daemon and clients; receipts remain v16.
-
-Protocol v41 adds receipted SetDefaultSandbox and Runtime.default_sandbox.
-The server persists this New Session form preference; the form submits the
-reviewed policy explicitly. Existing/resumed sessions and native creation calls
-retain their prior behavior. Deploy matching daemon and clients; receipts remain v16.
-
-Protocol v40 pages Conversation snapshots backwards by a stable event high-water
-mark and item offset, targeting 10 MiB of item JSON per page. An indivisible
-larger item occupies its own page without truncation. The PWA initially loads the
-newest page and offers Show older messages, preserving live updates and scroll
-position. One bounded server projection cache avoids repeated event replay;
-evicted cursors reconstruct the same historical projection. Initial projection
-still reads durable history; browser Conversation reads allow 180 seconds for
-a cold projection. Codex RPC connections accept frames and messages up
-to 500 MiB for full-history resume replies. Deploy matching daemon and clients;
-receipt encoding remains v16.
-
-Protocol v39 allows read-only ProjectGit snapshots for all overview host project
-folders through the current daemon host executor, including disconnected sessions.
-Host mode must be explicitly enabled. Remote checks still use the exact attached
-executor of a connected session, never host fallback,
-with a 30-second generation/endpoint/path cache, four concurrent commands, 64
-projects and a 12-second refresh bound. Each executor must provide Git, sh and
-`timeout`; native host checks use the daemon PATH (the NixOS module includes
-Git), and remote checks use the standard Linux/NixOS system PATH. Each command
-is limited to four seconds and 256 KiB of output. Git optional writes, fsmonitor
-hooks, submodule recursion and partial-clone lazy fetching are disabled; missing
-objects report Git unavailable rather than triggering a fetch.
-The browser refreshes Git every 60 seconds and shows per-folder failures and
-request-level refresh errors visibly, clearing them after successful refresh.
-The status covers the whole containing worktree and reports root ancestry from
-Git's prefix (including linked worktrees). No-repository is distinct from errors,
-timeouts and disconnected targets. The browser reads independently on state and
-runtime notices; project status is neither persisted nor a conversation event.
-Run `uv run tests/project_git.py` for disposable real-native-executor checks
-without inference. Deploy matching daemon and clients; receipt encoding remains v16.
-
-Protocol v38 adds Session.last_user_message_at from accepted Demodex sends,
-steers and queue submissions, using an indexed lookup over durable events.
-Overview defaults to newest user message, with Name and Manual options; stars
-remain first. Tree sorts within projects; List sorts across projects except
-in Manual mode. Missing recorded send times sort last. Reorder selects Manual.
-Deploy matching daemon and clients; receipt encoding remains v16.
-
-Protocol v37 adds explicit receipted Takeover for local imported threads blocked
-by Codex's active-writer error. Detail controls exposes a read-only CLI-daemon
-inspection. The UI warns that stopping the shared CLI daemon stops all its loaded
-sessions, and submits its identity and reviewed thread list. The server rechecks
-both in the explicitly shared profile. Linux takeover verifies the inspection
-socket's peer PID/UID and the daemon's boot ID/start ticks, pins a pidfd before
-validation, sends SIGTERM only through that handle and waits for that exact
-process to exit before resuming once without a turn. A replacement daemon is
-never signalled. Unavailable pidfd support fails closed; no automatic takeover, profile-wide stop,
-numeric-PID/process-name killing, SIGKILL, lock deletion or external-controller
-fallback. The loaded list is a snapshot; stopping the reviewed server affects
-all its sessions, including ones opened before shutdown. Matching daemon/clients
-required; receipt encoding remains v16. Run `uv run tests/takeover.py` for disposable real
-Codex daemon checks without inference.
-
-Protocol v36 adds last-request input_tokens and cached_input_tokens to
-Session.context_usage. Existing usage snapshots recover those fields from saved
-events while preserving report time. The blue Possibly cold indicator is a
-30-minute age heuristic, not confirmed provider cache expiry or a billing quote;
-it shows last-request input tokens, never cumulative usage. Active work is exempt.
-Deploy matching daemon and clients; receipt encoding remains v16.
-
-Protocol v36 adds authenticated ReadUploadedImage for recorded image uploads.
-Uploads insert Markdown images; composer and transcript thumbnails expand in a modal.
-Reads require the original executor in the active or staged selection, regular
-files, the 4 MiB limit and matching upload digest. URL images are inert buttons with a warning; the popup displays the
-full parsed URL and requires a separate Load image action. Deploy matching clients
-and daemon; receipt encoding remains v16.
-
-Protocol v35 adds resolved runtime model, reasoning effort and service tier to
-RuntimeModels, including the configured tier and explicit default-discovery errors.
-New Session labels inheritance as Default (resolved value); choosing it still
-leaves model settings unset. Deploy matching daemon and clients.
-
-Protocol v34 adds read-only Conversation snapshots projected from durable events,
-with a high-water cursor for subsequent Events reads. The projection is shared
-by daemon and frontend; full raw events remain available through Events and UI
-Diagnostics. Targets also reports known_hosts_file for copying private SSH
-configuration into a reviewable new-session form. Session ordering and placement
-use stable target then project, with reported environment first, host fallback,
-then the first attached target. Deploy matching daemon and clients; receipt
-encoding remains v16.
-
-Protocol v33 also adds a paginated RuntimeModels read and an optional validated
-model, reasoning effort and service tier to managed-session creation. The choice
-is persisted before `thread/start` so prompt-layer composition uses the selected
-model. Deploy matching daemon and clients.
-New Session defaults to inheriting the runtime profile's model, reasoning effort
-and service tier; choosing a model explicitly enables individual settings.
-Prompt reconnects hold lifecycle and session-settings locks through idle checks,
-unsubscribe and resume. Effort/tier-only and no-op model updates do not reconnect.
-Completed failed turns may leave Codex in `systemError`; allow session controls
-and prompt reapplication in that state once no active turn remains. Model changes
-still require a settings notification from the same thread and connection generation.
-
-Protocol v32 adds server prompt layers: per-model replacements, an appendix shared
-by all models, and an editable Demodex integration layer. Settings live in SQLite,
-use revision-checked mutation receipts, and never modify the Codex profile. Model
-lists are paginated from the runtime; default text comes from its current catalogue
-cache or bundled catalogue. Diffs use the latest fetched defaults; saved baseline
-fingerprints retain change notices until an override is reviewed and saved.
-Profile instruction overrides are shown separately from the model's default.
-New managed sessions and explicit reconnects resolve the current layers. Applying
-from Session controls requires idle state, no pending decisions, queue, active goal
-or background terminals; it unsubscribes before reconnecting, never starts a turn,
-and reports empty-thread resume failures without replacing the thread. Model changes
-reconnect when managed prompt layers apply. Legacy complete session overrides remain
-until explicitly replaced through Apply prompts. Project-file inclusion is a server
-default with per-session overrides; global AGENTS.md inclusion has no independent
-Codex API switch and is shown as unavailable. File previews use the selected executor
-with no host fallback, are read-only, and are bounded to 256 KiB per file, 32 project
-files / 1 MiB and 15 seconds. Previews describe current discovery; connection-time
-instruction source paths reported by Codex are displayed separately. Deploy matching
-daemon and clients; receipt encoding remains v16. Run `uv run tests/prompt_settings.py`
-for disposable real-Codex and browser checks without inference. `DEMODEX_WEB` selects
-an isolated frontend build for that suite.
-
-Protocol v31 adds reported credit balances to Runtime.weekly_usage for the usage
-popup. Deploy matching daemon and clients; receipt encoding remains v16.
-
-Protocol v30 adds scoped Session and Runtime change notices. Session content notices
-invalidate only the selected session's event cursor; state notices also refresh
-session summaries and the matching detail. Periodic runtime notices refresh runtime
-and selected detail, not transcripts or target registries. Full Changed notices
-remain for broad mutations, initial watches and lag recovery. Browser reads run
-independently per resource, coalescing invalidations without losing scopes; session
-navigation and connection generations reject stale completions. Session summaries
-own current session metadata; slow detail replies cannot overwrite reconnect status.
-Event pages render incrementally. Native clients retain their coarse Changed wake API. Deploy matching
-daemon and frontend/native clients; receipt encoding remains v16.
-
-Protocol v29 adds read-only MessageFiles/ReadMessageFile for link widgets. Completed
-assistant messages capture executor identities and working directories once;
-metadata snapshots persist in message_files, with at most 10 distinct files,
-3 seconds per file across its executors and 10 seconds per message. Checks are
-bounded globally, never replayed on resume/reload/restart, and distinguish not
-found, timed out, failed and not checked. Interrupted checks stay explicit.
-File reads require the captured executor identity and endpoint still attached to
-a connected session, use its executor protocol without host fallback, accept only
-regular files, and cap complete downloads at 4 MiB. File bytes are not persisted.
-Deploy matching daemon and clients; receipt encoding remains v16.
-
-Protocol v27 adds authenticated PushSettings/RegisterPush/RemovePush/TestPush and the
-session-scoped `demodex.notify(message, title?)` tool for newly created Codex threads.
-Notifications commit a chat event, outbox entry and tool receipt atomically. A separate
-worker attempts encrypted Web Push at most once, with bounded delivery and uncertain
-outcomes after interruption; existing Codex threads retain their original tools.
-One daemon is bound per browser installation; other server connections still work.
-VAPID keys/subscriptions remain in the private daemon SQLite store. No automatic
-completion/question notifications are sent. Deploy matching daemon and clients.
-Receipt encoding remains v16. Run `uv run tests/notifications.py` for mocked browser
-push checks; actual provider/device delivery requires an explicit operator test.
-
-Protocol v26 adds atomic ReorderSessions within a star/project/archive group; stale
-orders are rejected. Runtime adds current restart-blocker counts and the latest
-reported active_subagents count per connected session. Subagent activity is scoped
-to the live Codex generation and rebuilt from resumed history. Deploy matching
-clients and daemon; receipt encoding remains v16.
-
-Protocol v25 adds receipted StarSession/MoveSession and durable per-session
-star/order metadata. Moves stay within a project group, archive state and star
-state; starred sessions render first. It also adds the session-scoped `demodex.set_session_identity` dynamic tool
-for partial title/name/icon updates and a title in `get_session_context` replies.
-Display updates and tool receipts commit atomically. It does not rename Codex
-threads or change UUIDs, execution settings or project context. New threads get
-the tool; older threads retain their saved Codex tool catalogue. Deploy matching
-clients and daemon; receipt encoding remains v16. Goal action `start` sets the
-objective and active status in one call; `save` remains paused. Both accept updates
-during active turns without interrupting or sending a hidden turn. Starting still
-requires applied target selections.
-
-Protocol v24 adds receipted RenameSession for the Demodex display name, including
-disconnected sessions. Blank import names use the saved Codex title; saved-session
-search accepts a complete Codex thread UUID. Deploy matching clients and daemon.
-Steering submission events keep messages visible until matched by Codex client ID.
-Receipt encoding remains v16.
-
-Protocol v23 adds read-only BrowseDirectories for configured host/VM/container/external/SSH targets, and goal state/error alongside Runtime.background_terminals counts. Directory browsing requires host mode for host paths; remote failures never fall back to host. Listings are bounded and picking a path only edits a form. Deploy matching clients and daemon. Receipt encoding remains v16.
-
-Protocol v22 adds all reported quota windows in Runtime.weekly_usage.all_windows
-while preserving its weekly-only windows list, plus Runtime.background_terminals
-with per-session counts (null when unavailable). Overview reads are bounded.
-Blank managed-session names become "Untitled session". Deploy matching daemon
-and clients together; receipt encoding remains v16.
-New Session can stage a private SSH executor: Create and SSH attachment are
-separate receipted operations, never retried automatically. A failed attachment
-leaves the created session without the SSH attachment; failed SSH form data is discarded.
-Server Settings also exposes explicit shared SSH registration.
-
-Protocol v21 added server-wide Codex feature overrides and explicit runtime restart
-(`SetRuntimeFeature`, `RestartRuntime`). Overrides live in Demodex SQLite, not the
-Codex profile, and become `--enable`/`--disable` app-server launch arguments.
-`Runtime.features` exposes saved/applied overrides and the startup catalogue from
-the paginated `experimentalFeature/list` API. Discovery failures remain visible.
-Restart requires idle managed threads, no active goals, queued messages, unresolved
-decisions or background terminals; unknown loaded threads block it. It disconnects
-sessions and replaces the host executor. Reconnect explicitly; never replay work.
-Run `uv run tests/runtime_features.py` for disposable real-Codex checks without
-inference. Run `uv run tests/runtime_startup.py` to check that failed isolated
-runtime startup releases its owned process and permits another attempt, without
-inference. Existing receipt response encoding stays v16. Deploy matching protocol
-clients and daemon together.
-
-Protocol v17 added DefaultPrompt (read-only) and new-session prompt overrides through
-CreateSessionWithPrompt / HostSessionWithPrompt. DefaultPrompt resolves the runtime
-profile's base instructions (configured file/text or model catalogue) plus operator
-developer and Demodex integration instructions. It requires a local host runtime.
-Overrides persist in session_prompt and are sent as baseInstructions on start/resume,
-with empty developerInstructions and project_doc_max_bytes=0. Runtime-generated
-context and tools remain enabled. Overrides cannot be applied to imported threads.
-Receipt response encoding remains v16; its existing response types are unchanged.
-tests/prompt.py checks the real Codex catalogue and thread creation without inference.
-
-Protocol v18 adds RegisterSessionSshTarget. It verifies and attaches a private SSH
-target to a connected idle session. New sessions may start with zero targets;
-VMs are created from Server settings and SSH executors from Session controls.
-Protocol v19 adds managed OCI container targets. Creation selects Docker or
-Podman per container; the engine choice persists with the target. Rebuild native
-clients and the frontend with the daemon after this protocol change.
-Protocol v20 adds ChangeTargets with NextTurn and Interrupt modes. Active turns
-keep their effective targets while the requested selection persists separately.
-Interrupt mode waits for confirmed completion and idle state before saving;
-no hidden turn is sent. The next explicit turn/start applies the selection.
-Rebuild clients and the frontend with the daemon after this protocol change.
-
-`demodex::Runtime::start(Config).await` opens storage, starts the configured
-executor and owns periodic monitoring. Obtain cloneable handles with
-`runtime.service()`. `Service::call(request_id, Operation)` is a trusted in-process
-API: authorization belongs to its host application.
-
-Await `runtime.shutdown()` before leaving Tokio: it rejects new calls, drains
-admitted operations and stops executors. Drop requests asynchronous cleanup,
-which requires a live Tokio runtime. Every Service handle retains the private
-state-directory lock, including closed handles; release them before reopening
-the same directory. Individual browser connections do not own the runtime.
-Connection-scoped actors and socket readers are cancelled together; accepted
-commands finish and record receipts even after their caller disconnects.
-
-`demodex-client::Client` opens a native WebSocket, checks Hello before credentials,
-authenticates and subscribes to notices. `call` takes an explicit receipt ID;
-`read` refuses mutations. It never reconnects or retries calls automatically.
-`subscribe()` reports changes and connection closure. Dropping the client releases
-its socket reader and actors. Calls return uncertainty promptly on connection
-closure rather than waiting out the RPC deadline. Native TLS uses system roots.
-
-`demodex call --url ws://127.0.0.1:4780/wormhole --token-file PATH` reads JSON lines
-from stdin and prints one Result per line. Example read:
-`{"operation":"Sessions"}`. Mutations should supply a stable UUID `request_id`;
-the CLI generates one when omitted for interactive/test convenience. Keep IDs to
-inspect uncertain results with `{"operation":{"Receipt":{"id":"UUID"}}}`.
-Logs go to stderr; neither URLs nor arguments contain access tokens.
-
-Frosticus lives at ../frost/codicillus-frosticus and depends on the client/protocol
-crates by local path. Its separate member Wormhole protocol enforces ownership;
-it does not expose Demodex's administrative actor to browsers. Rebuild affected
-clients and daemons together after incompatible protocol changes.
-
-## Session and execution contracts
-
-Conversation identity, agent runtime, execution target and browser lifetime are
-separate. Browser portals own no sessions. The daemon owns Codex RPC connections,
-executors and approvals across browser disconnects and static-service restarts.
-
-Persist UUID mutation receipts before execution. Duplicate requests return the
-recorded result; uncertain commands, prompts and approvals must never be replayed
-automatically. Replacing an executor invalidates its process/file handles and
-assigns a fresh executor identity. Never route old handles into a replacement.
-Process handles remain generation-scoped; only file snapshots with an explicitly
-verified durable host binding may resolve through a replacement executor.
-Requests from a lost RPC generation remain visibly unavailable. Unsupported
-approval types use explicit JSON response editing, not an automatic answer.
-Questions and approvals displayed by Demodex remain pending until the user
-responds; browser timeouts and reconnects must not submit a default answer.
-
-SQLite retains the existing schema. New receipts store a versioned typed reply;
-old string-encoded replies are decoded only on the legacy receipt path. v14
-JSON-string inputs are normalized only for command identity comparison. Completed
-receipts return their recorded result; interrupted receipts remain uncertain and
-never replay. Receipt queries expose decoded data for older persisted records too.
-
-Host-session creation/import accepts an existing absolute working directory.
-Blank preserves the service default or imported directory; an explicit path
-overrides it for a new attachment. Importing again cannot retarget an existing
-attachment. Display the active executor directory rather than relying on a
-resumed thread's historical top-level cwd.
-
-Persist sandbox choices separately from the user's Codex configuration:
-read-only, workspace-write, danger-full-access, or no override. Creation/resume
-sends `sandbox`; idle changes use `thread/settings/update` with `sandboxPolicy`.
-Reject changes during active turns on both server and UI. Show the accepted
-effective policy; approval policy stays on-request. No override on a connected
-thread retains its current policy. Preserve existing SQLite data during changes.
-
-Protocol v28 makes saved-thread search case-insensitive substring matching over
-IDs, names and preview metadata. Search scans at most ten 50-row `thread/list`
-pages per request, preserving the cursor even for an empty batch; it never reads
-transcripts. Exact UUID lookup uses `thread/read` without turns.
-Saved threads use `thread/list` with search and pagination. Selecting one fills
-an explicit resume form. Stop its CLI controller before attaching; resume restores
-persisted history, not live CLI processes or shell jobs. Empty threads may lack a
-persisted rollout: expose `no rollout found` rather than silently replacing them.
-
-## Shared execution targets
-
-Targets are daemon-scoped. The registry includes the configured native host,
-managed VMs, managed Docker/Podman containers, and named external executors.
-Several sessions may select the same VM or container; sessions do not own or
-exclusively reserve targets. VM provisioning is also
-available in host mode. Host execution still requires `--host-workspace`; never
-silently expose the host from an isolated default deployment.
-
-`execution_targets` stores external endpoints; `session_targets` stores ordered
-stable target selections and per-session working directories. Keep these IDs
-separate from Codex executor generations in `sessions.targets`. Migrate legacy
-attachments without deleting history or overriding an existing selection.
-`runtime_sessions` identifies sessions created directly against the daemon runtime.
-`host_sessions` and `session_environment` identify legacy managed runtime
-attachments, not the current set of tool targets. VM stop/loss disconnects all
-current users. Reconnect resolves the saved selection and preserves the thread.
-
-Changing targets requires a connected session, no unresolved decisions,
-no queued messages, and a paused/inactive goal. SelectTargets remains idle-only;
-ChangeTargets can stage a selection while active or explicitly interrupt first.
-Register and validate executors before persisting the selection. Staged targets
-and current targets both retain registry usage until the new turn accepts them.
-Interrupt acknowledgement alone is not completion; a failed/unconfirmed interrupt
-must leave the selection unchanged. Steering retains the current turn's targets. The current app-server API applies environments
-on the next `turn/start`, not through `thread/settings/update`; show that pending
-state and block goal/queue resumption until an explicit message applies it.
-Never send a hidden model turn to apply settings.
-Reconnecting with unchanged executor identities, endpoints and directories preserves
-the existing pending-target state; reconnect alone must not mark targets pending.
-Changed executors still require the next explicit turn to apply them.
-Directory-only edits use the same next-turn selection mechanism; no restart is
-needed, and steering keeps the old directory. Do not substitute a direct
-`thread/settings/update` cwd patch: a disposable Codex 0.157.1 check introduced
-a local environment alongside the selected executor. The explicit environment
-list on `turn/start` preserves Demodex's executor boundary. The first target is
-the primary execution directory and image-upload destination; unsupported external uploads fail without
-host fallback. Empty selection disables execution targets explicitly.
-
-Managed OCI containers are created in Server settings from images already local
-to the selected engine. Each has a persistent private workspace and home in the
-daemon data directory. Docker and Podman run on a dedicated bridge per container,
-isolated from other container networks, with outbound networking,
-bounded memory/CPU/process counts, dropped capabilities, a loopback-only executor
-port, and no host home or engine socket mount. Nix-packaged Codex uses a read-only
-host Nix store bind; otherwise the image must contain `codex`. Podman uses rootless
-`keep-id` when run by an unprivileged daemon user. Podman 6 or newer and Netavark
-with strict bridge isolation support are required; creation fails if isolation
-cannot be configured. Temporary engine inspection failures retain lifecycle
-ownership and report unknown state until verification succeeds. The daemon user must be able to
-run the selected engine; stopping retains the workspace, while restart creates a
-new executor identity and requires session reconnect. Container targets require
-an explicit danger-full-access sandbox selection. NixOS `nixos-container` is a
-separate backend and is not managed here. Run `uv run tests/container.py` for the
-Docker integration check without model inference. Set
-`DEMODEX_CONTAINER_ENGINE=podman` and select an image already in Podman's local
-store to run the same check with Podman.
-
-SSH targets are configured in Session controls and persisted in `ssh_targets`.
-Legacy shared SSH targets remain available to existing sessions; SSH targets created through New Session or Session controls have an owner in `session_ssh_targets`.
-The adapter runs locally and speaks the Codex executor protocol. Foreground
-commands use standard OpenSSH; file operations use the server's existing SFTP v3
-subsystem. No Python, remote helper executable or custom server is installed.
-Linux, a POSIX-compatible or fish login shell, sh, env (including `env -0`) and
-cat are required remotely. Scripts travel over SSH stdin to a fixed launcher;
-the login shell never parses command or environment values. Command stdin remains
-EOF. Credentials and known_hosts belong to the daemon user.
-Host-key verification and batch authentication are mandatory. The app-server
-must share the daemon's network namespace. The adapter rejects browser Origins
-and checks the connecting socket's Linux UID.
-
-`process/start` waits for completion while streaming output, with no command
-runtime limit. The protocol has no command deadline field. Agents may explicitly
-use a remote timeout utility when they want a deadline; never infer one from
-yield/poll intervals. Completed process IDs are receipts, not background handles. PTYs, stdin
-pipes/writes, custom argv0, remote signals and process resumption are unsupported.
-`process/terminate` cancels the local SSH invocation; remote termination is best
-effort. Transport failure, cancellation and status 255 have uncertain remote
-outcomes, never an invented exit code. Never replay uncertain commands.
-Independent foreground SSH requests can run concurrently. Agent instructions
-and session-context results explain that agents may check for remote tmux and
-manage named tmux jobs through ordinary commands for background work. Demodex
-does not install tmux or track/clean up those remote jobs.
-
-SFTP supports bounded whole-file reads/writes (32 MiB), metadata, canonical paths,
-directory listings, single-directory creation and non-recursive removal. File
-stream handles, strict no-follow guarantees, recursive operations, copy and walk
-are explicitly unsupported; agents can use foreground commands as appropriate.
-Image uploads create a private remote directory and file via SFTP. Restricted
-sandbox policies, managed networking, shell snapshots, capability discovery,
-environment-config reads and HTTP proxying remain unsupported. SSH commands use
-the remote account's authority and require danger-full-access. Replacement
-requires paused attached sessions, disconnects them and creates a fresh executor
-identity. Saved target configuration remains compatible with the earlier adapter.
-The managed-VM backend remains separate: it runs remote `codex exec-server`.
-Run `uv run tests/ssh.py` in the host shell for disposable SSH keys/sshd, browser
-settings, executor protocol and real Codex attachment checks without inference.
-
-## Authentication and isolation
-
-The manager binds loopback by default and creates an owner-only random token in
-its data directory. Browser and native actor login carry the token after schema
-negotiation. Never put tokens in URLs. There is no anonymous session API.
-
-Optional `--tailscale-user` entries enable `tailscale.sock`, mode 0600 in the
-private data directory. Only this socket trusts a single exact
-`Tailscale-User-Login` header, supplied by Tailscale Serve, plus an explicitly
-allowed browser Origin. Direct TCP ignores identity headers and requires an actor
-login token. Empty login tokens may use trusted identity; explicitly supplied
-invalid tokens must fail even if identity is valid. The service owner and root
-are within this trust boundary. Keep the Unix proxy's root-path alias off the
-TCP router so integrated static serving continues to work.
-
-Cross-origin frontends need exact `--allowed-origin` entries, never wildcard
-access. Origins contain scheme, host and nondefault port, not paths; allowing a
-Pages origin trusts all applications at that origin. Protocol compatibility,
-Tailscale connectivity and browser local-network permissions still apply.
-
-Managed VM mode uses one persistent bubblewrap app-server with a dedicated
-CODEX_HOME/login shared by conversations. Its filesystem excludes host home,
-project mounts, SSH credentials and Docker sockets; the host Nix store is
-read-only and networking is shared. Never copy desktop authentication stores.
-
-Native host mode starts app-server and executor as the service user and carries
-that user's normal filesystem, device and sudo authority; it is not host
-isolation. `--host-workspace /absolute/workspace` selects this mode. The default
-is a dedicated profile; `--codex-home /absolute/profile` explicitly reuses a CLI
-profile without copying credentials or writing default configuration into it.
-The module equivalent is `services.demodex.codexHome`; null selects a dedicated
-profile. Do not assume separate processes sharing a profile coordinate refresh.
-
-Dedicated login uses `chatgptDeviceCode`: show its verification URL and code,
-allow completion on another device, clear the code after account detection, and
-require another explicit attempt after expiry. Device authorization must be
-permitted by the account. No localhost callback forwarding is needed.
-
-External `ws://` or `unix://` app-servers and `ws://` executors are supported;
-their isolation is the operator's responsibility.
-
-## Browser state and images
-
-Saved connection names, normalized URLs and tokens persist in localStorage,
-scoped to the frontend origin. Fresh same-origin windows try identity or a saved
-token; standalone builds start with the connection picker. Successful login
-updates the saved entry. Forget removes its saved token and disconnects the
-current local client; other open tabs may retain authenticated connections.
-Active-tab state and drafts remain tab-scoped and host-specific. The Enter sends
-preference persists in localStorage per frontend origin and syncs across tabs via
-storage events; old tab preferences migrate when no shared preference exists.
-
-Browser history stores navigation only, never credentials or drafts. Back/forward
-restores screens; history for another host returns to the connection picker.
-Reload replaces the current history entry, and navigation must not trap the user
-at the app root or submit commands. Keep fixed header/composer, independent
-transcript scrolling, and conditional following that respects scrolling upward.
-
-Message rendering uses pulldown-cmark and math-core in WASM, with an allowlisted
-MathML tree. Never insert model-supplied HTML. Links render as numbered buttons with explicit destination lists. Only an
-operator-opened web popup may install a parsed HTTP(S) destination as a link;
-show the exact serialized URL with its hostname bold, reject invalid/control
-characters and credentials, and explain normalization/Punycode warnings. Web images load only after a separate explicit confirmation in their URL popup.
-Recorded uploads may load automatically through authenticated, bounded reads. File metadata is the explicit
-exception to automatic content-derived I/O: bounded daemon checks run once on
-completed assistant messages through their captured executors. File contents
-require a Show/Download action. Never install arbitrary content URLs in src/style
-or other active attributes. Preserve original source in raw view/copy. Mermaid uses a pinned vendored
-browser bundle in an opaque-origin sandbox with networking disabled; include its
-assets and licenses in atomic frontend releases. Formatted messages retain exact
-source and provide Format Markdown / Copy raw controls. Run `uv run tests/rich_messages.py`
-for browser rendering, source preservation and isolation checks.
-
-The service worker caches verified static assets only, never API responses,
-credentials or conversations. Preserve drafts across updates. Do not force
-reloads of other open tabs or replay mutations on reconnect. There is no offline
-conversation cache. Explicit agent notifications use encrypted Web Push when the
-operator enables it on that browser installation. Service-worker push settings
-contain only daemon identity and navigation metadata, never tokens or transcripts.
-
-Image picker and clipboard uploads use authenticated actor calls and mutation
-receipts. Validate supported signatures (PNG/JPEG/GIF/WebP) and the 4 MiB limit;
-filenames/MIME labels are untrusted and signature checks are not image decoding.
-Store host files privately in the data directory; VM uploads use its existing
-SSH identity and a private directory under `/workspace`. Never fall back to host
-storage for an unavailable VM or external session. Receipts retain digest/path,
-not image bytes. Insert a Markdown image with the path into the original session's draft without
-submitting it or overwriting intervening edits; handle UTF-16 cursor offsets.
-Removing a draft path does not delete the upload; retention cleanup is not implemented.
-
-## Build and checks
-
-`nix/package.nix` builds/tests the native daemon from source with a caller-supplied
-nightly `rustPlatform`. Frosticus on frost-8000 uses this package from the local
-/home/frost/src/demodex checkout (including uncommitted changes). The source-built
-package is intended for its native-host deployment; automatic VM provisioning still
-expects a runtime checkout containing nix/ and is not enabled by this package.
-
-Use `shell.nix` and UV. Rust/Wormhole requires rustup nightly and the
-wasm32-unknown-unknown target. The shell supplies Trunk, the WASM linker and a
-NixOS loader wrapper. Follow the repository workflow's toolchain pins when
-reproducing CI.
+work VMs. Instances are independent; browsers connect directly to a selected
+daemon. See `DESIGN.md` for UI conventions and `README.md` for user setup.
+
+Keep this file concise and about the current state: architecture, invariants and
+working instructions. Update the relevant section when behavior changes; do not
+append release notes, protocol histories, completed-work reports or deployment
+inventories. Keep task history and machine-specific records in `~/tasks/`.
+
+## Code map and transport
+
+- `src/`: core library, daemon, orchestration, persistence and target management.
+- `src/service.rs`: transport-independent operations and durable receipts.
+- `src/wormhole.rs`: authenticated actors; `src/http.rs`: static assets/upgrades.
+- `crates/protocol/`: shared API and compatibility contract.
+- `crates/client/`: native Wormhole client used by the CLI and Frosticus.
+- `crates/web/`: Yew HTML/WASM frontend; small JS files handle PWA/voice glue.
+- `src/claude/`: Claude account, runtime and inference adapter.
+- `src/voice*.rs`, `crates/stt/`: voice transport, archives and private STT worker.
+- `nix/host-service.nix`, `nix/stt-service.nix`: NixOS service modules.
+- `tools/build-web.py`, `tests/`: frontend build and UV integration/browser checks.
+
+Use Codex app-server JSON-RPC, never terminal scraping. The compatibility baseline
+is codex-cli 0.166.0; its API is experimental. Preserve unknown events and report
+unsupported requests explicitly. Packaging must not require a bundled zsh helper.
+
+UI traffic uses typed ractor_wormhole calls and pushed notices at `/wormhole`, not
+REST or Axum. A JSON hello checks VERSION and schema fingerprint before handshake
+or authentication. Both peers reject mismatches. Keep wire declarations and record
+serde encoding in `crates/protocol/src/wire.rs`; build.rs hashes normalized
+declarations and locked transport dependencies. Do not introduce target-specific
+wire shapes or move types into unhashed modules. Bump VERSION in
+`crates/protocol/src/lib.rs` for semantic changes, including JSON/serde encoding
+changes that the structural hash cannot detect. Deploy matching daemon, frontend
+and native clients. Durable receipt encoding is versioned separately.
+
+Storage and dispatch reuse shared session/event records without duplicate JSON
+round-trips. Extensible upstream records retain serde_json::Value. Forms construct
+shared commands directly. Render through Yew's Message/update/view model.
+Frosticus at `../frost/codicillus-frosticus` consumes client/protocol crates by local
+path with a separate ownership-enforcing member API; rebuild it when affected.
+
+## Lifecycle and persistence invariants
+
+Conversation identity, runtime, execution target and browser lifetime are separate.
+The daemon owns RPC connections, executors and approvals across browser disconnects.
+
+- Persist UUID mutation receipts before execution. Duplicates return recorded
+  results. Interrupted/uncertain commands, uploads, prompts and approvals never
+  replay automatically. Preserve existing SQLite data and legacy receipt decoding.
+- Replacing an executor creates a fresh identity and invalidates its handles.
+  Process handles remain generation-scoped; only explicitly verified durable
+  file-host bindings can resolve files through a replacement executor.
+- Lost-generation requests remain visibly unavailable. Questions and approvals
+  stay pending until answered; timeouts/reconnects never submit defaults.
+  Unsupported approval types require explicit JSON response editing.
+- Never send a hidden model turn to apply settings, reconnect or recover state.
+  Empty saved threads report missing rollout/history rather than being recreated.
+- Runtime restart requires idle sessions, no decisions, queues, active goals,
+  background terminals or unknown loaded threads. Reconnect explicitly afterward.
+
+`Runtime::start(Config).await` owns storage, executors and monitoring;
+`runtime.service()` returns cloneable handles. `Service::call(request_id, Operation)`
+is trusted in-process access: its host application supplies authorization.
+Await `runtime.shutdown()` before leaving Tokio. Shutdown rejects new calls, drains
+admitted work and stops owned processes. Drop cleanup needs a live Tokio runtime.
+All Service handles retain the state-directory lock, even after shutdown; release
+them before reopening. Accepted commands finish and record receipts after a client
+disconnects; connection actors and socket readers are cancelled together.
+
+On daemon startup, read saved goals through Codex's `thread/goal/get` without
+loading threads. Reconnect non-archived sessions whose saved goal is active,
+regardless of their previous connection/turn status; no shutdown marker is needed.
+Use the ordinary provider/target connect path, reject pending target changes, and
+leave failed attempts visibly disconnected. Attempt once per startup, never retry
+periodically or submit a prompt, goal mutation, queued message or approval. Shared
+native goal storage also covers Claude; only an eligible Claude session starts its
+runtime. `tests/restart_goals.py` and `tests/restart_goals_native.py` cover recovery.
+
+The native client validates Hello before credentials, authenticates and subscribes.
+`call` takes a receipt ID; `read` rejects mutations. There is no automatic retry or
+reconnect. Closure promptly reports uncertainty and dropping releases readers.
+Diagnostics use `demodex call --url ws://127.0.0.1:4780/wormhole --token-file PATH`
+with JSON lines, e.g. `{"operation":"Sessions"}`. Supply stable `request_id` UUIDs
+for mutations and inspect uncertainty with `{"operation":{"Receipt":{"id":"UUID"}}}`.
+Never put tokens in URLs or arguments; logs go to stderr.
+
+## Session settings and providers
+
+Goal start, save, pause, resume, complete and clear are available during active
+turns through Codex's goal API, without interrupting or sending an extra turn.
+Start/resume still reject pending execution targets; disconnected, archived and
+unsupported-goal states remain guarded. Tests in controls.rs and rust_web.py cover
+active-turn mutations and the retained activation guard.
+
+Sandbox, model, effort, tier, context-window and prompt settings persist separately
+from the user's Codex configuration. Default model settings inherit runtime values;
+missing catalogue metadata disables context overrides. Validate exact context
+limits server-side without clamping; revalidate on model changes and resolve
+Default again on resume. Sandbox changes are idle-only, using `sandbox` on
+start/resume and `sandboxPolicy` on settings updates; approval stays on-request.
+Invalid saved choices must produce validation errors, never broader access.
+
+Per-session subagent limits are optional positive counts excluding the primary agent.
+New Session passes `agents.max_concurrent_threads_per_session` through thread config;
+Session controls use the guarded idle unsubscribe/resume path with saved history and
+no active children. Blank inherits Codex configuration; no shared profile is edited.
+`uv run tests/subagent_limit.py` checks real runtime instructions against local mock
+inference; set DEMODEX_WEB to a matching build for mobile controls.
+
+Prompt layers comprise per-model replacements, a shared appendix and Demodex
+integration instructions, with revision-checked receipts. Preserve legacy complete
+overrides until explicitly replaced. Applying prompts/context changes holds
+lifecycle/settings locks, checks idle state, decisions, queue, goals and background
+jobs, then unsubscribes and resumes without a turn. Reject empty history before
+disconnection. Effort/tier-only and no-op model changes do not reconnect. An inactive
+`systemError` may still permit controls. Model notifications must match thread and
+generation. Prompt previews are bounded, read-only and use the selected executor;
+global AGENTS inclusion has no independent Codex switch. Existing threads retain
+saved tool schemas and prompt layers until explicitly updated.
+
+PluginSettings discovers installed plugins from the selected runtime via `plugin/installed`;
+never hardcode plugin names or edit the shared Codex profile. Server plugin exclusions
+are copied atomically when creating a new session. Old and imported sessions retain
+upstream settings. Explicit session changes require idle/decision/queue/goal/job guards,
+use `thread/settings/update.disabledPluginIds`, and require same-generation confirmation.
+Codex activates exclusions at the next turn; no hidden turn or reconnect is needed.
+Saved selections are reapplied only when resume reports a different selection. Defaults
+and session edits reject stale revisions/selections; missing plugin IDs remain visible.
+The 0.166 response-schema comment claiming exclusions do not filter capabilities is stale;
+real-runtime tests verify removal from model-visible tools. Run `uv run tests/plugin_settings.py`;
+set DEMODEX_WEB to a matching build to include the mobile browser checks.
+
+Native GPT sessions use the original runtime/profile and OpenAI provider directly,
+without Claude catalogue/proxy/transport changes. Claude uses a separate lazy
+app-server at `claude-runtime/ipc/app.sock`, a Claude-only catalogue and provider
+ID `demodex_mixed`. Its loopback bridge key reaches the app-server only through
+`DEMODEX_INFERENCE_KEY` (`env_http_headers`; the bwrap process environment is cleared and set explicitly),
+never a command line. Both runtimes share targets and durable thread storage. Persist
+provider bindings and inspect saved identity on import; cross-provider model
+changes require a new session. Same-provider subagents work; cross-provider
+delegation is unavailable. Claude failures must not stop native GPT operation.
+`RestartClaudeRuntime` checks Claude sessions only; `RestartRuntime` checks both
+because it replaces their shared host executor. Shutdown owns both children.
+
+ClaudeUsage is an independent read-only operation for cached OAuth account quotas
+from `/api/oauth/usage`. Normalize only five_hour/seven_day, preserving fractional
+utilization and absent windows; never infer missing values as zero. Cache successes
+and sanitized failures for five minutes by account generation, discard in-flight
+results on account changes, and bound requests/body size. Reads must not start the
+Claude runtime or block native usage/transcript reads. Header Codex/Claude graphs
+show connected accounts and only reported 5h/weekly limits. Unit/mock coverage is
+in src/claude/usage.rs; its ignored claude_usage_browser test runs tests/claude_usage.py
+with DEMODEX_WEB pointing to a matching PWA build. No real credentials/inference.
+
+Claude OAuth uses PKCE and a single-use expiring code#state transaction. Tokens
+remain private in `claude/account.json` (0600); receipts retain only code digests.
+Disconnect is local, not upstream revocation. The adapter uses HTTP/SSE, local
+compaction, translated tools and signed-thinking replay; unsupported content and
+truncation fail explicitly without retries. Hosted tools, deferred tool_search and
+external image URLs are unsupported. Never route GPT requests through this adapter.
+Older mixed GPT threads require explicit migration, not guessed provider routing,
+recreation or direct Codex SQLite/rollout edits. Migration procedure and script:
+`~/tasks/0196-demodex-native-codex-isolation/`.
+
+Local CLI takeover is explicit and receipted. Recheck the reviewed daemon identity
+and thread list; verify socket peer PID/UID and boot/start identity, pin a pidfd,
+signal SIGTERM through it and wait for that exact process before resuming. Fail
+closed without pidfd support. Never kill by numeric PID/name, use SIGKILL, delete
+locks or stop an unreviewed replacement/shared daemon automatically.
+
+## Execution targets and isolation
+
+Targets are daemon-scoped and may be shared. Stable registry IDs and per-session
+working directories are distinct from executor generations. Host access requires
+`--host-workspace`; never fall back from an unavailable remote target to host.
+Blank creation/import directories preserve defaults; explicit directories must
+exist and be absolute. Reimport cannot retarget an attachment. Display the active
+executor directory, not the resumed thread's historical cwd.
+
+Target changes require connection, no decisions/queue and an inactive/paused goal.
+SelectTargets is idle-only; ChangeTargets stages next-turn changes or interrupts
+and waits for confirmed completion. Register/validate before persisting. Current
+and staged selections both retain registry usage. Steering keeps current targets
+and directories. Apply environments only on the next explicit `turn/start`, not
+with a cwd settings patch; block goal/queue resumption while application is pending.
+Reconnects and detail reads clear non-staged pending state only when the same
+thread reports the exact ordered executor IDs and directories (excluding Codex's
+built-in local environment). Missing/mismatched snapshots and explicitly staged
+changes remain pending; autonomous goal turns alone do not confirm application.
+The first target is primary; empty
+selection explicitly disables execution targets.
+
+- VMs use private QCOW2 overlays, stores, guest roots and SSH identities; only the
+  public key enters firmware configuration. `/workspace` is guest-local. Keep base
+  images and their Nix GC roots while overlays depend on them. Default networking
+  exposes only loopback SSH; explicit NAT permits outbound host/LAN access. Stop
+  preserves disks; restart requires reconnect. Delete requires stopped state and
+  no current/staged selections, preserving shared bases and conversations. Detach
+  checks idle/decision/queue/goal/job guards; disconnected attachments require stop.
+  Host shares, host cache service and reset are not implemented.
+- OCI containers use locally available Docker/Podman images, private persistent
+  workspace/home, isolated per-container bridges, resource limits, dropped
+  capabilities and loopback executor ports. Never mount host home or engine socket.
+  Nix Codex may bind the host store read-only. Rootless Podman uses keep-id;
+  Podman 6+/Netavark strict isolation is required. Inspection failures preserve
+  ownership and report unknown state. Require explicit danger-full-access.
+- SSH uses OpenSSH foreground commands and existing SFTP v3, strict host-key checks
+  and batch authentication. No helper is installed remotely. Login shells do not
+  parse command/environment values; scripts go via stdin to a fixed launcher.
+  Require Linux, sh, env (including env -0), cat and danger-full-access. Command
+  stdin is EOF; PTYs, stdin writes, remote signals and resumable process handles
+  are unsupported. There is no adapter command timeout. Cancellation closes SSH;
+  remote outcomes may remain uncertain and must never be replayed. Named tmux jobs
+  may be managed explicitly if installed; Demodex does not track or clean them up.
+  SFTP whole-file operations are bounded at 32 MiB; streaming, recursive operations
+  and strict no-follow guarantees are unsupported. Replacement disconnects paused
+  attached sessions and creates a new identity. VM exec-server is a separate backend.
+
+Loopback is the default bind; login uses an owner-only random token. Only the
+private 0600 `tailscale.sock` trusts an exact Tailscale-User-Login plus allowed
+Origin. TCP ignores identity headers; explicitly invalid tokens always fail.
+Cross-origin access requires exact origins, never wildcards. An allowed Pages
+origin trusts all apps on that origin. Keep the Unix proxy alias off the TCP router.
+
+Isolated VM mode uses a bubblewrap runtime whose filesystem excludes host home,
+projects, SSH credentials and engine sockets; the Nix store is read-only and
+networking shared. Native host mode carries the service user's full authority.
+`--codex-home` explicitly shares a profile; never copy credentials or assume
+processes coordinate refresh. Dedicated login uses chatgptDeviceCode. External
+app-server/executor isolation belongs to the operator.
+
+## Browser, history and content
+
+Follow `DESIGN.md`. Keep drafts/tab navigation host-specific and credentials out of
+history. Saved connections/tokens are origin-local; Forget disconnects that client,
+not other tabs. Preserve drafts through updates, independent transcript scrolling
+and conditional following. Service workers cache verified static assets only,
+never credentials, API responses or conversations; no forced reloads or replay.
+Vertical scrollports suppress horizontal touch panning/overscroll while preserving
+pinch zoom and nested horizontal content. `uv run tests/scroll_views.py` checks the
+production CSS with touch gestures; actual Safari rubber-banding needs device testing.
+
+Coalesce notices per resource and reject stale navigation/generation responses.
+Content notices refresh the selected transcript; state notices refresh summaries
+and detail; runtime notices do not reload transcripts/targets. Session summaries
+own metadata. Conversation pages use stable high-water/item cursors. Pages target
+512 KiB and 200 items; indivisible oversized items are never truncated. A versioned
+per-item index in the existing SQLite database serves pages directly. A runtime-owned
+worker backfills/catches up in resumable batches; changed rows and progress commit
+together. Retain item versions for published cursors. Raw events stay authoritative;
+pre-index cursors fall back to bounded cached replay. Bump INDEX_VERSION in
+src/store/conversation.rs when projection semantics/dependencies change. Keep the
+shared transcript dependency selection and unfinished/steering state complete.
+Reload the projection
+if a resume snapshot arrives while older pages remain unloaded; invalidate pending
+older reads. Full-text search is bounded, literal, case-insensitive saved-history
+search without Codex resume/inference. Stop/query changes invalidate further reads.
+
+Never insert model HTML or arbitrary URLs into active attributes. Preserve exact
+source/raw copy. MathML is allowlisted; Mermaid uses a pinned vendored bundle in a
+network-disabled opaque-origin sandbox. SVG previews validate a bounded XML subset
+in `crates/web/src/svg.rs` and render in img documents, never inline DOM/object/
+iframe. Preserve bounds and rejection of scripts, external resources, recursive
+paint references and unsafe animation. Unsupported SVG rejects the whole preview.
+Web links show parsed destinations explicitly; external images require separate
+Load confirmation. Tagged message buttons only insert text at the retained draft
+cursor; sending remains manual.
+
+Completed image-view steps offer a compact View image button using the same file
+preview and metadata capture as assistant links. Older steps without captured metadata
+remain explicitly unavailable; never infer their executor from current attachments.
+Completed assistant messages capture bounded file metadata once through recorded
+executors for both ordinary file links and local Markdown images. Non-uploaded
+local images open the same explicit file preview; uploaded images retain verified
+thumbnails. Older image links without metadata remain unavailable.
+Never replay checks automatically. Content reads require Show/Download,
+regular files and the 4 MiB bound. Durable file-host bindings verify registry target
+plus machine-id/UID fingerprint on the same access connection. Pairing is explicit
+and cannot replace an existing fingerprint; only orchestration registries confer
+binding authority. Legacy unbound snapshots require the original generation.
+Refresh explicitly rechecks one destination without reading content. Parse positive
+:line[:column] before percent decoding; literal filename colons use %3A.
+
+Uploads use authenticated receipts: UploadImage validates PNG/JPEG/GIF/WebP
+signatures and 32 MiB; UploadFile preserves original bytes/safe names up to 32 MiB.
+Receipts retain digest/path, not bytes. Image reads verify upload digest and original
+executor selection. Insert into the original draft preserving intervening edits
+and UTF-16 selection offsets; never auto-send. Share intake stages locally in
+bounded IndexedDB for up to 24 hours, separately from static caches; cancellation
+retains the incoming share. Upload retention cleanup is not implemented.
+
+Notifications are explicit, receipted chat events with an at-most-once encrypted
+Web Push outbox. Provider acceptance is not delivery; no devices means disabled.
+Emergency calls are urgent notifications, not phone calls. Bug reports stay in the
+per-daemon inbox; its new-report watermark advances only after loading the newest
+page. Usage/reset credits are read-only upstream reports; missing values remain
+unknown. Context cache warmth is an age heuristic, not confirmed cache/billing data.
+Project Git snapshots are bounded, read-only and disable hooks, optional writes,
+submodule recursion and lazy fetches; remote checks never fall back to host.
+
+## Voice
+
+Private STT uses the Rust Unix-socket worker and SSH bridge; see
+`crates/stt/README.md` and its shell.nix. Model GGUF is provisioned separately;
+no runtime cloud audio/model requests. `--stt-config`/`services.demodex.sttConfig`
+enables it with strict SSH verification; no configuration means disabled.
+
+Voice is an authenticated, connection-owned Api::Voice stream, outside operation
+receipts/transcript events. Bound and sequence 16 kHz mono PCM chunks. Browser
+capture uses getUserMedia/AudioWorklet. Stop inserts XML-escaped `<tts>` text into
+the draft without wording corrections or submission. Cancel/navigation/hiding/
+disconnect stops capture; keep the worker slot until cancellation completes.
+While capturing, request a browser screen wake lock; release it on every teardown,
+including late grants after cancellation. Denial/unsupported APIs/system release
+show a nonfatal warning. Hiding still cancels capture; wake lock is not permission
+to record in the background. `tests/voice_wake_lock.py` covers browser lifecycle.
+
+Every accepted stream is retained indefinitely under private
+`<data-dir>/voice-recordings/<uuid>/` as audio.flac and metadata.json, including
+received prefixes of failed/cancelled streams. Audio is not stored in SQLite or
+sent to the agent; no pruning/deletion UI exists. Durably spool before forwarding;
+acknowledge only saved samples. Atomically publish FLAC/metadata, delete PCM only
+after successful encoding, recover interrupted spools and drain jobs on shutdown.
+
+## Build, checks and deployment
+
+Use `shell.nix`, rustup nightly, wasm32-unknown-unknown and UV; no Node/pnpm is
+needed. Follow CI toolchain pins. The shell supplies Trunk/linker/NixOS loader.
 
 ```sh
 nix-shell shell.nix --arg hostOnly true
 export CARGO_TARGET_DIR=target/rust-pwa
 cargo build --locked
 uv run tools/build-web.py
-```
-
-Candidate outputs are `target/rust-pwa/debug/demodex` and `web/.rust-dist`.
-For deployment, build the optimized daemon with `cargo build --release --locked`
-and use `target/rust-pwa/release/demodex`; the debug binary above is for development
-and fixtures. Cold history reconstruction is substantially slower in debug builds.
-`uv run tests/history_benchmark.py --database /private/events.sqlite --session UUID
---binary target/rust-pwa/release/demodex --verify-pages` benchmarks an existing saved
-session through a disposable API-only daemon, without Codex, host mode or model
-requests. It copies only selected events from the read-only input and can also
-read a three-column event snapshot. Do not put private snapshots in the repository.
-History projection indexes unfinished and steering items, preserves transcript
-order through removal/restore/prepend, and consumes typed storage events without
-another JSON envelope. These optimizations preserve the existing wire contract.
-Use `-j 2` for memory-constrained builds. Run relevant checks inside the shell:
-
-```sh
 cargo test --locked -p demodex -p demodex-protocol --lib --bins
 cargo test --locked -p demodex-web --bin demodex-web
 RUSTC_WORKSPACE_WRAPPER="$PWD/tools/clippy-nightly.sh" cargo check --locked --all-targets
-uv run tests/rust_web.py
-uv run tests/targets.py
-uv run tests/pwa.py
-uv run tests/host.py
-uv run tests/tailscale_auth.py
 ```
 
-Browser suites require the configured Chrome executable. Host integration uses
-real local Codex processes with disposable profiles/history and no model turns;
-it covers execution, profile preservation, sandbox/cwd settings, images and
-restart/resume. `DEMODEX_BIN` overrides its candidate binary.
+Use `-j 2` for memory constraints. Run relevant `uv run tests/<suite>.py` checks:
+`rust_web`, `pwa`, `rich_messages`, `share`, `host`, `targets`, `tailscale_auth`,
+`prompt_settings`, `context_window`, `runtime_features`, `runtime_startup`,
+`provider_isolation`, `file_hosts`, `project_git`, `takeover`, `notifications`,
+`vm_delete`, `ssh`, `container`, `voice`. Inspect each fixture's build-path/env
+requirements; browser tests need Chrome. Most runtime suites use disposable real
+Codex profiles without inference. Voice also has demodex-stt and voice library
+unit tests. Never copy credentials for testing or overwrite a live binary.
 
-Python fixtures use `tests/wormhole_client.py` and the native CLI. Its path-shaped
-helper is test shorthand, not a compatibility API; real daemon traffic is Wormhole.
-The core suite also covers native authentication, reconnects, notices, typed
-results, large event pages, reader shutdown, static routes, legacy receipts across
-database restart, and runtime shutdown draining.
+VM tests need KVM/QEMU/SSH/Nix/Codex/bubblewrap as applicable; omit hostOnly for
+VM tools. Build the pinned base with `nix build path:./nix#vm-image`. Check runner
+binary paths before using `vm_boot.py` or `managed.py`. `real_sessions.py` is opt-in
+and makes paid model calls. History benchmarks use `tests/history_benchmark.py`
+with an optimized binary and disposable daemon; keep private snapshots out of Git.
 
-The older `tests/vm_boot.py` runner still uses `target/debug/demodex`; the other
-VM/smoke runners use the `target/rust-pwa/debug` candidate. Inspect paths before
-running them; do not overwrite a live binary to satisfy a test. VM tests require
-KVM, QEMU, SSH, Nix, Codex and
-bubblewrap as appropriate; omit `hostOnly` for the shell's VM tools.
+Development outputs are `target/rust-pwa/debug/demodex` and `web/.rust-dist`.
+Deployment uses `cargo build --release --locked` and the release binary; debug
+history reconstruction is much slower. `nix/package.nix` builds the native daemon
+with a caller-supplied nightly rustPlatform; automatic VM provisioning needs a
+runtime checkout containing nix/ and a rooted base image.
 
-`uv run tests/vm_boot.py IMAGE.qcow2` checks disposable guest boot/reboot;
-`uv run tests/managed.py IMAGE.qcow2` checks managed lifecycle and persistence
-without model turns. The opt-in real-session runner makes paid model calls:
-`uv run tests/real_sessions.py --run-real-sessions --app-server unix:///absolute/data/runtime/ipc/app.sock IMAGE.qcow2`.
-Supply an already authenticated app-server; never copy credentials for testing.
-The runner rebuilds a disposable guest, retains private `.demodex/live-*` data
-and leaves the supplied app-server running.
+`--api-only` separates the daemon from static serving (`demodex web --bind
+127.0.0.1:4782 --directory web/.rust-dist`); the static process opens no session DB
+or Codex processes. Usual routing is loopback Wormhole 4780/static 4782 through
+Tailscale Serve HTTPS 8443. Inspect existing mappings before changes; identity
+WebSockets must use the private socket. Never use old REST deployment scripts.
+Publish complete static releases atomically, retaining assets for open tabs.
+Check activity, back up state and plan idle daemon restarts; root Nix dependencies.
 
-## VM lifecycle
-
-Build the pinned base with `nix build path:./nix#vm-image`. Create and run a VM:
-
-```sh
-cargo run --target-dir target/rust-pwa -- vm create --base /absolute/path/to/image.qcow2 --directory .demodex/work
-cargo run --target-dir target/rust-pwa -- vm run .demodex/work
-```
-
-The parent directory must exist. Keep the immutable base at its backing path
-and retain its Nix GC root while overlays depend on it. Each VM has a private
-QCOW2 overlay, writable Nix store, guest root and separate SSH identity; only
-the public key is injected into the guest through QEMU firmware configuration.
-`/workspace` is guest-local. Default networking is isolated except for forwarded
-loopback SSH; explicit `--network nat` allows outbound access, including host/LAN.
-
-The manager imports the Codex runtime closure into the guest's private store
-and starts its executor over SSH. Stop preserves disks; restart needs explicit
-session reconnect. Manager shutdown stops owned processes. Without `--vm-image`,
-first provisioning builds and roots the pinned base; supplied bases must be
-rooted by their owner. Run from the checkout: default base building uses the
-compile-time checkout path.
-
-Host filesystem shares, host cache service, arbitrary remote-host provisioning
-and a VM reset workflow are not implemented. If added, only the host manager
-may grant shares; enforce read-only access in virtiofsd with explicit UID/GID
-mapping. Host cache access must be read-only. VM reset and workspace deletion
-must remain distinct and must never silently discard data.
-
-## Serving and deployment
-
-Current three-host deployment inventory, release fingerprints and verification
-commands are in `~/_Tasks/demodex/0023-wormhole-v16/AGENTS.md` on nixos (2026-09-23).
-
-`--api-only` separates the daemon from static serving. The static process opens
-no session database and starts no Codex processes:
-
-```sh
-target/rust-pwa/debug/demodex web --bind 127.0.0.1:4782 --directory web/.rust-dist
-```
-
-The usual layout is loopback Wormhole 4780, static UI 4782, and Tailscale Serve HTTPS
-8443 with `/` and `/wormhole` routes. Retired `/api` routes return 404.
-Identity-enabled WebSockets must go
-through the private socket. Inspect existing Serve mappings before changes;
-another application may already use port 443. Check installed Tailscale support
-for Unix-socket proxies. The NixOS module exposes `apiOnly`, `allowedOrigins`,
-`tailscaleUsers`, and `web` options; Serve configuration is separate.
-
-Publish complete static releases atomically and retain assets needed by open
-tabs. Keep daemon/frontend release selection separate. Changed protocol or schema
-requires compatible releases at both ends. Inspect current session activity,
-back up state and plan an idle restart before daemon deployment. Keep runtime
-Nix dependencies rooted.
-
-Historical `_Tasks/*/activate.py` and check scripts target old REST releases;
-do not use them for protocol v16 or later rollouts. Prepare activity checks with
-the native client and review matched daemon/PWA release paths before deployment.
-The v16 refactor was verified locally without deployment, VM boot/provisioning,
-or paid model inference.
-
-For a standalone Pages frontend:
-
-```sh
-uv run tools/build-web.py --standalone --public-url /demodex/ --dist web/.pages-dist
-uv run tests/pages.py
-```
-
-`.github/workflows/pages.yml` builds/tests the static PWA on pushes to main or
-manual dispatch and deploys from main. Pages must use GitHub Actions as its
-source. Publish only the static output; never runtime state or credentials.
-Connections/tokens remain scoped to each browser origin and do not transfer
-between per-instance UIs and Pages.
-
-Deferred option: Tailscale Services could give each instance a dedicated name
-such as `demodex-laptop.<tailnet>.ts.net` on HTTPS 443. This requires tagged
-Service hosts and administrator configuration/approval. Preserve normal laptop
-user identity; consider a separate tagged serving instance. Cross-tailnet node
-sharing must not be assumed to share Services; a separate serving identity in
-the client's tailnet is one possible approach. Recheck upstream support and
-access policy before implementation. This option is not implemented.
-See the [Services documentation](https://tailscale.com/docs/features/tailscale-services).
-
-## Local SVG previews
-
-Fenced `svg` blocks and explicitly opened `.svg` files render through
-`crates/web/src/svg.rs`. It validates and serializes a bounded XML subset
-into an image/svg+xml data URL for an HTML img, never an inline SVG DOM tree,
-object or iframe. Browser image-document mode isolates IDs and disables scripts
-and external resources. Keep explicit validation as well: no href, CSS/style,
-images, links, scripts, foreign content, DTDs or processing instructions.
-Unsupported input rejects the entire preview; exact source remains available.
-
-Supported geometry/text elements are svg (root only), g, rect, circle, ellipse,
-line, polyline, polygon, path, text, tspan, title and desc. Root defs may contain
-linearGradient, radialGradient and pattern; gradients contain stops. Support
-bounded coordinates, gradient percentage coordinates/offsets, paint opacity,
-units/transforms, letter/word spacing, role=img and accessibility labels/references.
-IDs must be unique within a drawing; references must resolve locally. Paint
-references use only url(#id) to an approved paint server. Paint-server definitions
-and patterns cannot reference other paint servers; inherited paint references on
-ancestors of defs are also excluded. No paint inheritance references or recursive patterns. Patterns require
-numeric dimensions >=1 in userSpaceOnUse or >=0.01 in objectBoundingBox units.
-At most 32 paint servers and 16 IDs per accessibility-reference attribute; image
-labels are capped at 4,096 characters. These limits reduce complexity, not a browser CPU quota.
-
-Declarative animation supports animate and animateTransform only, targeting the
-immediate drawing parent outside defs. Animate permits selected geometry, paint
-colors, opacity and text metrics; animateTransform permits translate/scale/rotate.
-Validate every value against its target's bounds; animated paints cannot use URLs.
-Use 2–64 values or explicit from/to, optional matching keyTimes, linear/discrete
-calcMode, numeric begin offsets, dur from 100ms to 3600s, finite repeatCount <=1000
-or indefinite, and fill=remove/freeze. At most 64 animations. Only replace/none
-additive/accumulate modes are accepted. No href targets, event/syncbase timing,
-structural/ID/reference animation, animateMotion, set, CSS animation or scripts.
-The browser runs accepted animations inside the isolated img document. Native
-validation tests and rich_messages.py cover the moving-circle example, transform
-animation, thumbnail/modal/file motion and rejected animation-based URL/handler
-attempts. No protocol change or automatic file reads are involved.
-
-Retain the 128 KiB input, 2,048 XML node, 32 nesting level, 16 KiB attribute,
-finite numeric magnitude <=1,000,000 and 16 transform-operation limits. Require a
-valid viewBox or positive numeric dimensions. Normalize the SVG namespace and
-missing viewBox; size images with object-fit:contain in bounded thumbnail/modal
-containers. Preserve exact source, download controls, decode-error feedback and
-keyboard/modal dismissal. Native tests live in svg.rs; rich_messages.py covers
-image decoding, local definitions and repeated IDs across thumbnails and modal.
-
-## System share intake (protocol v33)
-
-The installed PWA declares one share target for text, URLs and original files.
-Its service worker handles share POSTs locally, staging input in scope-local
-IndexedDB for at most 24 hours (expired records are removed on access). This is
-a bounded inbound inbox, separate from the static-only Cache Storage and with
-no credentials or conversation history. Selection shows New session and connected,
-non-archived sessions on the current server. Sharing appends to a draft, never
-submits a turn. New-session cancellation retains the incoming share.
-
-UploadFile is an authenticated, receipted Wormhole operation. Preserve bytes and
-original safe basenames, including HEIC; no image decoding or conversion. The
-selected executor receives private files; unsupported targets fail without host
-fallback. Base64 payloads are limited to 32 MiB decoded per file, matching SFTP;
-the browser warns above 4 MiB and bounds intake to 10 files/64 MiB per share,
-128 MiB/10 pending shares total. Receipts retain filename/digest/path, not bytes.
-The existing UploadImage contract remains unchanged. Protocol v33 requires
-matching daemon and clients; durable response receipt encoding remains v16.
-Uploads record request IDs before execution and are never replayed on reload,
-reconnect or interruption. Confirmed paths and text can be recovered into a draft.
-There is no unauthenticated HTTP upload route.
-Run `uv run tests/share.py` after building the default frontend and
-`uv run tools/build-web.py --public-url /demodex/ --dist web/.share-subpath-dist`.
-The browser fixture exercises real service-worker POSTs; Android OS share-sheet
-registration still requires an installed-device smoke test.
-
-Session executor controls keep each directory beside its executor selection, with
-primary selection and collapsible private SSH actions in the same entry. Preserve
-target draft, next-turn and interrupt semantics when changing this layout.
-
-## Tagged message buttons
-
-Assistant messages support `<button tag="apply-fix">Yes</button>` outside code.
-Use a descriptive tag and a plain-text label; quote attributes and XML-escape
-special characters. Only this narrow syntax is recognized, with no extra attributes
-or nested markup. The renderer creates its own button; arbitrary HTML stays inert.
-Clicking inserts `(button 'apply-fix' with label 'Yes' pressed)` at the composer's
-retained cursor, adds separating spaces as needed, preserves selected/existing text,
-and focuses the editable draft. Sending remains manual. Quotes and backslashes in
-tags/labels are escaped in the inserted text. Raw view/copy preserves exact source.
-
-Linked-file Show also renders signature-identified PNG/JPEG/GIF/WebP in a bounded
-image preview with decode errors and the original-byte download action. It uses
-ReadMessageFile and its existing executor/size checks; no automatic content reads.
-
-When incremental Events contain a resume threadSnapshot and the browser still has
-unloaded older pages, reload Conversation from the daemon projection. Replaying
-that snapshot into a partial transcript would append old, unseen IDs as newly
-imported messages. Invalidate pending older-page reads when rebuilding the view.
-
-The Sessions sidebar uses a compact pinned two-row header: heading/layout/search/sort,
-then the full-width New Session action. Search expands on demand and retains visible
-active filters; Reorder lives in the sort picker. Verify with
-`DEMODEX_HEADER_ONLY=1 uv run tests/rust_web.py`; `DEMODEX_WEB` selects a candidate build.
+Standalone Pages builds use `uv run tools/build-web.py --standalone --public-url
+/demodex/ --dist web/.pages-dist` and `uv run tests/pages.py`. The Pages workflow
+publishes static output only, never state/credentials; connections remain scoped
+to each frontend origin.

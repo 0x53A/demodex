@@ -125,16 +125,12 @@ fn reset_credits(summary: &Value) -> Html {
 pub fn weekly(runtime: &Value, connected: bool) -> Html {
     let usage = &runtime["weekly_usage"];
     let weekly = array(&usage["windows"]);
-    let windows = if usage["all_windows"].is_array() { array(&usage["all_windows"]) } else { weekly.clone() };
-    let summary = if !connected { "Weekly: disconnected".into() }
-        else if let Some(first) = weekly.first() {
-            match remaining(first) {
-                Some(left) => format!("Weekly: {left}% remaining, {}",reset_in(first)),
-                None => "Weekly: unavailable".into(),
-            }
-        } else { "Weekly: unavailable".into() };
-    html! {<details class="weekly-usage" aria-label="Server usage">
-        <summary>{summary}</summary>
+    let windows = if !connected { Vec::new() } else if usage["all_windows"].is_array() { array(&usage["all_windows"]) } else { weekly.clone() };
+    if runtime["account"].is_null() { return Html::default(); }
+    let primary: Vec<_> = windows.iter().filter(|w| w["id"] == "codex").cloned().collect();
+    let overview = if primary.is_empty() { &windows } else { &primary };
+    html! {<details class="weekly-usage codex-usage" aria-label="Codex usage">
+        {quota_summary("Codex",overview,connected,false)}
         <div class="weekly-details">
             {for windows.iter().map(|window|{
                 let duration=window["duration_minutes"].as_i64().unwrap_or(10080);
@@ -157,10 +153,94 @@ pub fn weekly(runtime: &Value, connected: bool) -> Html {
     </details>}
 }
 
+fn compact_countdown(reset: Option<f64>, now: f64) -> String {
+    let Some(reset) = reset.filter(|n|n.is_finite() && *n>0.0) else {return "(?)".into();};
+    let minutes=((reset-now).max(0.0)/60.0).ceil() as u64;
+    let (days,hours,mins)=(minutes/1440,minutes%1440/60,minutes%60);
+    let mut text=String::from("(");
+    if days>0 {text.push_str(&format!("{days}d"));}
+    if hours>0 {text.push_str(&format!("{hours}h"));}
+    if mins>0 || minutes==0 {text.push_str(&format!("{mins}m"));}
+    text.push(')');text
+}
+fn quota_summary(provider: &str, windows: &[Value], connected: bool, iso_reset: bool) -> Html {
+    let rows: Vec<_> = [300,10080].into_iter().filter_map(|minutes|
+        windows.iter().find(|w| w["duration_minutes"]==minutes).map(|w|(minutes,w))
+    ).collect();
+    html!{<summary class="quota-summary">
+        <strong>{format!("{provider}:")}</strong>
+        <span class="quota-graphs">
+            {if !connected {html!{<span class="muted">{"disconnected"}</span>}}
+            else if rows.is_empty(){html!{<span class="muted">{"Usage unavailable"}</span>}}
+            else {html!{<>{for rows.into_iter().map(|(duration,window)| {
+                let period=if duration==300 {"5h"}else{"weekly"};
+                let left=claude_remaining(window);
+                let reset=if iso_reset {claude_reset(window)["resets_at"].as_f64()}else{window["resets_at"].as_f64()};
+                let label=format!("{provider} {period}: {}",claude_label(window));
+                html!{<span class="quota-row" title={label.clone()}>
+                    <span class="quota-period">{format!("{period}:")}</span>
+                    {if let Some(left)=left {html!{<meter min="0" max="100" value={left.to_string()} aria-label={label}/>}}else{html!{<span class="muted" aria-label={label}>{"—"}</span>}}}
+                    <span class="quota-countdown" title="Time until reported reset">{compact_countdown(reset,js_sys::Date::now()/1000.0)}</span>
+                </span>}
+            })}</>}}}
+        </span>
+    </summary>}
+}
+
+fn claude_remaining(window: &Value) -> Option<f64> {
+    window["used_percent"].as_f64().filter(|n| n.is_finite() && (0.0..=100.0).contains(n)).map(|n| 100.0-n)
+}
+fn claude_label(window: &Value) -> String {
+    claude_remaining(window).map(|n| format!("{n:.1}% remaining")).unwrap_or_else(|| "unavailable".into())
+}
+fn claude_reset(window: &Value) -> Value {
+    let seconds = window["resets_at"].as_str().map(|s| js_sys::Date::parse(s)/1000.0)
+        .filter(|n| n.is_finite() && *n > 0.0);
+    serde_json::json!({"resets_at":seconds})
+}
+pub fn claude(usage: &Value, connected: bool) -> Html {
+    if usage["connected"] != true { return Html::default(); }
+    let windows = array(&usage["windows"]);
+    html!{<details class="weekly-usage claude-usage" aria-label="Claude usage">
+        {quota_summary("Claude",&windows,connected,true)}
+        <div class="weekly-details">
+            {if connected {html!{<>
+                {for windows.iter().map(|window| {
+                    let period=if window["duration_minutes"]==300 {"5h"} else {"Weekly"};
+                    let reset=claude_reset(window);
+                    html!{<div class="weekly-window">
+                        <strong>{format!("Claude · {period} · {}",claude_label(window))}</strong>
+                        {if let Some(left)=claude_remaining(window){html!{<meter min="0" max="100" value={left.to_string()} aria-label={format!("Remaining Claude {period} capacity")}/>}}else{Html::default()}}
+                        <small>{reset_in(&reset)}</small><small>{format!("Reset: {}",timestamp(&reset["resets_at"]))}</small>
+                    </div>}
+                })}
+                {if let Some(error)=usage["error"].as_str(){html!{<p class="muted" role="status">{error}</p>}}else{Html::default()}}
+                {if usage["checked_at"].is_number(){html!{<small>{format!("Last updated: {}",timestamp(&usage["checked_at"]))}</small>}}else{Html::default()}}
+                <p class="muted">{"Account-wide usage · cached for up to 5 minutes"}</p>
+            </>}}else{html!{<p class="muted">{"Reconnect to see Claude usage"}</p>}}}
+        </div>
+    </details>}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn compact_reset_countdown_has_no_spurious_zero_units() {
+        assert_eq!(compact_countdown(Some(11100.0),0.0), "(3h5m)");
+        assert_eq!(compact_countdown(Some(198300.0),0.0), "(2d7h5m)");
+        assert_eq!(compact_countdown(None,0.0), "(?)");
+        assert_eq!(compact_countdown(Some(10.0),20.0), "(0m)");
+    }
+    #[test]
+    fn claude_preserves_fractional_remaining_and_unknowns() {
+        assert_eq!(claude_remaining(&json!({"used_percent":12.5})), Some(87.5));
+        assert_eq!(claude_label(&json!({"used_percent":100})), "0.0% remaining");
+        for value in [json!({}), json!({"used_percent":-1}), json!({"used_percent":101})] {
+            assert_eq!(claude_label(&value), "unavailable");
+        }
+    }
     #[test]
     fn available_resets_use_authoritative_count_and_explain_missing_details() {
         assert_eq!(reset_count(&Value::Null), None);

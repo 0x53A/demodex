@@ -1,3 +1,5 @@
+mod conversation;
+
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value,json};
@@ -15,8 +17,8 @@ pub use demodex_protocol::Event;
 
 pub use demodex_protocol::Pending;
 
-// One reusable immutable projection avoids replaying all durable events for every
-// older page. Eviction never invalidates cursors: they carry a fixed high-water mark.
+// Bounded LRU projections survive session switches and advance from their last
+// event. Eviction never invalidates fixed high-water pagination cursors.
 struct ConversationProjection {
     id: String,
     through: i64,
@@ -24,9 +26,10 @@ struct ConversationProjection {
     items: Vec<Value>,
     sizes: Vec<usize>,
 }
-pub struct Store(Mutex<Connection>, Mutex<Option<Arc<ConversationProjection>>>);
-const CONVERSATION_PAGE_BYTES: usize = 10 * 1024 * 1024;
-
+pub struct Store(Mutex<Connection>, Mutex<Vec<Arc<ConversationProjection>>>, Mutex<()>);
+const CONVERSATION_PAGE_BYTES: usize = 512 * 1024;
+const CONVERSATION_PAGE_ITEMS: usize = 200;
+const CONVERSATION_CACHE_BYTES: usize = 256 * 1024 * 1024;
 // Keep manual ordering inside the same target/project group as the overview.
 fn session_group(session: &Session) -> (String, String) {
     let context = session.presentation.context.as_ref().filter(|c| c.path.starts_with('/'));
@@ -177,7 +180,8 @@ impl Store {
                 )?;
             }
         }
-        let store = Self(Mutex::new(connection), Mutex::new(None));
+        conversation::initialize(&connection)?;
+        let store = Self(Mutex::new(connection), Mutex::new(Vec::new()), Mutex::new(()));
         // Interrupted checks are durable unknown outcomes, never replayed.
         let interrupted = store.lock()?.prepare("SELECT session_id,item_id,files FROM message_files WHERE files LIKE '%\"pending\"%'")?
             .query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?
@@ -374,6 +378,15 @@ impl Store {
         let tx = db.transaction()?;
         tx.execute("INSERT INTO sessions(id,name,endpoint,targets,thread_id,status) VALUES(?1,?2,?3,?4,?5,'disconnected')",
             params![id, name, endpoint, serde_json::to_string(targets)?, thread_id])?;
+        if thread_id.is_none() {
+            // Copy defaults in the creation transaction; imports and old rows are untouched.
+            let defaults: Option<String> = tx.query_row("SELECT value FROM prompt_settings WHERE id='plugins-defaults'", [], |r|r.get(0)).optional()?;
+            if let Some(defaults) = defaults {
+                let value: Value = serde_json::from_str(&defaults)?;
+                let disabled = crate::plugin_settings::disabled(&value)?;
+                tx.execute("INSERT INTO prompt_settings VALUES(?1,?2)", params![format!("plugins/{id}"),json!({"revision":0,"disabled":disabled}).to_string()])?;
+            }
+        }
         tx.execute("INSERT INTO session_order(session_id,position) VALUES(?1,(SELECT COALESCE(MAX(position),0)+1 FROM session_order))", [&id])?;
         tx.execute(
             "INSERT INTO session_presentation VALUES(?1,?2)",
@@ -841,31 +854,61 @@ impl Store {
         self.conversation_page_bytes(id, older, CONVERSATION_PAGE_BYTES)
     }
 
+    pub(crate) fn conversation_search_page(&self, id: &str, older: Option<&demodex_protocol::ConversationPageCursor>) -> Result<demodex_protocol::ConversationSnapshot> {
+        // Search returns only a match and cursor, so it need not pay browser
+        // rendering/transfer costs or use the smaller interactive page limit.
+        self.indexed_conversation_page(id, older, 10 * 1024 * 1024, usize::MAX)
+    }
+
     fn conversation_page_bytes(&self, id: &str, older: Option<&demodex_protocol::ConversationPageCursor>, budget: usize) -> Result<demodex_protocol::ConversationSnapshot> {
+        self.indexed_conversation_page(id, older, budget, CONVERSATION_PAGE_ITEMS)
+    }
+
+    fn replayed_conversation_page_limits(&self, id: &str, older: Option<&demodex_protocol::ConversationPageCursor>, budget: usize, item_limit: usize) -> Result<demodex_protocol::ConversationSnapshot> {
         let end: i64 = self.lock()?.query_row("SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=?1", [id], |r| r.get(0))?;
         let through = older.map_or(end, |cursor| cursor.through);
         ensure!((0..=end).contains(&through), "Invalid conversation cursor");
         // Serialize projection builds separately from the database lock. State
         // reads and event ingestion remain available while history is projected.
         let mut cached = self.1.lock().map_err(|_|anyhow::anyhow!("conversation cache poisoned"))?;
-        let projection = if let Some(projection) = cached.as_ref().filter(|p|p.id == id && p.through == through) {
-            projection.clone()
+        let projection = if let Some(index) = cached.iter().position(|p| p.id == id && p.through == through) {
+            let projection = cached.remove(index);
+            cached.push(projection.clone());
+            projection
         } else {
-            let mut transcript = demodex_protocol::transcript::Transcript::for_projection();
-            let mut count = 0u64;
-            let mut after = 0;
+            // Advance the newest eligible projection. An older page must never
+            // inherit events beyond its high-water mark.
+            let previous = cached.iter().enumerate().filter(|(_, p)| p.id == id && p.through < through)
+                .max_by_key(|(_, p)| p.through).map(|(index, _)| index);
+            let (mut transcript, mut count, mut after) = if let Some(index) = previous {
+                let previous = cached.remove(index);
+                let count = previous.event_count;
+                let after = previous.through;
+                let items = match Arc::try_unwrap(previous) {
+                    Ok(previous) => previous.items,
+                    Err(previous) => previous.items.clone(),
+                };
+                (demodex_protocol::transcript::Transcript::restore_projection(items, after), count, after)
+            } else {
+                (demodex_protocol::transcript::Transcript::for_projection(), 0, 0)
+            };
             while after < through {
-                let batch: Vec<_> = self.events(id, after)?.into_iter().take_while(|event| event.seq <= through).collect();
+                let batch = self.projection_events(id, after, through)?;
                 if batch.is_empty() { break; }
                 after = batch.last().unwrap().seq;
                 count += batch.len() as u64;
                 transcript.append_records(batch.iter().map(|event| (Some(event.seq), event.at.as_str(), &event.message)));
             }
-            let items: Vec<_> = transcript.chunks.iter().flat_map(|chunk| chunk.iter().map(|item| item.as_ref().clone())).collect();
+            let items = transcript.into_projection();
             let sizes = items.iter().map(|item|serde_json::to_vec(item).map(|bytes|bytes.len() + 1)).collect::<std::result::Result<Vec<_>, _>>()?;
             let projection = Arc::new(ConversationProjection { id:id.into(), through, event_count:count, items, sizes });
-            // Do not retain arbitrarily large histories between requests.
-            *cached = (projection.sizes.iter().sum::<usize>() <= 256 * 1024 * 1024).then(||projection.clone());
+            let size = projection.sizes.iter().sum::<usize>();
+            if size <= CONVERSATION_CACHE_BYTES {
+                while !cached.is_empty() && (cached.len() >= 8 || cached.iter().map(|p| p.sizes.iter().sum::<usize>()).sum::<usize>() + size > CONVERSATION_CACHE_BYTES) {
+                    cached.remove(0);
+                }
+                cached.push(projection.clone());
+            }
             projection
         };
         drop(cached);
@@ -874,7 +917,7 @@ impl Store {
         let before = before as usize;
         let mut start = before;
         let mut bytes = 1024usize; // Reserve space for page metadata.
-        while start > 0 {
+        while start > 0 && before - start < item_limit {
             let size = projection.sizes[start - 1];
             // An indivisible oversized item gets its own page; never truncate it
             // or return an empty page with a cursor that cannot make progress.
@@ -887,6 +930,26 @@ impl Store {
             event_count:projection.event_count,
             older:(start > 0).then_some(demodex_protocol::ConversationPageCursor { through, before:start as u64 }),
         })
+    }
+
+    fn projection_events(&self, id: &str, after: i64, through: i64) -> Result<Vec<Event>> {
+        let rows: Vec<(i64, String, String)> = {
+            let db = self.lock()?;
+            let mut query = db.prepare("SELECT seq,at,message FROM events WHERE session_id=?1 AND seq>?2 AND seq<=?3 ORDER BY seq LIMIT 500")?;
+            query.query_map(params![id, after, through], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        rows.into_iter().map(|(seq, at, encoded)| {
+            #[derive(serde::Deserialize)]
+            struct Header { #[serde(default)] method: Value }
+            let relevant = serde_json::from_str::<Header>(&encoded)
+                .map(|header| demodex_protocol::transcript::affects_transcript(header.method.as_str().unwrap_or_default()))
+                .unwrap_or(true); // Preserve validation/handling of non-object records.
+            let message = if relevant {
+                serde_json::from_str(&encoded)?
+            } else { Value::Null };
+            Ok(Event { seq, at, message })
+        }).collect()
     }
 
     pub fn events(&self, id: &str, after: i64) -> Result<Vec<Event>> {
@@ -1149,6 +1212,63 @@ mod tests {
         assert!(oversized.older.is_some());
         let invalid = demodex_protocol::ConversationPageCursor { through:live_cursor, before:1000 };
         assert!(store.conversation_page(&id, Some(&invalid)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn conversation_index_survives_restart_and_preserves_old_cursors() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("state.sqlite");
+        let store = Store::open(&path)?;
+        let id = store.create("checkpoint", "ws://localhost:1", &[], None)?.id;
+        store.event(&id, &json!({"method":"item/started","params":{"turnId":"turn","item":{"id":"live","type":"agentMessage","text":"first"}}}))?;
+        let old = store.conversation(&id)?;
+        // Cross multiple index batches using events with no display effect.
+        let ignored = json!({"method":"future/unknown","params":{"retained":"raw"}});
+        store.event_batch(&id, &vec![&ignored; 10_000])?;
+        let first = store.conversation(&id)?;
+        assert_eq!(first.event_count, 10_001);
+        assert_eq!(first.items, old.items);
+        assert_eq!(store.lock()?.query_row("SELECT COUNT(*) FROM conversation_index", [], |r| r.get::<_, i64>(0))?, 1);
+        drop(store);
+        let store = Store::open(&path)?;
+        let restored = store.conversation(&id)?;
+        assert_eq!(serde_json::to_value(&restored)?, serde_json::to_value(&first)?);
+        store.event(&id, &json!({"method":"item/agentMessage/delta","params":{"itemId":"live","delta":" continued"}}))?;
+        store.event(&id, &json!({"method":"turn/completed","params":{"turn":{"id":"turn","status":"completed"}}}))?;
+        let advanced = store.conversation(&id)?;
+        assert_eq!(advanced.items[0]["text"], "first continued");
+        assert_eq!(advanced.items[0]["_demodexLifecycle"], "ended");
+        assert_eq!(advanced.items[0]["_demodexAt"], first.items[0]["_demodexAt"]);
+        let older = store.conversation_page(&id, Some(&demodex_protocol::ConversationPageCursor { through:old.cursor, before:1 }))?;
+        assert_eq!(serde_json::to_value(older)?, serde_json::to_value(old)?);
+        // A changed projection version rebuilds from authoritative events.
+        store.1.lock().unwrap().clear();
+        store.lock()?.execute("UPDATE conversation_index SET version=-1", [])?;
+        let rebuilt = store.conversation(&id)?;
+        assert_eq!(serde_json::to_value(rebuilt)?, serde_json::to_value(advanced)?);
+        assert_eq!(store.events(&id, first.cursor - 1)?[0].message, ignored);
+        Ok(())
+    }
+
+    #[test]
+    fn conversation_pages_bound_small_items_and_cache_multiple_sessions() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        let a = store.create("a", "ws://localhost:1", &[], None)?.id;
+        let b = store.create("b", "ws://localhost:1", &[], None)?.id;
+        for n in 0..CONVERSATION_PAGE_ITEMS + 1 {
+            store.event(&a, &json!({"method":"item/completed","params":{"item":{"id":format!("item-{n}"),"type":"agentMessage","text":"short"}}}))?;
+        }
+        let page = store.conversation(&a)?;
+        assert_eq!(page.items.len(), CONVERSATION_PAGE_ITEMS);
+        let older = store.conversation_page(&a, page.older.as_ref())?;
+        assert_eq!(older.items.len(), 1);
+        assert_eq!(older.items[0]["id"], "item-0");
+        assert!(older.older.is_none());
+        store.conversation(&b)?;
+        assert!(store.1.lock().unwrap().is_empty());
+        assert_eq!(store.lock()?.query_row("SELECT COUNT(*) FROM conversation_index", [], |r| r.get::<_, i64>(0))?, 2);
+        assert_eq!(serde_json::to_value(store.conversation(&a)?)?, serde_json::to_value(page)?);
         Ok(())
     }
 

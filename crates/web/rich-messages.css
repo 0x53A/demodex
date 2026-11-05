@@ -1,4 +1,7 @@
 .markdown { line-height:1.55; overflow-wrap:anywhere; min-width:0 }
+/* Wide content scrolls locally without dragging the surrounding vertical panel. */
+.markdown pre.code-block, .markdown .table-scroll, .math-display,
+.mermaid-diagram details pre, .file-preview { overscroll-behavior-x:none; }
 .markdown > :first-child { margin-top:0 }
 .markdown > :last-child { margin-bottom:0 }
 .markdown p { white-space:pre-wrap; margin:.65em 0 }

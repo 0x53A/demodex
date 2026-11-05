@@ -232,3 +232,11 @@ impl Client {
         self.notices.lock().unwrap().take()
     }
 }
+
+impl Client {
+    pub async fn voice(&self, command: demodex_protocol::VoiceCommand) -> Result<demodex_protocol::VoiceReply> {
+        self.api.ask(|reply| Api::Voice { command, reply }, Some(Duration::from_secs(190))).await
+            .context("Voice connection interrupted; recording will not be replayed")?
+            .map_err(anyhow::Error::msg)
+    }
+}

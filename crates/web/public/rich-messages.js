@@ -46,7 +46,7 @@
         removeEventListener('message', receive);
         element.textContent = 'Diagram preview unavailable; view source below.';
       };
-      frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${escape(policy)}"><style>html,body{margin:0;background:#191c1a;color:#ecebe3;font:14px sans-serif}#diagram{padding:8px;overflow:auto}svg{max-width:100%;height:auto}a{pointer-events:none}</style></head><body><div id="diagram" role="img" aria-label="Mermaid diagram" data-render-state="loading">Rendering diagram…</div><script>
+      frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${escape(policy)}"><style>html,body{margin:0;background:#191c1a;color:#ecebe3;font:14px sans-serif}#diagram{padding:8px;overflow:auto;overscroll-behavior-x:none}svg{max-width:100%;height:auto}a{pointer-events:none}</style></head><body><div id="diagram" role="img" aria-label="Mermaid diagram" data-render-state="loading">Rendering diagram…</div><script>
         const box = document.getElementById('diagram');
         const reportHeight = () => parent.postMessage({demodexDiagramHeight: Math.ceil(box.scrollHeight), demodexDiagramState: box.dataset.renderState}, '*');
         new ResizeObserver(reportHeight).observe(box);

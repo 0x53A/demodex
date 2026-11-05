@@ -50,6 +50,7 @@ pub struct Orchestrator {
     pub(crate) codex_home: Option<PathBuf>,
     image: Mutex<Option<PathBuf>>,
     runtime: Mutex<Option<Runtime>>,
+    claude_runtime: Mutex<Option<Runtime>>,
     usage: crate::usage::RateLimitsCache,
     machines: Mutex<HashMap<String, Machine>>,
     containers: Mutex<HashMap<String, ContainerRuntime>>,
@@ -710,6 +711,7 @@ impl Orchestrator {
             codex_home,
             image: Mutex::new(image),
             runtime: Mutex::new(None),
+            claude_runtime: Mutex::new(None),
             usage: crate::usage::RateLimitsCache::default(),
             machines: Mutex::new(HashMap::new()),
             containers: Mutex::new(HashMap::new()),
@@ -743,7 +745,12 @@ impl Orchestrator {
     }
 
     pub async fn start_runtime(&self) -> Result<Value> {
-        let mut runtime = self.runtime.lock().await;
+        self.start_provider_runtime(false).await
+    }
+
+    async fn start_provider_runtime(&self, claude: bool) -> Result<Value> {
+        let slot = if claude { &self.claude_runtime } else { &self.runtime };
+        let mut runtime = slot.lock().await;
         if let Some(active) = runtime.as_mut() {
             if active.child.try_wait()?.is_none()
                 && match active.executor.as_mut() {
@@ -758,15 +765,13 @@ impl Orchestrator {
         *runtime = None;
         let feature_overrides = self.manager.store.runtime_features()?;
         for id in self.runtime_sessions()? {
+            if claude && !self.session_uses_claude(&id)? { continue; }
             self.manager
                 .disconnect(&id, "host runtime is restarting; reconnect to resume")
                 .await?;
         }
-        let directory = self.root.join("runtime");
-        let profile = self
-            .codex_home
-            .clone()
-            .unwrap_or_else(|| directory.join("home"));
+        let directory = self.root.join(if claude { "claude-runtime" } else { "runtime" });
+        let profile = self.prompt_profile();
         std::fs::create_dir_all(&profile)?;
         std::fs::create_dir_all(directory.join("ipc"))?;
         let config = profile.join("config.toml");
@@ -781,8 +786,24 @@ impl Orchestrator {
         let endpoint = format!("unix://{}", socket.display());
         let codex = find_binary("codex")?;
         let certificate = Path::new("/etc/ssl/certs/ca-certificates.crt").canonicalize()?;
-        let mut command = Command::new("bwrap");
+        let claude_settings = if claude {
+            let adapter = self.manager.claude.get().context("Claude adapter unavailable")?;
+            let path = adapter.runtime_catalog().await?.context("Connect a Claude account first")?;
+            Some((path, adapter.runtime_settings().await?))
+        } else {
+            None
+        };
+        // bwrap passes its own environment through, so clear it here rather than
+        // with --clearenv/--setenv: values in argv are visible to all local users.
+        // Resolve bwrap from the daemon PATH; host mode replaces this command.
+        let bwrap = if self.host_workspace.is_none() { find_binary("bwrap")? } else { "bwrap".into() };
+        let mut command = Command::new(bwrap);
         command
+            .env_clear()
+            .env("HOME", "/home/agent")
+            .env("CODEX_HOME", "/home/agent/.codex")
+            .env("PATH", "/run/current-system/sw/bin")
+            .env("SSL_CERT_FILE", certificate)
             .args([
                 "--unshare-all",
                 "--share-net",
@@ -808,33 +829,21 @@ impl Orchestrator {
                 "/workspace",
                 "--bind",
             ])
-            .arg(directory.join("home"))
+            .arg(&profile)
             .arg("/home/agent/.codex")
             .arg("--bind")
             .arg(directory.join("ipc"))
             .arg("/run/demodex")
-            .args([
-                "--clearenv",
-                "--setenv",
-                "HOME",
-                "/home/agent",
-                "--setenv",
-                "CODEX_HOME",
-                "/home/agent/.codex",
-                "--setenv",
-                "PATH",
-                "/run/current-system/sw/bin",
-                "--setenv",
-                "SSL_CERT_FILE",
-            ])
-            .arg(certificate)
-            .args(["--chdir", "/workspace", "--"])
+            ;
+        if claude { command.arg("--ro-bind").arg(self.root.join("runtime/claude-catalogue")).arg(self.root.join("runtime/claude-catalogue")); }
+        command.args(["--chdir", "/workspace", "--"])
             .arg(codex)
             .args(["app-server", "--listen", "unix:///run/demodex/app.sock"]);
         let mut executor = None;
         let mut host_target = None;
         if let Some(workspace) = &self.host_workspace {
             let codex = find_binary("codex")?;
+            if !claude {
             let port = free_port()?;
             let mut execute = Command::new(&codex);
             execute
@@ -850,6 +859,7 @@ impl Orchestrator {
             });
             self.manager.store.record_file_executor(host_target.as_ref().unwrap(), "host")?;
             executor = Some(child);
+            }
             command = Command::new(codex);
             command
                 .args(["app-server", "--listen", &endpoint])
@@ -858,6 +868,11 @@ impl Orchestrator {
                 .env_remove("CODEX_API_KEY")
                 .env_remove("CODEX_ACCESS_TOKEN")
                 .current_dir(workspace);
+        }
+        if let Some((path, settings)) = &claude_settings {
+            command.env(crate::claude::INFERENCE_KEY_ENV, &settings.key);
+            command.arg("-c").arg(format!("model_catalog_json={}",serde_json::to_string(path)?));
+            for setting in &settings.overrides { command.arg("-c").arg(setting); }
         }
         for (name, enabled) in &feature_overrides {
             command
@@ -897,6 +912,21 @@ impl Orchestrator {
             feature_catalog,
         });
         Ok(json!({"running":true}))
+    }
+
+    pub(crate) fn session_uses_claude(&self, id: &str) -> Result<bool> {
+        let binding = self.manager.store.prompt_record(&format!("provider/{id}"))?;
+        if let Some(provider) = binding.as_str() { return Ok(provider == "claude"); }
+        let settings = self.manager.store.model_settings(id)?;
+        Ok(settings["selection"]["model"].as_str().or_else(|| settings["effective"]["model"].as_str()).is_some_and(|m| m.starts_with("claude-")))
+    }
+
+    pub(crate) async fn session_runtime_rpc(&self, id: &str) -> Result<(Arc<Rpc>, String)> {
+        if !self.session_uses_claude(id)? { return self.runtime_rpc().await; }
+        self.start_provider_runtime(true).await?;
+        let runtime = self.claude_runtime.lock().await;
+        let active = runtime.as_ref().context("Claude runtime unavailable")?;
+        Ok((active.rpc.clone(), active.endpoint.clone()))
     }
 
     pub(crate) async fn runtime_rpc(&self) -> Result<(Arc<Rpc>, String)> {
@@ -972,13 +1002,25 @@ impl Orchestrator {
 
     pub async fn restart_session_ids(&self) -> Result<Vec<String>> {
         let (_, endpoint) = self.runtime_rpc().await?;
-        Ok(self.manager.store.list()?.into_iter().filter(|s| s.endpoint == endpoint).map(|s|s.id).collect())
+        let claude_endpoint = self.claude_runtime.lock().await.as_ref().map(|r|r.endpoint.clone());
+        Ok(self.manager.store.list()?.into_iter().filter(|s| s.endpoint == endpoint || Some(&s.endpoint) == claude_endpoint.as_ref()).map(|s|s.id).collect())
     }
 
     pub async fn restart_runtime(&self) -> Result<Value> {
+        self.restart_provider_runtimes(false).await
+    }
+
+    pub async fn restart_claude_runtime(&self) -> Result<Value> {
+        self.restart_provider_runtimes(true).await
+    }
+
+    async fn restart_provider_runtimes(&self, claude_only: bool) -> Result<Value> {
         let _lifecycle = self.jobs.lock().await;
         let _settings = self.manager.connecting.lock().await;
-        let (rpc, endpoint) = self.runtime_rpc().await?;
+        let mut runtimes = if claude_only { Vec::new() } else { vec![self.runtime_rpc().await?] };
+        if let Some(r) = self.claude_runtime.lock().await.as_ref() { runtimes.push((r.rpc.clone(),r.endpoint.clone())); }
+        let mut restart_sessions = Vec::new();
+        for (rpc, endpoint) in runtimes {
         let sessions: Vec<_> = self
             .manager
             .store
@@ -1050,11 +1092,19 @@ impl Orchestrator {
                 );
             }
         }
-        for session in &sessions {
+        restart_sessions.extend(sessions);
+        }
+        for session in &restart_sessions {
             self.manager
                 .disconnect(&session.id, "Codex restarted; reconnect to resume")
                 .await?;
         }
+        if let Some(mut runtime) = self.claude_runtime.lock().await.take() {
+            runtime.rpc.close();
+            terminate(&mut runtime.child).await;
+            let _ = std::fs::remove_file(self.root.join("claude-runtime/ipc/app.sock"));
+        }
+        if !claude_only {
         if let Some(mut runtime) = self.runtime.lock().await.take() {
             runtime.rpc.close();
             terminate(&mut runtime.child).await;
@@ -1063,7 +1113,8 @@ impl Orchestrator {
             }
             let _ = std::fs::remove_file(self.root.join("runtime/ipc/app.sock"));
         }
-        let result = self.start_runtime().await;
+        }
+        let result = self.start_provider_runtime(claude_only).await;
         self.manager.changed();
         result
     }
@@ -1651,7 +1702,18 @@ impl Orchestrator {
             || self.manager.store.host_sessions()?.iter().any(|s| s == id)
             || self.manager.store.session_environment(id)?.is_some();
         let endpoint = if managed {
-            self.runtime_rpc().await?.1
+            if self.manager.store.prompt_record(&format!("provider/{id}"))?.is_null() {
+                if let Some(thread) = &session.thread_id {
+                    let (rpc, _) = self.runtime_rpc().await?;
+                    let saved = rpc.call("thread/read",json!({"threadId":thread,"includeTurns":false})).await?;
+                    if saved["thread"]["modelProvider"] == "demodex_mixed" {
+                        self.manager.store.put_prompt_record(&format!("provider/{id}"),&json!("claude"))?;
+                    }
+                }
+            }
+            let is_claude = self.session_uses_claude(id)?;
+            self.manager.store.put_prompt_record(&format!("provider/{id}"), &json!(if is_claude { "claude" } else { "native" }))?;
+            self.session_runtime_rpc(id).await?.1
         } else {
             session.endpoint
         };
@@ -1738,8 +1800,10 @@ impl Orchestrator {
         include_project: Option<bool>,
         model: Option<&demodex_protocol::ModelChoice>,
         context_window: Option<i64>,
+        max_subagents: Option<u32>,
     ) -> Result<Session> {
         validate_prompt(prompt)?;
+        crate::subagent_limit::validate(max_subagents)?;
         let name = if name.trim().is_empty() { "Untitled session" } else { name };
         ensure!(name.len() <= 120, "session name must be at most 120 characters");
         crate::targets::validate_selection(selection)?;
@@ -1760,7 +1824,8 @@ impl Orchestrator {
             let _lifecycle = self.jobs.lock().await;
             let (rpc, endpoint) = self.runtime_rpc().await?;
             let model = if let Some(choice) = model {
-                let catalog = crate::controls::model_catalog(&rpc).await?;
+                let mut catalog = crate::controls::model_catalog(&rpc).await?;
+                if let Some(claude)=self.manager.claude.get() { claude.add_models(&mut catalog).await; }
                 Some(crate::controls::validate_model(
                     choice,
                     catalog["data"].as_array().context("missing model catalog")?,
@@ -1793,6 +1858,9 @@ impl Orchestrator {
             )?;
             if let Some(model) = model {
                 self.manager.store.model_selection(&session.id, &model)?;
+            }
+            if let Some(limit) = max_subagents {
+                self.manager.store.put_prompt_record(&format!("subagent-limit/{}",session.id), &json!({"limit":limit}))?;
             }
             if let Some(context) = context {
                 self.manager.store.put_prompt_record(&format!("context/{}",session.id), &context)?;
@@ -1955,6 +2023,17 @@ impl Orchestrator {
                 }
             }
         }
+        let claude_failed = {
+            let mut runtime = self.claude_runtime.lock().await;
+            match runtime.as_mut() { Some(r) => r.child.try_wait()?.is_some(), None => false }
+        };
+        if claude_failed {
+            for id in self.runtime_sessions()? {
+                if self.session_uses_claude(&id)? && self.manager.store.get(&id)?.status != "disconnected" {
+                    self.manager.disconnect(&id, "Claude runtime exited; reconnect to resume").await?;
+                }
+            }
+        }
         let mut failures = Vec::new();
         {
             let mut machines = self.machines.lock().await;
@@ -2014,6 +2093,11 @@ impl Orchestrator {
         Ok(())
     }
     pub async fn shutdown(&self) {
+        if let Some(mut runtime) = self.claude_runtime.lock().await.take() {
+            runtime.rpc.close();
+            terminate(&mut runtime.child).await;
+            let _ = std::fs::remove_file(self.root.join("claude-runtime/ipc/app.sock"));
+        }
         self.ssh.lock().await.clear();
         let ids: Vec<_> = self.jobs.lock().await.keys().cloned().collect();
         for id in ids {
@@ -2071,7 +2155,7 @@ fn free_port() -> Result<u16> {
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
-fn find_binary(name: &str) -> Result<PathBuf> {
+pub(crate) fn find_binary(name: &str) -> Result<PathBuf> {
     for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
         let path = directory.join(name);
         if path.is_file() {
@@ -2295,3 +2379,4 @@ mod container_tests {
         Ok(())
     }
 }
+

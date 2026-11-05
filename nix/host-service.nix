@@ -26,6 +26,11 @@ in {
       bind = lib.mkOption { type = lib.types.str; default = "127.0.0.1:4782"; };
       directory = lib.mkOption { type = lib.types.str; default = "${cfg.directory}/web/.rust-dist"; };
     };
+    sttConfig = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "JSON file configuring the private STT SSH destination, socket and helper program.";
+    };
     codexHome = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -54,6 +59,7 @@ in {
           "--web-dir" cfg.web.directory
           "--host-workspace" "${cfg.directory}/workspace"
         ] ++ lib.optionals (cfg.codexHome != null) [ "--codex-home" cfg.codexHome ]
+          ++ lib.optionals (cfg.sttConfig != null) [ "--stt-config" (toString cfg.sttConfig) ]
           ++ lib.optionals cfg.apiOnly [ "--api-only" ]
           ++ lib.concatMap (user: [ "--tailscale-user" user ]) cfg.tailscaleUsers
           ++ lib.concatMap (origin: [ "--allowed-origin" origin ]) cfg.allowedOrigins);

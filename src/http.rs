@@ -163,6 +163,7 @@ mod tests {
     async fn native_transport_auth_receipts_reconnect_and_static_routes() -> anyhow::Result<()> {
         let root = tempfile::tempdir()?;
         let service = Service::open(Config {
+            stt: None,
             data_dir: root.path().join("state"),
             vm_image: None,
             host_workspace: None,

@@ -256,6 +256,10 @@ mod tests {
 
 // DOM selection offsets count UTF-16 code units, not Rust bytes.
 pub fn insert_image_path(draft: &str, path: &str, start: u32, end: u32) -> String {
+    insert_attachment_path(draft, path, None, start, end)
+}
+
+pub fn insert_attachment_path(draft: &str, path: &str, name: Option<&str>, start: u32, end: u32) -> String {
     fn offset(text: &str, units: u32) -> usize {
         let mut count = 0;
         for (index, ch) in text.char_indices() {
@@ -270,15 +274,18 @@ pub fn insert_image_path(draft: &str, path: &str, start: u32, end: u32) -> Strin
     let end = offset(draft, end).max(start);
     let before = &draft[..start];
     let after = &draft[end..];
+    let label = name.unwrap_or("Attached image").replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]");
     format!(
-        "{}{}![Attached image](<{}>){}{}",
+        "{}{}{}[{}](<{}>){}{}",
         before,
         if before.is_empty() || before.ends_with(char::is_whitespace) {
             ""
         } else {
             " "
         },
-        path.replace('%', "%25").replace('\\', "\\\\").replace('<', "%3C").replace('>', "%3E").replace('\n', "%0A").replace('\r', "%0D"),
+        if name.is_none() { "!" } else { "" },
+        label,
+        path.replace('%', "%25").replace(':', "%3A").replace('#', "%23").replace('?', "%3F").replace('\\', "\\\\").replace('<', "%3C").replace('>', "%3E").replace('\n', "%0A").replace('\r', "%0D"),
         if after.is_empty() || after.starts_with(char::is_whitespace) {
             ""
         } else {

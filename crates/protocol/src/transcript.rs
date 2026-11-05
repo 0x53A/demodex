@@ -23,6 +23,20 @@ pub struct Transcript {
     event_at: String,
     event_imported: bool,
     omit_render_groups: bool,
+    removed_projection: BTreeSet<String>,
+}
+
+/// Events used by the projection. Other events still advance its cursor/count,
+/// but storage can skip allocating their (potentially very large) payloads.
+pub fn affects_transcript(method: &str) -> bool {
+    matches!(method, "demodex/messageFiles" | "demodex/notification" |
+        "demodex/notificationDelivery" | "demodex/promptSteering" |
+        "demodex/promptSteeringDiscarded" | "demodex/promptSteeringFailed" |
+        "demodex/threadSnapshot" | "item/started" | "item/completed" |
+        "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" |
+        "item/mcpToolCall/progress" | "turn/plan/updated" | "error" |
+        "turn/completed" | "item/agentMessage/delta" |
+        "item/commandExecution/outputDelta" | "item/plan/delta")
 }
 
 pub fn is_activity(item: &Value) -> bool {
@@ -38,6 +52,47 @@ impl Transcript {
     pub fn for_projection() -> Self {
         Self { omit_render_groups: true, ..Self::default() }
     }
+    /// Resume a daemon projection without constructing browser render groups.
+    pub fn restore_projection(items: Vec<Value>, cursor: i64) -> Self {
+        let mut transcript = Self::for_projection();
+        for item in items { transcript.put_owned(item); }
+        transcript.cursor = cursor;
+        transcript
+    }
+
+    pub fn removed_projection_ids(&self) -> BTreeSet<String> { self.removed_projection.clone() }
+
+    /// Existing items needed to project a batch, in addition to every unfinished
+    /// or steering item. Keep dependency selection beside the event semantics.
+    pub fn projection_dependencies(message: &Value, seq: i64) -> BTreeSet<String> {
+        let p = &message["params"];
+        let mut ids = BTreeSet::new();
+        for id in [text(p,"itemId"), text(&p["item"],"id"), text(p,"clientUserMessageId")] {
+            if !id.is_empty() { ids.insert(id.to_owned()); }
+        }
+        match text(message,"method") {
+            "demodex/threadSnapshot" => {
+                if let Some(turns) = p["thread"]["turns"].as_array() { for turn in turns {
+                    if let Some(items) = turn["items"].as_array() { for item in items {
+                        if !text(item,"id").is_empty() { ids.insert(text(item,"id").to_owned()); }
+                    }}
+                }}
+            }
+            "demodex/notification" | "demodex/notificationDelivery" => { ids.insert(format!("demodex:notification:{}",text(p,"id"))); }
+            "turn/plan/updated" => { ids.insert(format!("demodex:plan:{}",text(p,"turnId"))); }
+            "turn/completed" => { ids.insert(format!("demodex:turn:{}",text(&p["turn"],"id"))); }
+            "error" => { ids.insert(format!("demodex:error:{seq}")); }
+            _ => {}
+        }
+        ids
+    }
+
+    pub fn into_projection(self) -> Vec<Value> {
+        Rc::unwrap_or_clone(self.chunks).into_iter()
+            .flat_map(|chunk| Rc::unwrap_or_clone(chunk).into_iter().map(Rc::unwrap_or_clone))
+            .collect()
+    }
+
     pub fn cursor(&self) -> i64 { self.cursor }
     pub fn restore(items: &[Value], cursor: i64) -> Self {
         let mut transcript = Self::default();
@@ -83,6 +138,7 @@ impl Transcript {
 
     fn remove(&mut self, id: &str) {
         if !self.positions.contains_key(id) { return; }
+        if self.omit_render_groups { self.removed_projection.insert(id.to_owned()); }
         let items: Vec<_> = self.chunks.iter().flat_map(|c| c.iter()).filter(|item| text(item, "id") != id).cloned().collect();
         self.chunks = Rc::default();
         self.groups = Rc::default();

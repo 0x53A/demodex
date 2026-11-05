@@ -99,7 +99,7 @@ pub fn classify(raw: &str) -> LinkDestination {
 
 pub fn extract(source: &str) -> Vec<MessageLink> {
     let mut links: Vec<MessageLink> = Vec::new();
-    let mut current: Option<(String, String)> = None;
+    let mut current: Vec<(String, String, bool)> = Vec::new();
     for event in Parser::new_ext(
         source,
         Options::ENABLE_TABLES
@@ -109,13 +109,17 @@ pub fn extract(source: &str) -> Vec<MessageLink> {
     ) {
         match event {
             Event::Start(Tag::Link { dest_url, .. }) => {
-                current = Some((dest_url.into_string(), String::new()))
+                current.push((dest_url.into_string(), String::new(), false))
             }
-            Event::Text(t) | Event::Code(t) if current.is_some() => {
-                current.as_mut().unwrap().1.push_str(&t)
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                current.push((dest_url.into_string(), String::new(), true))
             }
-            Event::End(TagEnd::Link) => {
-                if let Some((destination, title)) = current.take()
+            Event::Text(t) | Event::Code(t) => {
+                for (_, title, _) in &mut current { title.push_str(&t); }
+            }
+            Event::End(TagEnd::Link | TagEnd::Image) => {
+                if let Some((destination, title, image)) = current.pop()
+                    && (!image || matches!(classify(&destination), LinkDestination::File { .. }))
                     && !links.iter().any(|l| l.destination == destination)
                 {
                     let kind = classify(&destination);
@@ -157,8 +161,18 @@ mod tests {
         );
         let links =
             extract("[One](/tmp/a) and [Again](/tmp/a) ` [Code](/tmp/b) ` ![Image](/tmp/c)");
-        assert_eq!(links.len(), 1);
+        assert_eq!(links.len(), 2);
         assert_eq!(links[0].title, "One");
+        assert_eq!(links[1].destination, "/tmp/c");
+    }
+    #[test]
+    fn local_images_include_angle_paths_and_preserve_enclosing_links() {
+        let links = extract("[![payment](</tmp/payment december.png>)](https://example.org) ![remote](https://example.org/a.png)");
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].destination, "/tmp/payment december.png");
+        assert_eq!(links[0].title, "payment");
+        assert_eq!(links[1].destination, "https://example.org");
+        assert_eq!(links[1].title, "payment");
     }
     #[test]
     fn file_locations_do_not_become_filename_suffixes() {
@@ -198,6 +212,28 @@ mod tests {
                 matches!(classify(value), LinkDestination::Unsupported { .. }),
                 "{value}"
             );
+        }
+    }
+}
+
+/// Encode a literal tool-reported filename for the shared file-link machinery.
+pub fn image_view_destination(path: &str) -> String {
+    let path = if path.starts_with('/') { path.to_owned() } else { format!("./{path}") };
+    path.chars().map(|c| {
+        if c == '/' { "/".to_owned() }
+        else { percent_encoding::utf8_percent_encode(&c.to_string(), percent_encoding::NON_ALPHANUMERIC).to_string() }
+    }).collect()
+}
+
+#[cfg(test)]
+mod image_view_tests {
+    #[test]
+    fn literal_paths_preserve_percent_colons_and_markdown_characters() {
+        for path in ["/tmp/a b%20:12.png", "/tmp/a>](x).png", "relative:12", "https://example.org/image.png"] {
+            let destination = super::image_view_destination(path);
+            let expected = if path.starts_with('/') { path.to_owned() } else { format!("./{path}") };
+            assert_eq!(super::classify(&destination), crate::LinkDestination::File { path: expected });
+            assert_eq!(super::extract(&format!("[Image](<{destination}>)")).len(), 1);
         }
     }
 }

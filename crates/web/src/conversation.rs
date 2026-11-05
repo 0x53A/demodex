@@ -154,12 +154,23 @@ fn message_item(props: &ItemProps) -> Html {
     let item = props.item.as_ref();
     let kind = text(item, "type");
     let failed = is_failed(item);
+    let image_open = use_state(|| false);
+    let open_image = { let state = image_open.clone(); Callback::from(move |_| state.set(true)) };
+    let close_image = { let state = image_open.clone(); Callback::from(move |_| state.set(false)) };
     let show_status = !matches!(
         kind,
         "agentMessage" | "userMessage" | "plan" | "demodexPlan" | "demodexError" | "demodexNotification"
     );
     html! {<article class={(kind=="userMessage").then_some("user")} data-item-id={text(item,"id").to_owned()}>
-        <div class="item-kind">{label(kind)}{if show_status{html!{<span class={classes!("item-status",failed.then_some("failed"))}>{status(item)}</span>}}else{Html::default()}}{crate::timestamps::view(item)}</div>
+        <div class="item-kind">{label(kind)}{if show_status{html!{<span class={classes!("item-status",failed.then_some("failed"))}>{status(item)}</span>}}else{Html::default()}}{crate::timestamps::view(item)}
+        {if kind == "imageView" && !text(item,"path").is_empty() {
+            html!{<crate::ui::IconButton label="View image" title="View image" onclick={open_image}>{"◉"}</crate::ui::IconButton>}
+        } else {Html::default()}}</div>
+        {if kind == "imageView" && *image_open {
+            let destination = demodex_protocol::links::image_view_destination(text(item,"path"));
+            let link = demodex_protocol::MessageLink { title: "Image viewed".into(), kind: demodex_protocol::links::classify(&destination), destination };
+            html!{<crate::links::LinkPopup {link} item={text(item,"id").to_owned()} revision={item["_demodexFilesRevision"].as_u64().unwrap_or_default()} preview_on_open=true onclose={close_image}/>}
+        } else {Html::default()}}
         {match text(item,"_demodexSteering") {
             "waiting"=>html!{<small class="steering-status" role="status">{"Waiting for the next tool call"}</small>},
             "unconfirmed"=>html!{<small class="steering-status" role="status">{"Turn ended · message consumption unconfirmed"}</small>},

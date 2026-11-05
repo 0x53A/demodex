@@ -21,7 +21,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-large-history-') as temporary:
         port = sock.getsockname()[1]
     origin = f'http://127.0.0.1:{port}'
     with (data/'daemon.log').open('w') as log:
-        daemon = subprocess.Popen([str(ROOT/'target/rust-pwa/debug/demodex'), '--bind', f'127.0.0.1:{port}', '--data-dir', str(data), '--web-dir', str(ROOT/'web/.rust-dist')], stdout=log, stderr=log)
+        daemon = subprocess.Popen([os.environ.get("DEMODEX_BIN", str(ROOT/'target/rust-pwa/debug/demodex')), '--bind', f'127.0.0.1:{port}', '--data-dir', str(data), '--web-dir', os.environ.get('DEMODEX_WEB', str(ROOT/'web/.rust-dist'))], stdout=log, stderr=log)
         try:
             for _ in range(200):
                 try:
@@ -50,9 +50,18 @@ with tempfile.TemporaryDirectory(prefix='demodex-large-history-') as temporary:
                 page.goto(origin)
                 expect(page.locator('header .indicator')).to_have_text('connected to',timeout=20000)
                 page.locator('button.session').filter(has_text='Large imported history').click()
+                expect(page.get_by_text('Day 30: historical message 2999', exact=True)).to_be_visible(timeout=30000)
+                assert page.locator('.conversation article').count() <= 200
+                def load_all():
+                    older = page.get_by_role('button', name='Show older messages', exact=True)
+                    while older.count():
+                        older.click()
+                        expect(page.get_by_role('button', name='Loading older messages…', exact=True)).to_have_count(0, timeout=30000)
+                load_all()
                 expect(page.get_by_text('Large history successfully restored',exact=True)).to_be_visible(timeout=30000)
                 expect(page.get_by_role('alert')).to_have_count(0)
-                expect(page.locator('.conversation article')).to_have_count(len(items))
+                # Collapsed activity groups do not mount their articles yet.
+                expect(page.locator('.conversation article')).to_have_count(len(items)-1)
                 transcript = page.locator('.transcript')
                 transcript.evaluate('e=>{e.scrollTop=0;e.dispatchEvent(new Event("scroll"));}')
                 page.locator('.tool-group[data-group-id="old-tool"] > summary').click()
@@ -64,7 +73,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-large-history-') as temporary:
                     window.oldObserver=new MutationObserver(records=>oldChanges.push(...records));
                     oldObserver.observe(oldArticle,{subtree:true,childList:true,characterData:true,attributes:true});
                     const range=document.createRange();
-                    range.selectNodeContents(oldArticle.querySelector('pre'));
+                    range.selectNodeContents(oldArticle.querySelector('.rich-message'));
                     getSelection().removeAllRanges();getSelection().addRange(range);
                 }''')
                 before = transcript.evaluate('e=>e.scrollTop')
@@ -75,7 +84,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-large-history-') as temporary:
                     page.evaluate("window.dispatchEvent(new Event('online'))")
                 # Cross multiple 500-event pages without losing or duplicating deltas.
                 append([{'method':'item/agentMessage/delta','params':{'itemId':'live','delta':'stream '}} for _ in range(1200)])
-                live = page.locator('[data-item-id="live"] pre')
+                live = page.locator('[data-item-id="live"] .rich-message')
                 expect(live).to_have_text('stream '*1200,timeout=30000)
                 assert transcript.evaluate('e=>Math.abs(e.scrollTop-'+str(before)+')<2')
                 assert old_tool.evaluate('e=>e.open')
@@ -106,10 +115,12 @@ with tempfile.TemporaryDirectory(prefix='demodex-large-history-') as temporary:
                 expect(page.locator('[data-item-id="next-day"]')).to_contain_text('continued',timeout=30000)
                 page.wait_for_function('document.querySelector(".transcript").scrollHeight-document.querySelector(".transcript").scrollTop-document.querySelector(".transcript").clientHeight<=1')
                 page.reload()
+                expect(page.get_by_text('Work after another compaction — continued', exact=True)).to_be_visible(timeout=30000)
+                load_all()
                 expect(page.get_by_text('Large history successfully restored',exact=True)).to_be_visible(timeout=30000)
                 assert not errors,errors
                 browser.close()
-            print('PASS: 16 MiB snapshot, 3,000 messages, 30 compactions, incremental streaming/snapshots, stable nodes/selection/expanders, follow and reload')
+            print('PASS: bounded first page, complete older pagination, 16 MiB snapshot, 3,000 messages, 30 compactions, incremental streaming/snapshots, stable nodes/selection/expanders, follow and reload')
         finally:
             daemon.terminate()
             daemon.wait(timeout=15)

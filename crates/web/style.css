@@ -2,11 +2,11 @@
 :root .runtime-panel,.environment-card{border:1px solid #3b403a;padding:18px;margin:20px 0}.environment-nav{width:100%;margin-bottom:20px}.resource-fields{display:grid;grid-template-columns:1fr 1fr;gap:16px}.checkbox{display:flex;align-items:center}.checkbox input{width:20px;height:20px}.environment-actions{display:flex;gap:8px;flex-wrap:wrap}.runtime-panel a{color:#ff9b61}
 
 /* The application frame stays inside the viewport; each panel owns its scroll. */
-html,body,#app{height:100%;overflow:hidden}
+html,body,#app{height:100%;overflow:hidden;overscroll-behavior-x:none}
 #app{height:100dvh;display:flex;flex-direction:column}
 header{flex:0 0 64px;background:#141615;z-index:1}
 .layout{flex:1;min-height:0;overflow:hidden}
-aside{min-height:0;overflow-y:auto;overscroll-behavior:contain}
+aside{min-width:0;min-height:0;overflow-y:auto;overscroll-behavior:contain}
 .layout>main{height:100%;min-height:0;overflow-y:auto;overscroll-behavior:contain}
 .login{overflow-y:auto;min-height:0}
 .layout>main.chat-main{display:flex;flex-direction:column;overflow:hidden;padding-bottom:0}
@@ -90,7 +90,7 @@ input.session-uuid{font:11px ui-monospace,monospace;padding:10px 7px;letter-spac
 .message-queue{border:1px solid #4c5248;padding:12px;margin:16px 0}.queued-message{border-top:1px solid #343a32;padding:8px 0}.composer-shortcut{font-size:11px;color:#a3aa9e;margin:6px 0 0;line-height:1.3}
 
 /* Settings are independent of conversation length and scroll position. */
-.session-modal{padding:0;border:1px solid #4c5248;background:#141615;color:#e8e5df;width:min(760px,calc(100vw - 32px));max-width:calc(100vw - 32px);height:min(820px,calc(100dvh - 32px));max-height:calc(100dvh - 32px);overflow:hidden}
+.session-modal{padding:0;border:1px solid #4c5248;background:#141615;color:#e8e5df;width:min(960px,calc(100vw - 32px));max-width:calc(100vw - 32px);height:calc(100dvh - 32px);max-height:calc(100dvh - 32px);overflow:hidden}
 .session-modal[open]{display:flex;flex-direction:column}
 .session-modal::backdrop{background:rgb(0 0 0 / .7)}
 .modal-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;flex:none;padding:12px 16px;border-bottom:1px solid #4c5248}
@@ -213,7 +213,7 @@ input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px soli
 .connection>button+button{border-left:1px solid #4c5248}
 .connection>button:hover{background:#242823;box-shadow:inset 0 0 0 1px #ff792f}
 .connection>button:focus-visible{outline:2px solid #ff792f;outline-offset:-2px}
-.session-modal.content-sized{height:fit-content;max-height:calc(100dvh - 64px)}
+.session-modal.content-sized{height:fit-content;max-height:calc(100dvh - 32px)}
 .connection-open{display:flex;align-items:baseline;gap:12px;min-width:0;text-align:left;background:transparent;border-color:transparent;padding:8px}
 .connection-open strong,.connection-open small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .connection-open strong{font-size:14px}.connection-open small{color:#a3aa9e;font-size:12px}
@@ -434,7 +434,7 @@ meter::-moz-meter-bar{border-radius:0;background:#91b88b}
 .tree-agent .session-title.failed { color:#f2594e; }
 .tree-agent .session-title.disconnected { color:#a3aa9e; }
 
-/* Settings grow with their contents, leaving 32px above and below the dialog. */
+/* Settings grow with their contents within the shared viewport margins. */
 
 .server-settings .feature-list { max-height:none; overflow:visible; }
 
@@ -497,7 +497,7 @@ meter::-moz-meter-bar{border-radius:0;background:#91b88b}
 .open-score { margin: 4px 8px 4px 0; }
 
 /* Shared popup sizing: content can use the viewport; changing listings stay fixed. */
-.session-modal.stable-sized { height:min(720px,calc(100dvh - 64px)); }
+.session-modal.stable-sized { height:calc(100dvh - 32px); }
 .session-modal.stable-sized > .modal-body { flex:1;display:flex;flex-direction:column;gap:10px;overflow:hidden; }
 .picker-results { flex:1;min-height:0;overflow-y:auto;scrollbar-gutter:stable; }
 
@@ -569,6 +569,20 @@ button.primary:focus-visible { outline:2px solid #ffc6a5;outline-offset:3px; }
 .prompt-nowrap pre,.prompt-nowrap textarea{white-space:pre;overflow-wrap:normal}.prompt-nowrap .prompt-line{width:max-content;min-width:100%}
 .instruction-file{max-height:55vh;overflow:auto;white-space:pre-wrap}
 @media(max-width:700px){.prompt-editor{width:82vw}.prompt-diff{grid-template-columns:minmax(0,1fr)}.prompt-original pre{height:24vh;min-height:100px}}
+
+/* Let prompt panes use the available screen without pushing actions below them. */
+.session-modal:has(> .modal-body > .prompt-editor){width:min(1160px,calc(100vw - 32px));height:calc(100dvh - 32px)}
+.modal-body:has(> .prompt-editor){flex:1;display:flex;flex-direction:column}
+.modal-body:has(> .prompt-editor)>:not(.prompt-editor){flex-shrink:0}
+.modal-body>.prompt-editor{flex:1;min-height:160px;width:100%;grid-template-rows:minmax(0,1fr)}
+.modal-body>.prompt-diff{grid-template-rows:auto minmax(0,1fr)}
+.modal-body>.prompt-editor>.prompt-original,.modal-body>.prompt-editor>.prompt-replacement{display:flex;flex-direction:column;min-height:0;min-width:0}
+.modal-body>.prompt-editor .prompt-edit-area,.modal-body>.prompt-editor .prompt-original pre{flex:1;height:0;min-height:0}
+.modal-body>.prompt-editor .prompt-edit-area pre,.modal-body>.prompt-editor .prompt-edit-area textarea{min-height:0}
+@media(max-width:700px){
+ .session-modal:has(> .modal-body > .prompt-editor){width:calc(100vw - 16px);height:calc(100dvh - 16px)}
+ .modal-body>.prompt-diff{grid-template-rows:auto minmax(0,1fr) minmax(0,1fr);min-height:240px}
+}
 
 /* Forms own scrolling content and a persistent action footer. */
 .ui-form { min-width:0;min-height:0;display:flex;flex-direction:column; }
@@ -672,3 +686,87 @@ input[aria-invalid="true"] { border-color:#f2594e; }
 .context-window-slider { display: flex; align-items: center; gap: 12px; }
 .context-window-slider input[type="range"] { flex: 1; min-width: 0; accent-color: #ff7a32; }
 .context-window-slider output { font-family: monospace; font-variant-numeric: tabular-nums; }
+
+/* Keep the primary action anchored beside a single split dictation control. */
+.composer > .composer-submit { display:flex; flex-wrap:nowrap; justify-content:flex-end; align-items:flex-start; }
+.composer-submit > .primary { min-height:42px; }
+.voice-input { display:flex; flex-direction:column; align-items:flex-end; min-width:0; gap:6px; }
+.voice-split { display:inline-flex; align-items:stretch; }
+.voice-split .voice-record { display:flex; align-items:center; justify-content:center; width:44px; min-height:42px; padding:8px; }
+.voice-split .voice-record.active { color:#ff792f; }
+.voice-split select { border:1px solid #4c5248; border-left:0; border-radius:0; background:#242823; color:#e8e5df; font:inherit; font-size:12px; width:60px; min-height:42px; padding:6px; }
+.voice-split select:disabled { opacity:.45; }
+.voice-progress { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:6px; font-size:12px; color:#ff9b61; }
+.voice-progress button { font-size:12px; padding:6px 10px; }
+.voice-input .error { font-size:12px; max-width:100%; text-align:left; }
+
+.composer-submit > .attachment-button { display:flex; align-items:center; justify-content:center; width:42px; min-height:42px; padding:8px; }
+
+.plugin-choice { display: flex; align-items: flex-start; gap: .6rem; margin: .6rem 0; }
+.plugin-choice small { display: block; overflow-wrap: anywhere; opacity: .65; }
+.plugin-choice > input[type="checkbox"] { flex: none; width: 20px; height: 20px; min-height: 20px; padding: 0; margin: 2px 0 0; accent-color: #ff792f; }
+.plugin-choice > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
+/* Vertical panels must not acquire sideways touch panning or rubber-banding.
+   Keep overflow-y conditional on content, and pinch zoom available. Nested
+   horizontal scrollports (code, tables, previews) own their gestures separately. */
+aside,
+.layout > main:not(.chat-main),
+.login,
+.transcript,
+.app-notice[aria-label="Codex takeover"],
+.global-error,
+.modal-body,
+.session-inbox,
+.approval-command,
+.approval-permissions pre,
+.approval-details pre,
+.weekly-details,
+.chat-main > .error,
+.picker-results,
+.modal-body > .ui-form > .form-fields,
+.instruction-file,
+.share-text,
+textarea,
+.prompt-original pre,
+.prompt-edit-area pre,
+.prompt-edit-area textarea {
+  min-width:0;
+  overflow-x:hidden;
+  overscroll-behavior-x:none;
+  touch-action:pan-y pinch-zoom;
+}
+/* No-wrap editors deliberately support both axes; their wrapped mode does not. */
+.prompt-nowrap pre,
+.prompt-nowrap textarea {
+  overflow-x:auto;
+  overscroll-behavior-x:none;
+  touch-action:auto;
+}
+/* The attachment strip is horizontal, unlike the surrounding composer. */
+.composer > .composer-images { overscroll-behavior-x:none; }
+.conversation .diff-view { overscroll-behavior-x:none; }
+
+/* Account quota graphs remain visible; details retain full timestamps and credits. */
+.usage-overview{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap;margin-left:auto;position:relative}
+.app-header .usage-overview .weekly-usage{margin:0;position:static;min-width:0;flex:none}
+.app-header .usage-overview .quota-summary{display:flex;align-items:center;gap:8px;list-style:none;line-height:1.3;min-height:34px;cursor:pointer}
+.quota-summary::-webkit-details-marker{display:none}
+.quota-summary>strong{color:#d7ddd2;font-size:12px}
+.quota-graphs{display:grid;gap:3px}
+.quota-row{display:grid;grid-template-columns:6ch 64px auto;align-items:center;gap:5px;font-size:10px}
+.quota-period{text-align:right}
+.quota-countdown{white-space:nowrap;color:#a3aa9e}
+.quota-row meter{width:100%;height:9px}
+.quota-summary:hover>strong,.weekly-usage[open]>.quota-summary>strong{color:#ff792f}
+.app-header .usage-overview .weekly-details{right:0;left:auto}
+@media(max-width:700px){
+ .usage-overview{width:100%;margin:0;gap:8px;justify-content:flex-start}
+ .app-header .usage-overview .weekly-usage{flex:1}
+ .app-header .usage-overview .quota-summary{flex-direction:column;align-items:flex-start;gap:4px}
+ .quota-row{grid-template-columns:6ch minmax(28px,1fr) auto;gap:3px;font-size:10px}
+ .quota-graphs{width:100%}
+ .app-header .usage-overview .weekly-details{left:0;right:auto;max-width:100%}
+ .usage-overview>.server-settings-toggle{margin-left:auto}
+}
+.quota-row meter{transform:scaleX(-1)}

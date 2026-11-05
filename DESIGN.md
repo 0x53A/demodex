@@ -24,7 +24,11 @@ Small, deliberate, slightly odd. A session console, not a decorative dashboard.
 - Composer and primary controls remain reachable on narrow displays.
 - The viewport contains the application frame: header, session heading, desktop
   sidebar, and composer stay in place. The transcript scrolls between them;
-  long session lists and other screens scroll within their own panels.
+  long session lists and other screens scroll within their own panels. Vertical
+  panels (including transcripts, lists, dialogs and wrapped text) suppress horizontal
+  touch panning and overscroll; pinch zoom stays enabled. Scrolling is conditional
+  on overflow. Code, tables, math, file previews, unwrapped prompt editors and
+  attachment strips retain their own horizontal scrolling.
 - Follow new transcript output only while the reader is at the bottom; preserve
   their position as soon as they scroll up, even a little. A persistent Jump to
   latest action resumes following explicitly. Keep the scroll region keyboard accessible.
@@ -126,7 +130,9 @@ resume without editing the Codex profile. Unconfirmed changes remain visible.
 Goals are Codex's own thread goals, read with `thread/goal/get` and changed with
 `thread/goal/set` or `thread/goal/clear`. Show state, token usage, elapsed time and
 budget. Start goal saves and activates in one call; Save paused is a secondary
-action. Setting or replacing an objective is allowed during a turn. Pause remains
+action. Setting, replacing, resuming, completing and clearing goals are allowed
+during a turn. Completing or clearing a goal does not interrupt current work.
+Pause remains
 available during a turn and prevents subsequent goal turns, without pretending
 to interrupt the current turn. Blank budget leaves the current budget unchanged.
 Do not invent a budget. Display unsupported API errors without breaking chat.
@@ -212,6 +218,12 @@ bypass that state. VM or container loss preserves selections and requires reconn
 
 ## Independent interaction panels
 
+Dialogs use up to 960px of desktop width and the available viewport height,
+with 16px margins (8px on mobile). Short forms remain content-sized; directory
+and session search panels retain a stable height as results change.
+Prompt override dialogs allow up to 1160px of desktop width. Editor and diff panes share the remaining space beneath their controls,
+scrolling internally so Save and Cancel remain visible on ordinary screen sizes.
+
 Session controls open a native modal dialog with its own scroll area and fixed
 Close action. Escape closes it, focus stays inside while open, and returns to
 the opener on close. Model/goal controls, context and UUIDs, execution targets,
@@ -235,8 +247,10 @@ chunks and message components. Streamed deltas affect only their item; completio
 replaces that item's content. Resume snapshots merge without dropping older
 turns omitted after compaction. Preserve tool expansion, text selection and
 scroll position for unchanged messages. Keep the raw event log for diagnostics.
-This is incremental rendering, not virtualization: initial loading and retained
-browser history still scale with the full conversation.
+Initial loading shows a bounded page of recent items; Show older messages loads
+preceding pages without losing live updates. Pages target 512 KiB and 200 items,
+with oversized indivisible items preserved. Rendering is incremental, not virtualized:
+retained browser history grows as the user loads older pages.
 
 Conversation items use readable labels and show reported tool status, command
 exit codes and duration, affected file paths with collapsed diffs, searches,
@@ -248,16 +262,27 @@ indicators report Codex events, never infer success from silence or elapsed time
 
 ## Usage indicators
 
-The header usage summary shows weekly remaining quota reported by its Codex runtime
-account via `account/rateLimits/read`. The collapsed summary uses only windows explicitly
-reported as 10,080 minutes; it never guesses from primary/secondary position
-or substitutes a five-hour window. The Codex bucket comes first; additional
-weekly buckets remain separate in the expanded details. The expanded view also includes all other reported windows. Each uses a square,
-green meter of remaining capacity and a relative reset countdown; show Last updated
-at the bottom. Usage belongs to the account, so servers
-using one account can display the same quota. Reads are cached for 60 seconds,
-keyed by runtime connection and account. Errors and missing windows display
-unavailable, never zero. The UI shows the check time and handles disconnection.
+The header places Codex and Claude quota summaries side by side before Server
+Settings, showing a provider only when its account is connected. Each summary
+shows stacked 5h and weekly remaining-capacity meters with compact reset countdowns
+(e.g. `(3h5m)`); absent windows are omitted, including 5h on weekly-only plans.
+Square green meters show remaining capacity, not usage; percentage labels remain
+available to assistive technology and on hover. Expand for percentages, exact local
+reset times, update time and provider-specific details. Phone layouts keep provider
+graphs side by side and allow Server Settings to wrap.
+
+Codex reads `account/rateLimits/read`; durations must be explicitly reported as
+300 or 10,080 minutes, never inferred from primary/secondary position. The Codex
+bucket comes first, with other reported buckets and credits in expanded details.
+Claude reads `/api/oauth/usage` server-side using the existing OAuth account;
+`five_hour` and `seven_day` utilization are percentages used. Reads never start the
+Claude runtime or trigger inference. Its separate read cannot block native usage
+or transcript updates. Codex caches reads for 60 seconds and Claude for five minutes; Claude cache
+entries are scoped to account generation, including errors. Account changes discard
+in-flight results. Missing/invalid values and failures display unavailable, never
+zero; disconnection suppresses current meters. Claude reset strings are parsed as
+ISO timestamps, with invalid reset times visibly unknown. Quotas belong to accounts,
+so servers sharing an account may show the same usage.
 
 Each session shows context usage in its tree entry and fixed transcript toolbar.
 Controls provide the exact last-reported token count and model context window.
@@ -428,7 +453,10 @@ An operator-opened HTTP(S) popup exposes the full parsed URL with its hostname
 bold before navigation. Reject malformed/control characters and embedded
 credentials; explain normalization and Punycode. Unsupported schemes remain
 inert. Uploaded images render compact thumbnails in messages and above the composer, with
-tap-to-expand modals. Web images render inline buttons with a yellow warning triangle;
+tap-to-expand modals. Local Markdown images that are not recorded uploads open
+the message's captured file metadata and require Show file before loading bytes.
+Older messages without captured metadata remain explicitly unavailable.
+Web images render inline buttons with a yellow warning triangle;
 the modal shows the full URL and requires a separate Load image action before setting
 the image source. Closing discards consent. MathML and Mermaid supply no active destinations.
 Raw view/copy preserves exact source. Rendering never fetches web previews.
@@ -571,6 +599,7 @@ This section is informational and has no redemption action.
 The composer action row always includes the model picker. Selection shares the
 Session controls draft and requires Apply model; active sessions keep the picker
 visible but disabled. Load the catalogue when the selected session connects.
+Show the disabled Model unavailable placeholder only when no model is selected.
 
 `ui::Form` keeps each dialog's submit actions in a footer outside its scrollable
 fields. Independent sections in Session controls keep their own action rows.
@@ -679,3 +708,66 @@ saved conversation and tool text on the selected server, shows progress, support
 Stop, and labels failures/stopped scans incomplete. Typing clears previous full-text
 results; connection changes discard search state. Search results are a snapshot;
 repeat Full text search to refresh them. Never resume sessions or start model work.
+
+### Claude account
+
+Server settings shows Claude account directly after Codex account. Sign in opens
+Anthropic in a separate tab; the returned authorization code is pasted into a
+non-persistent password field. Show pending, connected and error states locally to
+the account group. Refresh models and Disconnect are explicit actions. A successful
+login does not interrupt sessions: show the guarded Restart Codex runtime action
+when its model catalogue needs updating. The action restarts only Claude’s
+runtime; native GPT sessions remain connected. Session model lists stay within
+their provider; changing provider requires a new session. No tokens or authorization codes belong in
+localStorage, conversation events or diagnostic output.
+
+## Voice input
+
+The composer offers an explicit Record voice action when the selected daemon has
+STT configured, with an English/German selector. Preparing, Recording and
+Transcribing states remain visible; Stop finalizes and Cancel discards. Recording
+is limited to three minutes and stops when the page is hidden. Audio remains
+local to the selected daemon/private STT worker; no browser speech-recognition
+service is used. Final text appends to the editable draft without submitting it.
+Sending is disabled while voice is active. Navigation/disconnection cancels the
+capture; generation and draft-key checks reject late results. Server settings
+shows configured/unconfigured status, not an unverified claim of backend health.
+
+Voice recordings are retained on the selected Demodex instance as private lossless
+FLAC plus metadata, including cancelled/failed received audio. Stop inserts a
+`<tts>` block into the draft; its content stays editable and is never auto-sent.
+The tag marks potentially unedited recognition for the model. The archived
+original transcription remains unchanged when the user edits the draft.
+
+Composer submission has a dedicated right-aligned row: a split microphone and
+EN/DE language selector immediately precedes Send. The icon becomes Stop during
+capture; preparation/transcription, Cancel and errors appear beneath the split
+control. Keep native select keyboard behavior, accessible icon labels and 42px
+touch targets. Secondary composer actions wrap separately below this row.
+
+A paperclip Attach file button sits immediately left of voice in the submission
+row. The picker accepts general files up to 32 MiB; supported images up to 32 MiB
+retain inline previews. Other files insert escaped filename links at the saved
+selection, preserving edits made while uploading. Uploading never submits a turn.
+
+## Plugin selection
+
+Server settings lists dynamically discovered installed plugins under Default plugins.
+The selection is copied to new sessions only. Session controls has its own checklist
+and a Use current server defaults action that edits the draft, followed by explicit
+Apply plugins. Changes apply to subsequent turns while idle; they do not reconnect
+or rewrite conversation history. Refresh is explicit, preserves unavailable saved IDs,
+and shows discovery failures. Globally disabled plugins are labelled as such; enabling
+one here does not install or globally enable it. No hardcoded plugin names or inventory.
+
+## Subagent limit
+
+New Session and Session controls offer Max concurrent subagents as a positive number
+input. Blank means Codex default; counts exclude the primary agent. Existing sessions
+apply explicitly while idle and reconnect with saved history. Keep these requirements
+visible alongside the control.
+
+Image viewed activities place a compact View image icon beside their status. Opening
+reads the image through the existing bounded file preview when exactly one recorded
+executor is available; multiple matches require an explicit choice. Missing historical
+metadata stays visible as unavailable. The path remains selectable below the heading.

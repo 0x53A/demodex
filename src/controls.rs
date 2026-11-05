@@ -211,6 +211,10 @@ impl Manager {
     ) -> Result<Value> {
         let live = self.runtime(id).await?;
         Self::require_idle(&live).await?;
+        let bound = self.store.prompt_record(&format!("provider/{id}"))?;
+        if let Some(provider) = bound.as_str() {
+            ensure!((provider == "claude") == choice.model.starts_with("claude-"), "Changing provider requires a new session; this conversation keeps its provider");
+        }
         let catalog = self.model_catalog(id).await?;
         let requested = validate_model(
             &choice,
@@ -261,11 +265,8 @@ impl Manager {
                 "Send a message to apply the selected targets before resuming the goal"
             );
         }
-        // Goal updates and pause are supported during a turn. Codex owns when
-        // the goal takes effect; never interrupt or submit a hidden model turn.
-        if !matches!(action.action.as_str(), "pause" | "save" | "start") {
-            Self::require_idle(&live).await?;
-        }
+        // Goal controls do not require idle. Codex owns when the goal takes
+        // effect; never interrupt or submit a hidden model turn.
         let result = live.rpc.call(method, params).await?;
         self.changed();
         Ok(result)
@@ -344,6 +345,57 @@ mod tests {
             &requested
         ));
     }
+    #[tokio::test]
+    async fn goal_controls_during_active_turn_preserve_target_activation_guard() -> Result<()> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("ws://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let result = match request["method"].as_str().unwrap() {
+                    "initialized" => continue,
+                    "initialize" => json!({}),
+                    "thread/resume" => json!({"thread":{"id":"thread","turns":[]}}),
+                    "thread/read" => json!({"thread":{"status":{"type":"active"}}}),
+                    "thread/goal/set" => json!({"goal":request["params"]}),
+                    "thread/goal/clear" => json!({}),
+                    method => panic!("unexpected RPC (must not start or interrupt a turn): {method}"),
+                };
+                ws.send(Message::Text(json!({"id":request["id"],"result":result}).to_string().into())).await.unwrap();
+            }
+        });
+        let manager = Manager::new(crate::store::Store::open(std::path::Path::new(":memory:"))?);
+        let session = manager.store.create("fixture", &endpoint, &[], Some("thread"))?;
+        manager.store.ensure_target_selection(&session.id)?;
+        manager.connect(&session.id).await?;
+        let live = manager.runtime(&session.id).await?;
+        *live.turn.lock().await = Some("running-turn".into());
+        let action = |name: &str| GoalAction { action:name.into(), objective:None, token_budget:None };
+        for name in ["resume", "complete", "clear"] {
+            manager.change_goal(&session.id, action(name)).await?;
+            assert_eq!(live.turn.lock().await.as_deref(), Some("running-turn"));
+        }
+        manager.store.stage_target_selection(&session.id, &[], &[])?;
+        assert!(manager.store.targets_pending(&session.id)?);
+        for name in ["resume", "start"] {
+            let mut input = action(name);
+            if name == "start" { input.objective = Some("New goal".into()); }
+            let error = manager.change_goal(&session.id, input).await.unwrap_err();
+            assert!(error.to_string().contains("apply the selected targets"));
+        }
+        for name in ["pause", "complete", "clear"] {
+            manager.change_goal(&session.id, action(name)).await?;
+        }
+        manager.disconnect(&session.id, "done").await?;
+        drop(live);
+        server.await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn model_update_needs_confirmation_from_its_own_thread() -> Result<()> {
         model_update_fixture("idle", false).await

@@ -533,21 +533,27 @@ sequenceDiagram
             page.get_by_role('dialog',name='Drawing',exact=True).get_by_role('button',name='Close',exact=True).click()
             # Ordinary file links use actual bytes, even without an image suffix.
             for ident, filename, payload in [('raster-file', 'picture.bin', png),
+                                               ('local-markdown-image', 'payment december.png', png),
                                                ('broken-raster', 'broken.png', b'\x89PNG\r\n\x1a\ninvalid')]:
                 raster = directory / filename
                 raster.write_bytes(payload)
-                codex.message(ident, f'[Linked image]({raster})')
+                codex.message(ident, f'![Linked image](<{raster}>)' if ident == 'local-markdown-image' else f'[Linked image]({raster})')
                 for _ in range(100):
                     snapshot = call(host, token, {'MessageFiles': {'id': created['id'], 'item': ident}})
                     if snapshot['files'] and snapshot['files'][0]['checks'][0]['state'] == 'found': break
                     time.sleep(.1)
-                page.locator(f'[data-item-id="{ident}"] .markdown-link').click()
+                raster_article = page.locator(f'[data-item-id="{ident}"]')
+                if ident == 'local-markdown-image':
+                    expect(raster_article.locator('.image-thumbnail')).to_have_count(0)
+                    raster_article.get_by_role('button', name='Preview Linked image', exact=True).click()
+                else:
+                    raster_article.locator('.markdown-link').click()
                 popup = page.get_by_role('dialog', name='Linked image', exact=True)
                 expect(popup.locator('img')).to_have_count(0)
                 popup.get_by_role('button', name='Show file', exact=True).click()
                 preview = page.get_by_role('dialog', name='File preview', exact=True)
                 expect(preview.locator('img')).to_have_attribute('src', 'data:image/png;base64,' + base64.b64encode(payload).decode())
-                if ident == 'raster-file':
+                if ident != 'broken-raster':
                     page.wait_for_function('()=>document.querySelector("dialog img.image-expanded")?.naturalWidth === 1')
                     expect(preview).not_to_contain_text('Binary file')
                     expect(preview).not_to_contain_text('Preview shortened')

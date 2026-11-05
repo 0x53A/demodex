@@ -1,3 +1,5 @@
+mod voice;
+mod claude_account;
 mod bug_reports;
 mod app;
 mod approval;
@@ -43,3 +45,5 @@ fn main() {
         yew::Renderer::<app::App>::with_root(root).render();
     });
 }
+
+mod plugin_settings;

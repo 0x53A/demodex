@@ -101,6 +101,14 @@ impl Component for SessionControls {
                 run.emit(Operation::SetContextWindow { id:id.clone(), window:if value.is_empty(){None}else{Some(value.parse().unwrap_or(0))} });
             })
         };
+        let subagent_value = field("max_subagents", &props.state["subagent_limit"]["limit"].as_u64().map(|n|n.to_string()).unwrap_or_default());
+        let subagent_submit = {
+            let run=props.onrun.clone(); let id=props.id.clone(); let value=subagent_value.clone();
+            Callback::from(move |event:SubmitEvent| {
+                event.prevent_default();
+                run.emit(Operation::SetSubagentLimit { id:id.clone(), limit:if value.is_empty(){None}else{Some(value.parse().unwrap_or(0))} });
+            })
+        };
         let objective = field("objective", text(goal, "objective"));
         let budget = field("budget", "");
         let model_disabled = props.disabled || props.working || models.is_empty();
@@ -207,6 +215,10 @@ impl Component for SessionControls {
                 <crate::context_window::ContextWindow value={context_value} bounds={context_bounds} disabled={model_disabled||props.targets_pending} onchange={context_change}/>
                 {if let Some(error)=props.models["context_window_error"].as_str(){html!{<p class="error" role="status">{error}</p>}}else{Html::default()}}
             </crate::ui::Form>
+            <crate::ui::Form onsubmit={subagent_submit} actions={html!{<button disabled={props.disabled||props.working||props.targets_pending}>{"Apply subagent limit"}</button>}}>
+                <label>{"Max concurrent subagents"}<input type="number" min="1" max="4294967295" placeholder="Codex default" value={subagent_value} disabled={props.disabled||props.working||props.targets_pending} oninput={props.onfield.reform(|e:InputEvent|("max_subagents".into(),e.target_unchecked_into::<web_sys::HtmlInputElement>().value()))}/></label>
+                <p class="muted">{"Excludes the main agent. Leave blank for the Codex default. Applying reconnects the idle session; saved conversation history is required."}</p>
+            </crate::ui::Form>
             <crate::ui::Group title="System prompt">
                 <p class="muted">{"Apply the latest server prompt settings by reconnecting this idle session. Pause goals and clear queued work first. Changing models also reconnects when prompt layers are active."}</p>
                 {if props.state["prompts"]["pending"]==true{html!{<p role="status" class="control-warning">{"New server prompt settings are available."}</p>}}else{Html::default()}}
@@ -221,13 +233,12 @@ impl Component for SessionControls {
                 <label>{"Goal objective"}<textarea disabled={goal_disabled} maxlength="4000" value={objective.clone()} oninput={objective_change}/></label>
                 <label>{"Token budget (optional)"}<crate::ui::Input kind="number" min="1" step="1" placeholder="Keep current budget" disabled={goal_disabled} value={budget.clone()} oninput={budget_change} aria_label="Token budget (optional)" rule={crate::ui::Rule::Text}/></label>
 
-                {if props.working{html!{<p class="muted control-warning" role="status">{"Session active — completing, clearing, or resuming an existing goal requires idle. You can set a new objective or pause the goal now."}</p>}}else{Html::default()}}
                 {if props.targets_pending{html!{<p class="muted control-warning" role="status">{"Send a message to apply the selected execution targets before resuming a goal."}</p>}}else{Html::default()}}
                 {if !goal.is_null(){html!{<div class="goal-actions">
                     {if text(goal,"status")=="active"{action("pause","Pause goal",goal_disabled)}else{Html::default()}}
-                    {if !matches!(text(goal,"status"),"active"|"complete"){action("resume","Start / resume goal",goal_disabled||props.targets_pending||props.working)}else{Html::default()}}
-                    {if !props.working && text(goal,"status")!="complete"{action("complete","Mark goal complete",goal_disabled)}else{Html::default()}}
-                    {if !props.working{action("clear","Clear goal",goal_disabled)}else{Html::default()}}
+                    {if !matches!(text(goal,"status"),"active"|"complete"){action("resume","Start / resume goal",goal_disabled||props.targets_pending)}else{Html::default()}}
+                    {if text(goal,"status")!="complete"{action("complete","Mark goal complete",goal_disabled)}else{Html::default()}}
+                    {action("clear","Clear goal",goal_disabled)}
                 </div>}}else{Html::default()}}
                 {if goal.is_object() && !objective.trim().is_empty() && objective.trim()!=text(goal,"objective").trim(){html!{<p class="muted control-warning" role="status">{"Replacing the objective resets goal usage accounting."}</p>}}else{Html::default()}}
             </crate::ui::Group></crate::ui::Form>

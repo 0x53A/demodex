@@ -183,7 +183,7 @@ with tempfile.TemporaryDirectory(prefix='demodex-targets-') as temporary:
                 page.reload()
                 expect(page.locator('.session-heading .status')).to_have_text('working')
                 expect(page.locator('.session-inbox')).to_contain_text('This turn keeps its current targets')
-                expect(page.get_by_role('button',name='Attach image',exact=True)).to_be_disabled()
+                expect(page.get_by_role('button',name='Attach file',exact=True)).to_be_disabled()
                 page.get_by_label('Message',exact=True).fill('Steer existing work')
                 page.get_by_role('button',name='Send',exact=True).click()
                 expect(page.get_by_label('Message',exact=True)).to_have_value('')

@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/client","crates/protocol", "crates/web"]
-default-members = ["."]
+members = ["crates/stt", "crates/client","crates/protocol", "crates/web"]
+default-members = ["crates/stt", "."]
 resolver = "2"
 
 [package]
@@ -35,9 +35,13 @@ tokio-util = { version = "0.7.19", features = ["rt"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 p256 = { version = "0.13", features = ["ecdsa"] }
 ece = "2.4"
+toml = "1.1.8"
+demodex-stt = { version = "0.1.0", path = "crates/stt" }
+flacenc = { version = "0.5.1", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1.1.5", features = ["process"] }
 
 [dev-dependencies]
+claxon = "0.4.3"
 tempfile = "3.27.0"

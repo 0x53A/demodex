@@ -242,6 +242,8 @@ pub enum Login {
 
 #[derive(Debug, WormholeTransmaterializable)]
 pub enum Api {
+    /// Ephemeral, connection-owned audio. Never enters durable mutation receipts.
+    Voice { command: VoiceCommand, reply: RpcReplyPort<Result<VoiceReply, String>> },
     Call {
         request_id: String,
         operation: Operation,
@@ -288,6 +290,8 @@ pub enum Operation {
     },
     Runtime,
     RuntimeModels,
+    PluginSettings { id: Option<String> },
+    SavePluginSettings { id: Option<String>, expected_revision: u64, expected_disabled: Vec<String>, disabled: Vec<String> },
     Conversation { id: String, older: Option<ConversationPageCursor> },
     SearchConversation { id: String, query: String, older: Option<ConversationPageCursor> },
     DefaultPrompt,
@@ -302,7 +306,14 @@ pub enum Operation {
     SetRuntimeFeature { name: String, enabled: Option<bool> },
     SetDefaultSandbox { sandbox: Option<Sandbox> },
     RestartRuntime,
+    RestartClaudeRuntime,
     Login,
+    ClaudeAccount,
+    ClaudeUsage,
+    BeginClaudeLogin,
+    RefreshClaudeModels,
+    CompleteClaudeLogin { login_id: String, code: String },
+    DisconnectClaudeAccount,
     SavedThreads {
         cursor: Option<String>,
         search: String,
@@ -345,6 +356,10 @@ pub enum Operation {
     Model {
         id: String,
         input: ModelChoice,
+    },
+    SetSubagentLimit {
+        id: String,
+        limit: Option<u32>,
     },
     SetContextWindow {
         id: String,
@@ -500,6 +515,7 @@ pub struct SelectedSession {
     pub include_project: Option<bool>,
     pub model: Option<ModelChoice>,
     pub context_window: Option<i64>,
+    pub max_subagents: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, WormholeTransmaterializable)]
@@ -641,3 +657,13 @@ pub struct MessageFile {
     pub checks: Vec<FileCheck>,
     pub note: Option<String>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize, WormholeTransmaterializable)]
+pub enum VoiceCommand {
+    Start { id: String, language: String, session: String },
+    Audio { id: String, sequence: u32, pcm: Vec<i16> },
+    Finish { id: String },
+    Cancel { id: String },
+}
+#[derive(Clone, Debug, Serialize, Deserialize, WormholeTransmaterializable)]
+pub enum VoiceReply { Ready { model: String }, Ack, Text(String) }

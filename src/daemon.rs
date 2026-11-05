@@ -10,6 +10,9 @@ use std::{
 
 #[derive(Parser)]
 struct Cli {
+    /// JSON file containing private STT SSH configuration.
+    #[arg(long, env = "DEMODEX_STT_CONFIG")]
+    stt_config: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
     #[arg(long, default_value = "127.0.0.1:4780")]
@@ -110,6 +113,7 @@ pub async fn run() -> Result<()> {
         None => {}
     }
     let runtime = crate::Runtime::start(crate::Config {
+        stt: cli.stt_config.map(|path| -> Result<crate::voice::Config> { Ok(serde_json::from_slice(&std::fs::read(path)?)?) }).transpose()?,
         data_dir: cli.data_dir.clone(),
         vm_image: cli.vm_image,
         host_workspace: cli.host_workspace,

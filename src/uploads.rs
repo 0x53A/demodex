@@ -6,7 +6,7 @@ use std::{
     path::Path,
 };
 
-pub const MAX_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_BYTES: usize = MAX_FILE_BYTES;
 
 // Matches the bounded whole-file SFTP transport. Files are never decoded or resized.
 pub const MAX_FILE_BYTES: usize = 32 * 1024 * 1024;
@@ -58,7 +58,7 @@ pub fn save_file(root: &Path, bytes: &[u8], name: &str) -> Result<String> {
 pub fn extension(bytes: &[u8]) -> Result<&'static str> {
     ensure!(
         !bytes.is_empty() && bytes.len() <= MAX_BYTES,
-        "Images must be between 1 byte and 4 MiB"
+        "Images must be between 1 byte and 32 MiB"
     );
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Ok("png");
@@ -105,7 +105,11 @@ mod tests {
         assert_eq!(extension(png)?, "png");
         assert!(extension(b"<svg></svg>").is_err());
         assert!(extension(&[]).is_err());
-        assert!(extension(&vec![0; MAX_BYTES + 1]).is_err());
+        let mut largest = vec![0; MAX_BYTES];
+        largest[..png.len()].copy_from_slice(png);
+        assert_eq!(extension(&largest)?, "png");
+        largest.push(0);
+        assert!(extension(&largest).is_err());
         let root = tempfile::tempdir()?;
         let first = save(root.path(), png, extension(png)?)?;
         let second = save(root.path(), png, extension(png)?)?;

@@ -1,0 +1,22 @@
+[package]
+name = "demodex-stt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["full"] }
+transcribe-cpp = { version = "0.4.1", default-features = false, optional = true }
+
+[features]
+engine = ["dep:transcribe-cpp"]
+vulkan = ["engine", "transcribe-cpp/vulkan"]
+rocm = ["engine", "transcribe-cpp/rocm"]
+
+[[bin]]
+name = "demodex-stt"
+path = "src/main.rs"
+required-features = ["engine"]

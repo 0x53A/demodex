@@ -160,10 +160,20 @@ async fn connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     let api_authenticated = authenticated.clone();
     let (notify_tx, mut notify_rx) = tokio::sync::watch::channel(None::<ractor::ActorRef<Notice>>);
     let call_app = app.clone();
+    let mut voice = crate::voice::Connection::default();
     let permits = Arc::new(tokio::sync::Semaphore::new(16));
     let (api, _) = FnActor::<Api>::start_fn(async move |mut ctx| {
         while let Some(message) = ctx.rx.recv().await {
             match message {
+                Api::Voice { command, reply } => {
+                    if !api_authenticated.load(Ordering::Acquire) {
+                        let _ = reply.send(Err("Authentication required".into()));
+                    } else if let demodex_protocol::VoiceCommand::Start { session, .. } = &command
+                        && let Err(error) = call_app.manager.store.get(session)
+                    {
+                        let _ = reply.send(Err(format!("Invalid recording session: {error}")));
+                    } else { voice.command(call_app.voice.clone(), command, reply); }
+                }
                 Api::Call {
                     request_id,
                     operation,
@@ -269,6 +279,7 @@ mod tests {
             std::path::Path::new(":memory:"),
         )?);
         Ok(App {
+            voice: std::sync::Arc::new(crate::voice::Relay::new(None, std::path::Path::new("/unused"))?),
             orchestrator: crate::orchestrator::Orchestrator::new(
                 manager.clone(),
                 "/unused".into(),

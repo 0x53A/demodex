@@ -50,17 +50,19 @@ impl Notices {
 pub enum Resource {
     Sessions,
     Runtime,
+    ClaudeUsage,
     Environments,
     Targets,
     ProjectGit,
     Detail,
     Events,
 }
-pub const RESOURCES: [Resource; 7] = [
+pub const RESOURCES: [Resource; 8] = [
     Resource::Events,
     Resource::Detail,
     Resource::Sessions,
     Resource::Runtime,
+    Resource::ClaudeUsage,
     Resource::Environments,
     Resource::Targets,
     Resource::ProjectGit,
@@ -78,7 +80,7 @@ struct Slot {
 }
 #[derive(Default)]
 pub struct Reads {
-    slots: [Slot; 7],
+    slots: [Slot; 8],
     serial: u64,
 }
 impl Reads {

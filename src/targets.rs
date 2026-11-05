@@ -167,6 +167,28 @@ impl Store {
             .unwrap_or(false))
     }
 
+    /// A resume/read can confirm a replacement executor without a user turn.
+    /// Staged selections always retain their explicit turn/start boundary.
+    pub(crate) fn reconcile_target_snapshot(&self, id: &str, thread: &serde_json::Value) -> Result<bool> {
+        let session = self.get(id)?;
+        if session.thread_id.is_none() || thread["id"].as_str() != session.thread_id.as_deref() {
+            return Ok(false);
+        }
+        let Some(environments) = thread["environments"].as_array() else { return Ok(false) };
+        // Codex reports its built-in local environment alongside registered
+        // executors. It is not a Demodex selection.
+        let environments: Vec<_> = environments.iter()
+            .filter(|env| env["environmentId"] != "local").collect();
+        if environments.len() != session.targets.len() || !environments.iter().zip(&session.targets)
+            .all(|(env, target)| env["environmentId"] == target.id && env["cwd"] == target.cwd) {
+            return Ok(false);
+        }
+        Ok(self.lock()?.execute(
+            "UPDATE session_targets SET pending=0 WHERE session_id=?1 AND pending=1 AND NOT EXISTS(SELECT 1 FROM staged_session_targets WHERE session_id=?1) AND EXISTS(SELECT 1 FROM sessions WHERE id=?1 AND targets=?2)",
+            params![id, serde_json::to_string(&session.targets)?],
+        )? != 0)
+    }
+
     pub fn staged_targets(&self, id: &str) -> Result<Option<Vec<Target>>> {
         let value: Option<String> = self
             .lock()?
@@ -361,6 +383,38 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
+    #[test]
+    fn target_snapshot_reconciliation_requires_exact_unstaged_selection() -> Result<()> {
+        let store = Store::open(std::path::Path::new(":memory:"))?;
+        let targets = vec![Target { id: "host-current".into(), url: "ws://127.0.0.1:1234".into(), cwd: "/project".into() }];
+        let selection = vec![Selection { id: "host".into(), cwd: "/project".into() }];
+        let session = store.create("goal", "ws://127.0.0.1:1235", &targets, Some("thread"))?;
+        store.save_target_selection(&session.id, &selection, &targets)?;
+        let confirmed = json!({"id":"thread","environments":[
+            {"environmentId":"local","cwd":"/project"},
+            {"environmentId":"host-current","cwd":"/project"}
+        ]});
+        for snapshot in [
+            json!({"id":"thread"}),
+            json!({"id":"other","environments":confirmed["environments"]}),
+            json!({"id":"thread","environments":[]}),
+            json!({"id":"thread","environments":[{"environmentId":"host-old","cwd":"/project"}]}),
+            json!({"id":"thread","environments":[{"environmentId":"host-current","cwd":"/other"}]}),
+            json!({"id":"thread","environments":[{"environmentId":"host-current","cwd":"/project"},{"environmentId":"extra","cwd":"/project"}]}),
+        ] {
+            assert!(!store.reconcile_target_snapshot(&session.id, &snapshot)?);
+            assert!(store.targets_pending(&session.id)?);
+        }
+        assert!(store.reconcile_target_snapshot(&session.id, &confirmed)?);
+        assert!(!store.targets_pending(&session.id)?);
+        // Even a staged no-op requires the explicit application boundary.
+        store.stage_target_selection(&session.id, &selection, &targets)?;
+        assert!(!store.reconcile_target_snapshot(&session.id, &confirmed)?);
+        assert!(store.targets_pending(&session.id)?);
+        assert_eq!(store.staged_targets(&session.id)?, Some(targets));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn unchanged_reconnect_preserves_pending_state() -> Result<()> {
         use futures_util::{SinkExt, StreamExt};
@@ -368,7 +422,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let endpoint = format!("ws://{}", listener.local_addr()?);
         let server = tokio::spawn(async move {
-            for _ in 0..2 {
+            for attempt in 0..3 {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
                 while let Some(Ok(Message::Text(raw))) = ws.next().await {
@@ -376,7 +430,12 @@ mod tests {
                     if req.get("id").is_none() { continue; }
                     let result = match req["method"].as_str().unwrap() {
                         "initialize" => json!({}),
-                        "thread/resume" => json!({"thread":{"id":"thread","turns":[{"id":"active","status":"inProgress","items":[]}]}}),
+                        "thread/resume" => {
+                            let mut result = json!({"thread":{"id":"thread","turns":[{"id":"active","status":"inProgress","items":[]}]}});
+                            if attempt == 2 { result["thread"]["environments"] = json!([]); }
+                            result
+                        },
+                        "thread/read" => json!({"thread":{"id":"thread","environments":[]}}),
                         "turn/steer" => json!({"turnId":"active"}),
                         other => panic!("unexpected {other}"),
                     };
@@ -400,6 +459,14 @@ mod tests {
         manager.store.save_target_selection(&session.id, &[], &[])?;
         orchestrator.connect_session(&session.id).await?;
         assert!(manager.store.targets_pending(&session.id)?);
+        // A read confirms the selection while the autonomous turn stays active.
+        manager.reconcile_pending_targets(&session.id).await?;
+        assert!(!manager.store.targets_pending(&session.id)?);
+        assert_eq!(manager.runtime(&session.id).await?.turn.lock().await.as_deref(), Some("active"));
+        manager.disconnect(&session.id, "confirmed reconnect").await?;
+        manager.store.save_target_selection(&session.id, &[], &[])?;
+        orchestrator.connect_session(&session.id).await?;
+        assert!(!manager.store.targets_pending(&session.id)?);
         server.abort();
         Ok(())
     }

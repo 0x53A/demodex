@@ -49,6 +49,8 @@ pub struct Props {
     pub item: String,
     pub revision: u64,
     pub onclose: Callback<()>,
+    #[prop_or_default]
+    pub preview_on_open: bool,
 }
 
 #[function_component(LinkPopup)]
@@ -68,7 +70,7 @@ pub fn popup(props: &Props) -> Html {
                     {if url != &props.link.destination {html!{<p>{"Original destination:"}<br/><span class="link-destination">{&props.link.destination}</span></p>}}else{Html::default()}}
                 </div>}
             }
-            LinkDestination::File { .. } => html!{<FilePopup destination={props.link.destination.clone()} item={props.item.clone()} revision={props.revision}/>},
+            LinkDestination::File { .. } => html!{<FilePopup destination={props.link.destination.clone()} item={props.item.clone()} revision={props.revision} preview_on_open={props.preview_on_open}/>},
             LinkDestination::Unsupported { reason } => html!{<><p class="link-warning">{reason}</p><pre class="link-destination">{&props.link.destination}</pre></>},
         }}
     </crate::modal::Modal>}
@@ -76,6 +78,7 @@ pub fn popup(props: &Props) -> Html {
 
 #[derive(Properties, PartialEq)]
 struct FileProps {
+    pub preview_on_open: bool,
     destination: String,
     item: String,
     revision: u64,
@@ -98,6 +101,7 @@ enum Msg {
     Tick,
 }
 struct FilePopup {
+    preview_requested: bool,
     context: LinkContext,
     _subscription: Option<ContextHandle<LinkContext>>,
     _clock: gloo::timers::callback::Interval,
@@ -116,7 +120,7 @@ struct FilePopup {
 
 fn date(ms: &Value) -> String {
     ms.as_f64()
-        .filter(|n| n.is_finite())
+        .filter(|n| n.is_finite() && *n > 0.0) // 0 = unavailable (Codex fs metadata sentinel)
         .map(|n| {
             js_sys::Date::new(&JsValue::from_f64(n))
                 .to_string()
@@ -165,6 +169,7 @@ impl Component for FilePopup {
         ctx.link().send_message(Msg::Refresh);
         Self {
             context,
+            preview_requested: ctx.props().preview_on_open,
             _subscription: subscription,
             _clock: gloo::timers::callback::Interval::new(1000, move || {
                 link.send_message(Msg::Tick)
@@ -183,7 +188,7 @@ impl Component for FilePopup {
         }
     }
     fn changed(&mut self, ctx: &Context<Self>, old: &FileProps) -> bool {
-        if old.item != ctx.props().item || old.destination != ctx.props().destination { self.pairing = None; }
+        if old.item != ctx.props().item || old.destination != ctx.props().destination { self.pairing = None; self.preview_requested = false; }
         ctx.link().send_message(Msg::Refresh);
         true
     }
@@ -191,6 +196,7 @@ impl Component for FilePopup {
         match msg {
             Msg::Tick => {}
             Msg::Context(value) => {
+                self.preview_requested = false;
                 let changed_client = match (&value.client, &self.context.client) {
                     (Some(a), Some(b)) => !Rc::ptr_eq(a,b),
                     (None, None) => false,
@@ -286,7 +292,20 @@ impl Component for FilePopup {
                 }
                 self.loading = false;
                 match result {
-                    Ok(value) => self.files = value,
+                    Ok(value) => {
+                        self.files = value;
+                        if self.preview_requested {
+                            self.preview_requested = false;
+                            let matches = array(&self.files["files"]).iter()
+                                .find(|f| f["destination"] == ctx.props().destination)
+                                .map(|f| array(&f["checks"])).unwrap_or_default();
+                            // Never guess between multiple recorded executors.
+                            if matches.len() == 1 && matches[0]["available"] == true
+                                && matches[0]["metadata"]["isFile"] == true && matches[0]["state"] == "found" {
+                                ctx.link().send_message(Msg::Read(text(&matches[0], "executor").to_owned(), true));
+                            }
+                        }
+                    },
                     Err(error) => self.error = error,
                 }
             }

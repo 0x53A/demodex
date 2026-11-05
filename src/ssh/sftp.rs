@@ -63,7 +63,8 @@ impl Packet {
             }
         }
         Ok(
-            json!({"isDirectory":mode&0o170000==0o040000,"isFile":mode&0o170000==0o100000,"isSymlink":mode&0o170000==0o120000,"size":size.unwrap_or(0),"createdAtMs":null,"modifiedAtMs":modified}),
+            // Codex requires integer times; 0 means "not available". SFTP v3 has no birth time.
+            json!({"isDirectory":mode&0o170000==0o040000,"isFile":mode&0o170000==0o100000,"isSymlink":mode&0o170000==0o120000,"size":size.unwrap_or(0),"createdAtMs":0,"modifiedAtMs":modified.unwrap_or(0)}),
         )
     }
 }
@@ -385,6 +386,26 @@ mod tests {
             at: 0,
         };
         assert!(packet.attrs().is_err());
+        Ok(())
+    }
+    #[test]
+    fn attrs_use_zero_for_unavailable_times() -> Result<()> {
+        // flags: size | permissions | acmodtime
+        let mut bytes = 13u32.to_be_bytes().to_vec();
+        bytes.extend(5u64.to_be_bytes());
+        bytes.extend(0o100644u32.to_be_bytes());
+        bytes.extend(1u32.to_be_bytes());
+        bytes.extend(2u32.to_be_bytes());
+        let meta = Packet { bytes, at: 0 }.attrs()?;
+        assert_eq!(meta["createdAtMs"], 0);
+        assert_eq!(meta["modifiedAtMs"], 2000);
+        assert_eq!(meta["isFile"], true);
+        // flags: size only, so no mtime
+        let mut bytes = 1u32.to_be_bytes().to_vec();
+        bytes.extend(5u64.to_be_bytes());
+        let meta = Packet { bytes, at: 0 }.attrs()?;
+        assert_eq!(meta["createdAtMs"], 0);
+        assert_eq!(meta["modifiedAtMs"], 0);
         Ok(())
     }
 }

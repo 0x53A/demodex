@@ -179,7 +179,7 @@ Subsystem sftp internal-sftp
                 prompt=page.get_by_label('Message',exact=True)
                 png=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
                 with page.expect_file_chooser() as chooser:
-                    page.get_by_role('button',name='Attach image',exact=True).click()
+                    page.get_by_role('button',name='Attach file',exact=True).click()
                 chooser.value.set_files({'name':'capture.png','mimeType':'image/png','buffer':png})
                 expect(prompt).to_have_value(re.compile(r'.*/\.demodex-upload-[^/]+/image\.png.*'),timeout=30000)
                 image_path=Path(prompt.input_value().split('](<')[1].split('>)')[0])

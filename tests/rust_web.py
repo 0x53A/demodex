@@ -336,6 +336,26 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             expect(page.get_by_role('button',name='+ External',exact=True)).to_have_count(0)
             page.get_by_role('button', name='Server settings', exact=True).click()
             settings = page.get_by_role('dialog', name='Server settings', exact=True)
+            claude = settings.locator('.account-status').filter(has=page.get_by_role('heading', name='Claude account', exact=True))
+            expect(claude.get_by_role('button', name='Sign in with Claude', exact=True)).to_be_visible()
+            claude.get_by_role('button', name='Sign in with Claude', exact=True).click()
+            auth_link = claude.get_by_role('link', name='Continue sign-in in your browser', exact=True)
+            expect(auth_link).to_have_attribute('href', __import__('re').compile(r'^https://claude\.ai/oauth/authorize\?'))
+            code_field = claude.get_by_label('Authorization code', exact=True)
+            expect(code_field).to_have_attribute('type', 'password')
+            code_field.fill('private-test-code#wrong-state')
+            claude.get_by_role('button', name='Connect account', exact=True).click()
+            expect(claude.get_by_role('alert')).to_contain_text('state does not match')
+            expect(code_field).to_have_value('')
+            assert 'private-test-code' not in page.evaluate('JSON.stringify(localStorage)')
+            with sqlite3.connect(directory / 'state/state.sqlite') as db:
+                dump = '\n'.join(db.iterdump())
+                assert 'private-test-code' not in dump
+                assert 'code_sha256' in dump
+            if os.environ.get('DEMODEX_CLAUDE_ONLY') == '1':
+                print('PASS: Claude login UI, invalid-state rejection and code redaction')
+                browser.close()
+                raise SystemExit(0)
             default_sandbox = settings.get_by_label('Default sandbox', exact=True)
             expect(default_sandbox).to_have_value('')
             default_sandbox.select_option('workspace-write')
@@ -466,7 +486,7 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             expect(page.locator('.conversation article time.message-time').first).not_to_contain_text('Imported')
             assert page.locator('.conversation article time.message-time').first.get_attribute('datetime').endswith('Z')
 
-            expect(page.locator('.weekly-usage summary')).to_have_text('Weekly: unavailable')
+            expect(page.locator('.codex-usage')).to_have_count(0)
             expect(page.locator('.composer .context-usage')).to_have_text('Context unavailable')
             def usage_report(tokens,window=200000,thread='thread'):
                 codex.send('thread/tokenUsage/updated',{'threadId':thread,'turnId':'turn','tokenUsage':{'last':{'totalTokens':tokens,'inputTokens':max(0,tokens-1679),'cachedInputTokens':max(0,tokens-4000)},'total':{'totalTokens':900000},'modelContextWindow':window}})
@@ -707,7 +727,7 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             try:
                 page.get_by_role('button', name='Close session view', exact=True).click()
                 page.locator('.session').filter(has_text='Wormhole fixture').click()
-                expect(page.locator('.transcript')).to_contain_text('Fixture transcript line 0', timeout=1000)
+                expect(page.locator('.transcript')).to_contain_text('Long transcript message 399', timeout=1000)
                 expect(page.get_by_text('Loading conversation…', exact=True)).to_have_count(0)
                 expect(page.get_by_label('Message', exact=True)).to_have_value('unsent draft')
             finally:
@@ -717,12 +737,12 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
                     delete window.heldSocketSends;
                 }""")
             # Navigation invalidates the deliberately delayed reads and catches
-            # up from the cached cursor without losing the conversation prefix.
+            # up from the cached cursor without losing the loaded recent page.
             page.get_by_role('button', name='Close session view', exact=True).click()
             page.locator('.session').filter(has_text='Wormhole fixture').click()
             # Hold a detail snapshot across history navigation. Its late reply
             # must not interfere with incremental transcript updates.
-            expect(page.locator('.transcript')).to_contain_text('Fixture transcript line 0')
+            expect(page.locator('.transcript')).to_contain_text('Long transcript message 399')
             seen, release = threading.Event(), threading.Event()
             codex.snapshot_gate = (seen, release)
             page.evaluate("window.dispatchEvent(new Event('online'))")
@@ -744,11 +764,11 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
                     raise AssertionError('navigation tail event was not persisted')
                 page.get_by_role("button", name="Connections", exact=True).click()
                 page.go_back()
-                expect(page.locator('.transcript')).to_contain_text('Fixture transcript line 0', timeout=3000)
+                expect(page.locator('.transcript')).to_contain_text('Long transcript message 399', timeout=3000)
                 expect(page.get_by_label('Message', exact=True)).to_have_value('unsent draft')
             finally:
                 release.set()
-            expect(page.locator('.transcript')).to_contain_text('Fixture transcript line 0', timeout=20000)
+            expect(page.locator('.transcript')).to_contain_text('Long transcript message 399', timeout=20000)
             expect(page.locator('.transcript')).to_contain_text('Message arriving during navigation')
             history_length = page.evaluate("history.length")
             assert token not in page.evaluate("JSON.stringify(history.state)")
@@ -1021,9 +1041,18 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             controls.get_by_role('button',name='Save paused',exact=True).click()
             expect(controls.locator('.goal-status')).to_have_text('Goal: paused')
             assert codex.goal['objective']=='Replace during active work'
-            codex.send('turn/completed',{'turn':{'id':'turn'}})
+            goal_before_resume = dict(codex.goal)
+            calls_before_resume = len(codex.calls)
+            controls.get_by_role('button',name='Start / resume goal',exact=True).click()
+            expect(controls.locator('.goal-status')).to_have_text('Goal: active')
+            assert codex.goal == goal_before_resume | {'status':'active'}
+            controls.get_by_role('button',name='Mark goal complete',exact=True).click()
+            expect(controls.locator('.goal-status')).to_have_text('Goal: complete')
             controls.get_by_role('button',name='Clear goal',exact=True).click()
             expect(controls.locator('.goal-status')).to_have_text('No goal set')
+            expect(controls.get_by_role('button',name='Apply model',exact=True)).to_be_disabled()
+            assert not any(c.get('method') in ('turn/start','turn/interrupt') for c in codex.calls[calls_before_resume:])
+            codex.send('turn/completed',{'turn':{'id':'turn'}})
             page.get_by_role('dialog',name='Session controls',exact=True).get_by_role('button',name='Close',exact=True).click()
             page.get_by_label('Message',exact=True).fill('/goal Another explicit objective')
             page.get_by_role('button',name='Send',exact=True).click()
@@ -1238,12 +1267,17 @@ with tempfile.TemporaryDirectory(prefix="demodex-rust-web-") as temporary:
             anchor_id = anchor.get_attribute('data-item-id')
             anchor_y = anchor.bounding_box()['y']
             older.click()
+            expect(page.get_by_role('button', name='Loading older messages…', exact=True)).to_have_count(0, timeout=30000)
+            assert abs(page.locator(f'[data-item-id="{anchor_id}"]').bounding_box()['y'] - anchor_y) < 3
+            # Further clicks intentionally scroll back to the older-page control.
+            while older.count():
+                older.click()
+                expect(page.get_by_role('button', name='Loading older messages…', exact=True)).to_have_count(0, timeout=30000)
             expect(page.locator('[data-item-id="page-marker-0"]')).to_have_count(1,timeout=30000)
             expect(older).to_have_count(0)
-            assert abs(page.locator(f'[data-item-id="{anchor_id}"]').bounding_box()['y'] - anchor_y) < 3
             assert page.locator('[data-item-id^="page-marker-"]').count() == 15
             expect(page.get_by_role('button',name='Jump to latest',exact=True)).to_be_enabled()
-            print('CHECK: newest 10 MiB history page, older page, stable scroll and no duplicate messages',flush=True)
+            print('CHECK: bounded newest history page, all older pages, stable scroll and no duplicate messages',flush=True)
             assert not rest_requests, rest_requests
             assert not errors, errors
             browser.close()

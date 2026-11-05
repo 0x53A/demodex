@@ -59,7 +59,16 @@ impl crate::orchestrator::Orchestrator {
         } else {
             self.host_workspace.as_ref().map(|p|p.to_string_lossy().into_owned())
         };
-        self.context_catalog_for_cwd(cwd).await
+        let mut catalog = self.context_catalog_for_cwd(cwd).await?;
+        if let Some(id) = id {
+            let claude = self.session_uses_claude(id)?;
+            if let Some(rows) = catalog["data"].as_array_mut() { rows.retain(|r| r["model"].as_str().is_some_and(|m|m.starts_with("claude-")) == claude); }
+            if claude {
+                let settings = self.manager.store.model_settings(id)?;
+                catalog["defaults"]["model"] = settings["selection"]["model"].as_str().or_else(||settings["effective"]["model"].as_str()).map(|m|json!(m)).unwrap_or(Value::Null);
+            }
+        }
+        Ok(catalog)
     }
 
     pub(crate) async fn context_catalog_for_cwd(&self, cwd: Option<String>) -> Result<Value> {
@@ -71,6 +80,7 @@ impl crate::orchestrator::Orchestrator {
                 enrich(&mut catalog, &self.prompt_profile(), &config["config"]).await
         }.await;
         if let Err(error) = result { catalog["context_window_error"] = json!(format!("{error:#}")); }
+        if let Some(claude)=self.manager.claude.get() { claude.add_models(&mut catalog).await; }
         Ok(catalog)
     }
 

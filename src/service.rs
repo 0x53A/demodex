@@ -41,7 +41,7 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
             let manager = app.manager.clone();
             return tokio::task::spawn_blocking(move || {
                 manager.store.get(&id)?;
-                let page = manager.store.conversation_page(&id, older.as_ref())?;
+                let page = manager.store.conversation_search_page(&id, older.as_ref())?;
                 let query = query.trim().to_lowercase();
                 let matched = page.items.iter().any(|item| demodex_protocol::transcript::search_text(item, &query));
                 Ok(Response::ConversationSearch { matched, older: if matched { None } else { page.older } })
@@ -51,6 +51,8 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         RuntimeModels => {
             app.orchestrator.context_model_catalog(None).await?
         }
+        PluginSettings { id } => app.orchestrator.plugin_settings(id.as_deref()).await?,
+        SavePluginSettings { id, expected_revision, expected_disabled, disabled } => app.orchestrator.save_plugin_settings(id.as_deref(), expected_revision, &expected_disabled, &disabled).await?,
         PromptSettings => app.orchestrator.prompt_settings_view().await?,
         SavePromptSettings { expected_revision, settings } => {
             let revision=app.manager.store.set_prompt_settings(expected_revision,&settings)?;
@@ -62,7 +64,7 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         ApplySessionPromptSettings { id, include_project } => app.orchestrator.apply_session_prompt(&id,include_project).await?,
         DefaultPrompt => app.orchestrator.default_prompt().await?,
         CreateSessionWithPrompt { input, prompt } => {
-            return Ok(Response::Session(app.orchestrator.selected_session(&input.name, &input.targets, input.sandbox, Some(&prompt), input.include_project, input.model.as_ref(), input.context_window).await?));
+            return Ok(Response::Session(app.orchestrator.selected_session(&input.name, &input.targets, input.sandbox, Some(&prompt), input.include_project, input.model.as_ref(), input.context_window, input.max_subagents).await?));
         }
         HostSessionWithPrompt { input, prompt } => {
             ensure!(input.thread_id.is_none(), "Prompt overrides require a new thread");
@@ -75,7 +77,14 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
             json!({"ok":true})
         }
         RestartRuntime => app.orchestrator.restart_runtime().await?,
+        RestartClaudeRuntime => app.orchestrator.restart_claude_runtime().await?,
         Login => runtime_login(app).await?,
+        ClaudeUsage => app.manager.claude.get().context("Claude provider unavailable")?.usage().await,
+        ClaudeAccount => app.manager.claude.get().context("Claude provider unavailable")?.status().await,
+        RefreshClaudeModels => app.manager.claude.get().context("Claude provider unavailable")?.refresh_models().await?,
+        BeginClaudeLogin => app.manager.claude.get().context("Claude provider unavailable")?.begin().await?,
+        CompleteClaudeLogin { login_id, code } => app.manager.claude.get().context("Claude provider unavailable")?.complete(&login_id, &code).await?,
+        DisconnectClaudeAccount => app.manager.claude.get().context("Claude provider unavailable")?.disconnect().await?,
         SavedThreads { cursor, search } => app.orchestrator.saved_threads(cursor, search).await?,
         CreateSession { input } => {
             return Ok(Response::Session(selected_session(app, input).await?));
@@ -107,6 +116,7 @@ pub(crate) async fn dispatch(app: &App, operation: Operation) -> Result<Response
         Sandbox { id, input } => change_sandbox(app, id, input).await?,
         Models { id } => models(app, id).await?,
         Model { id, input } => change_model(app, id, input).await?,
+        SetSubagentLimit { id, limit } => app.orchestrator.set_subagent_limit(&id, limit).await?,
         SetContextWindow { id, window } => app.orchestrator.set_context_window(&id, window).await?,
         Goal { id, input } => change_goal(app, id, input).await?,
         Prompt { id, text } => app.manager.prompt(&id, &text).await?,
@@ -225,7 +235,10 @@ pub async fn execute(app: &App, request_id: &str, operation: Operation) -> Resul
         "a UUID request ID is required for commands"
     );
     // Receipts retain identity and a content digest, not a second copy of every image.
-    let encoded = if let Operation::UploadImage { id, bytes } = &operation {
+    let encoded = if let Operation::CompleteClaudeLogin { login_id, code } = &operation {
+        use sha2::{Digest, Sha256};
+        json!({"CompleteClaudeLogin":{"login_id":login_id,"code_sha256":Sha256::digest(code.as_bytes()).iter().map(|b|format!("{b:02x}")).collect::<String>()}}).to_string()
+    } else if let Operation::UploadImage { id, bytes } = &operation {
         use sha2::{Digest, Sha256};
         crate::uploads::extension(bytes)?;
         json!({"UploadImage":{"id":id,"sha256":Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect::<String>()}}).to_string()
@@ -307,6 +320,7 @@ mod tests {
     async fn conversation_search_reads_saved_history_without_runtime() -> Result<()> {
         let root = tempfile::tempdir()?;
         let service = crate::Service::open(crate::Config {
+            stt: None,
             data_dir: root.path().join("state"), host_workspace: None,
             codex_home: None, vm_image: None,
         })?;
@@ -335,6 +349,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         let open = || {
             crate::Service::open(crate::Config {
+            stt: None,
                 data_dir: root.path().join("state"),
                 host_workspace: None,
                 codex_home: None,
@@ -413,6 +428,10 @@ async fn create(app: &App, input: NewSession) -> Result<store::Session> {
 }
 async fn detail(app: &App, id: String) -> Result<SessionDetail> {
     app.manager.store.ensure_target_selection(&id)?;
+    // Failure to verify leaves the warning intact without hiding session detail.
+    if let Err(error) = app.manager.reconcile_pending_targets(&id).await {
+        tracing::debug!(session=%id, %error, "could not reconcile pending targets");
+    }
     let session = app.manager.store.get(&id)?;
     let (queued, queue_error) = match app.manager.queued(&id).await {
         Ok(queued) => (queued, Value::Null),
@@ -420,6 +439,7 @@ async fn detail(app: &App, id: String) -> Result<SessionDetail> {
     };
     let mut controls = app.manager.control_snapshot(&id).await?;
     controls["prompts"]=app.orchestrator.session_prompt_view(&id)?;
+    controls["subagent_limit"]=app.manager.store.prompt_record(&format!("subagent-limit/{id}"))?;
     controls["context_window"]=app.manager.store.prompt_record(&format!("context/{id}"))?;
     controls["takeover"]=app.orchestrator.takeover_view(&session).await;
     let background = app.manager.background_snapshot(&id).await;
@@ -498,6 +518,7 @@ async fn change_goal(app: &App, id: String, input: controls::GoalAction) -> Resu
 async fn runtime_status(app: &App) -> Result<Value> {
     use futures_util::StreamExt;
     let mut status = app.orchestrator.runtime_status().await?;
+    status["voice"] = json!({"configured":app.voice.configured()});
     status["bug_reports"] = crate::bug_reports::summary(&app.manager.store)?;
     status["default_sandbox"] = json!(app.manager.store.default_sandbox()?);
     let (revision,prompts)=app.manager.store.prompt_settings()?;
@@ -545,7 +566,7 @@ async fn runtime_login(app: &App) -> Result<Value> {
 
 async fn selected_session(app: &App, input: SelectedSession) -> Result<store::Session> {
     app.orchestrator
-        .selected_session(&input.name, &input.targets, input.sandbox, None, input.include_project, input.model.as_ref(), input.context_window)
+        .selected_session(&input.name, &input.targets, input.sandbox, None, input.include_project, input.model.as_ref(), input.context_window, input.max_subagents)
         .await
 }
 

@@ -24,6 +24,7 @@ pub struct Live {
 }
 
 pub struct Manager {
+    pub(crate) claude: std::sync::OnceLock<Arc<crate::claude::Claude>>,
     pub store: Store,
     pub(crate) project_git: crate::project_git::Cache,
     pub(crate) file_slots: tokio::sync::Semaphore,
@@ -35,12 +36,14 @@ pub struct Manager {
     pub updates: broadcast::Sender<()>,
     pub(crate) notices: broadcast::Sender<demodex_protocol::Notice>,
     settings_updates: broadcast::Sender<(String, String, Value)>,
+    pub(crate) plugin_updates: broadcast::Sender<(String, String, Value)>,
     pub(crate) model_updates: broadcast::Sender<(String, String, Value)>,
 }
 
 impl Manager {
     pub fn new(store: Store) -> Arc<Self> {
         Arc::new(Self {
+            claude: Default::default(),
             store,
             project_git: Default::default(),
             file_slots: tokio::sync::Semaphore::new(8),
@@ -52,6 +55,7 @@ impl Manager {
             notices: broadcast::channel(64).0,
             settings_updates: broadcast::channel(64).0,
             model_updates: broadcast::channel(64).0,
+            plugin_updates: broadcast::channel(64).0,
         })
     }
     pub fn changed(&self) {
@@ -180,6 +184,7 @@ impl Manager {
                     params["config"] = json!({"model_reasoning_effort":effort});
                 }
             }
+            crate::subagent_limit::apply_config(&mut params, &self.store.prompt_record(&format!("subagent-limit/{id}"))?)?;
             if let Some(window) = self.store.prompt_record(&format!("context/{id}"))?["resolved"].as_i64() {
                 params["config"]["model_context_window"] = json!(window);
             }
@@ -200,17 +205,24 @@ impl Manager {
                 let existing = config["config"]["developer_instructions"].as_str().unwrap_or("");
                 params["developerInstructions"] = json!(format!("{existing}\n\n{}\n\n{}", crate::session_context::INSTRUCTIONS, crate::ssh::AGENT_INSTRUCTIONS));
             }
+            if self.store.prompt_record(&format!("provider/{id}"))? == "claude" {
+                let claude = self.claude.get().context("Claude adapter unavailable")?;
+                let config = rpc.call("config/read",json!({"includeLayers":false})).await?;
+                claude.configure(&mut params, &config, true).await?;
+            }
             let instruction_sources;
             let mut active_turn=None;
             let mut subagents=crate::subagents::Activity::default();
             let thread=if let Some(thread)=&session.thread_id {
                 params["threadId"] = json!(thread);
                 let result=rpc.call("thread/resume",params).await?;
+                self.observe_plugins(id, &result)?;
                 instruction_sources=result["instructionSources"].clone();
                 self.store.model_effective(id, &crate::controls::start_settings(&result))?;
                 self.store.effective_sandbox(id, &result["sandbox"])?;
                 // Preserve the snapshot so a newly imported conversation has its existing history.
                 self.store.event(id,&json!({"method":"demodex/threadSnapshot","params":result}))?;
+                self.store.reconcile_target_snapshot(id, &result["thread"])?;
                 subagents.snapshot(&result["thread"]);
                 subagents.reconcile(&rpc).await;
                 active_turn=result["thread"]["turns"].as_array().and_then(|turns|turns.iter().rev().find(|t|t["status"]=="inProgress")).and_then(|t|t["id"].as_str()).map(str::to_string);
@@ -227,6 +239,7 @@ impl Manager {
                 params["environments"] = environments;
                 params["dynamicTools"] = crate::session_context::tools();
                 let result=rpc.call("thread/start",params).await?;
+                self.observe_plugins(id, &result)?;
                 instruction_sources=result["instructionSources"].clone();
                 self.store.model_effective(id, &crate::controls::start_settings(&result))?;
                 self.store.effective_sandbox(id, &result["sandbox"])?;
@@ -241,8 +254,10 @@ impl Manager {
             let live=Arc::new(Live {rpc,generation:generation.clone(),thread,turn:Mutex::new(active_turn),subagents:Mutex::new(subagents)});
             self.live.lock().await.insert(id.into(),live.clone());
             self.store.status(id,"connected",None)?; self.changed();
-            let manager=self.clone(); let id=id.to_string();
+            let manager=self.clone(); let event_id=id.to_string();
+            let requested_plugins = self.store.prompt_record(&format!("plugins/{id}"))?;
             tokio::spawn(async move {
+                let id = event_id;
                 let mut failure="app-server disconnected".to_string();
                 let mut buffered = Vec::with_capacity(128);
                 // Drain only events already queued; never delay an event to fill a batch.
@@ -261,9 +276,17 @@ impl Manager {
                 drop(sessions);
                 manager.changed();
             });
+            if !requested_plugins.is_null() {
+                let requested = crate::plugin_settings::disabled(&requested_plugins)?;
+                let observed = self.store.prompt_record(&format!("plugins-effective/{id}"))?;
+                if crate::plugin_settings::disabled(&observed)? != requested {
+                    self.apply_plugins(id, &requested).await?;
+                }
+            }
             Ok(())
         }.await;
         if let Err(error) = &outcome {
+            if let Some(live) = self.live.lock().await.remove(id) { live.rpc.close(); }
             self.store
                 .status(id, "disconnected", Some(&format!("{error:#}")))?;
             self.store.disconnected(id, &generation)?;
@@ -336,9 +359,11 @@ impl Manager {
             return Ok(());
         }
         let mut recorded = false;
-        if method == "item/completed" && message["params"]["item"]["type"] == "agentMessage" {
+        if method == "item/completed" && matches!(message["params"]["item"]["type"].as_str(), Some("agentMessage" | "imageView")) {
             let item = &message["params"]["item"];
-            if let (Some(item_id), Some(source)) = (item["id"].as_str(), item["text"].as_str()) {
+            let image_source = item["path"].as_str().filter(|path| !path.is_empty() && item["type"] == "imageView")
+                .map(|path| format!("[Image](<{}>)", demodex_protocol::links::image_view_destination(path)));
+            if let (Some(item_id), Some(source)) = (item["id"].as_str(), image_source.as_deref().or_else(|| item["text"].as_str())) {
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
                 let targets = self.store.get(id)?.targets;
                 let mut files = crate::message_files::prepare(source, &targets);
@@ -429,6 +454,10 @@ impl Manager {
                 }
                 "thread/settings/updated" => {
                     let settings = &message["params"]["threadSettings"];
+                    if settings["disabledPluginIds"].is_array() {
+                        self.observe_plugins(id, settings)?;
+                        let _ = self.plugin_updates.send((id.into(), live.generation.clone(), json!({"disabled":settings["disabledPluginIds"]})));
+                    }
                     if settings["model"].is_string() {
                         let accepted = crate::controls::effective_settings(settings);
                         self.store.model_effective(id, &accepted)?;
@@ -453,6 +482,21 @@ impl Manager {
         let content_only = content_delta(message);
         self.session_changed(id, !content_only);
         if runtime_changed { let _ = self.notices.send(demodex_protocol::Notice::Runtime); }
+        Ok(())
+    }
+
+    pub(crate) async fn reconcile_pending_targets(&self, id: &str) -> Result<()> {
+        let _settings = self.connecting.lock().await;
+        if !self.store.targets_pending(id)? || self.store.staged_targets(id)?.is_some() {
+            return Ok(());
+        }
+        let Ok(live) = self.runtime(id).await else { return Ok(()) };
+        let result = live.rpc.call("thread/read", json!({"threadId":live.thread,"includeTurns":false})).await?;
+        let sessions = self.live.lock().await;
+        if sessions.get(id).is_some_and(|current| current.generation == live.generation)
+            && self.store.reconcile_target_snapshot(id, &result["thread"])? {
+            self.session_changed(id, true);
+        }
         Ok(())
     }
 

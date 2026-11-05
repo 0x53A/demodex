@@ -65,7 +65,8 @@ pub fn message(props: &Props) -> Html {
             });
         })
     };
-    html! {<div class="rich-message">
+    let image_context = crate::images::MessageImageContext { item: props.item_id.clone(), revision: props.file_revision };
+    html! {<ContextProvider<crate::images::MessageImageContext> context={image_context}><div class="rich-message">
         {if *formatted && tree.1 {html!{<div class="markdown">{tree.0.clone()}</div>}}else{html!{<pre>{props.source.clone()}</pre>}}}
         {if tree.1 {html!{<div class="message-format-controls"><label><input type="checkbox" checked={*formatted} onchange={toggle}/>{"Format Markdown"}</label><button type="button" onclick={copy}>{if *copied {"Copied raw"} else {"Copy raw"}}</button>{if *copy_error {html!{<span role="status">{"Copy failed"}</span>}}else{Html::default()}}</div>}}else{Html::default()}}
         {if *formatted && !links.is_empty() {html!{<div class="message-destinations">{for links.iter().enumerate().map(|(index,link)| {
@@ -73,7 +74,7 @@ pub fn message(props: &Props) -> Html {
             html!{<div class="message-destination"><button type="button" class="message-link" onclick={Callback::from(move |_|open.emit(chosen.clone()))}><span class="message-link-icon" aria-hidden="true">{crate::links::icon(&link.kind)}</span><span class="message-link-index">{index+1}</span><span class="message-link-label">{&link.title}</span></button><div class="link-destination">{&link.destination}</div></div>}
         })}</div>}}else{Html::default()}}
         {if let Some(link)=(*selected).clone() {html!{<crate::links::LinkPopup {link} item={props.item_id.clone()} revision={props.file_revision} onclose={close}/>}}else{Html::default()}}
-    </div>}
+    </div></ContextProvider<crate::images::MessageImageContext>>}
 }
 
 #[function_component(Diagram)]

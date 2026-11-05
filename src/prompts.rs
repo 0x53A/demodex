@@ -263,7 +263,7 @@ impl crate::orchestrator::Orchestrator {
             return Ok(None);
         }
         let session = self.manager.store.get(id)?;
-        let (rpc, _) = self.runtime_rpc().await?;
+        let (rpc, _) = self.session_runtime_rpc(id).await?;
         if let Some(thread) = &session.thread_id {
             let state = rpc
                 .call(
@@ -287,15 +287,16 @@ impl crate::orchestrator::Orchestrator {
             .or_else(|| saved["effective"]["model"].as_str())
             .or_else(|| data["default_model"].as_str())
             .context("Missing selected model")?;
+        let default=if model.starts_with("claude-") {json!({"effective_text":crate::claude::BASE_INSTRUCTIONS})}else{data["defaults"][model].clone()};
         let (base, developer) = compose(
             &settings,
             model,
-            &data["defaults"][model],
+            &default,
             data["config"]["developer_instructions"]
                 .as_str()
                 .unwrap_or(""),
         )?;
-        let base = base.or_else(|| data["defaults"][model]["effective_text"].as_str().map(str::to_owned));
+        let base = base.or_else(|| default["effective_text"].as_str().map(str::to_owned));
         // New/inherited sessions can let Codex resolve its own default. Resuming
         // after an explicit base needs replacement text to clear the old override.
         ensure!(base.is_some() || (!legacy && !self.manager.store.prompt_record(&format!("applied/{id}"))?["base"].is_string()),
